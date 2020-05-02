@@ -1,26 +1,14 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "ui/twidget.h"
+#include "ui/rp_widget.h"
+#include "ui/effects/animations.h"
 
 class DragArea : public TWidget {
 	Q_OBJECT
@@ -37,7 +25,7 @@ public:
 
 	void hideFast();
 
-	void setDroppedCallback(base::lambda<void(const QMimeData *data)> callback) {
+	void setDroppedCallback(Fn<void(const QMimeData *data)> callback) {
 		_droppedCallback = std::move(callback);
 	}
 
@@ -70,10 +58,10 @@ private:
 	bool _hiding = false;
 	bool _in = false;
 	QPixmap _cache;
-	base::lambda<void(const QMimeData *data)> _droppedCallback;
+	Fn<void(const QMimeData *data)> _droppedCallback;
 
-	Animation _a_opacity;
-	Animation _a_in;
+	Ui::Animations::Simple _a_opacity;
+	Ui::Animations::Simple _a_in;
 
 	QString _text, _subtext;
 

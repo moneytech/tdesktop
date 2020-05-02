@@ -1,30 +1,22 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "base/type_traits.h"
 #include "base/observer.h"
+#include "base/call_delayed.h"
+#include "mtproto/mtproto_proxy_data.h"
 
-class LayerWidget;
-class BoxContent;
+class History;
+
+namespace Data {
+struct FileOrigin;
+} // namespace Data
 
 namespace InlineBots {
 namespace Layout {
@@ -33,124 +25,50 @@ class ItemBase;
 } // namespace InlineBots
 
 namespace App {
-namespace internal {
 
-void CallDelayed(int duration, base::lambda_once<void()> &&lambda);
-
-} // namespace internal
-
-template <int N, typename Lambda>
-inline void CallDelayed(int duration, base::lambda_internal::guard<N, Lambda> &&guarded) {
-	return internal::CallDelayed(duration, [guarded = std::move(guarded)] { guarded(); });
-}
-
-template <typename Pointer, typename ...PointersAndLambda>
-inline void CallDelayed(int duration, Pointer &&qobject, PointersAndLambda&&... qobjectsAndLambda) {
-	auto guarded = base::lambda_guarded(std::forward<Pointer>(qobject), std::forward<PointersAndLambda>(qobjectsAndLambda)...);
-	return CallDelayed(duration, std::move(guarded));
-}
-
-template <typename ...PointersAndLambda>
-inline base::lambda<void()> LambdaDelayed(int duration, PointersAndLambda&&... qobjectsAndLambda) {
-	auto guarded = base::lambda_guarded(std::forward<PointersAndLambda>(qobjectsAndLambda)...);
-	return [guarded = std::move(guarded), duration] {
-		internal::CallDelayed(duration, [guarded] { guarded(); });
+template <typename Guard, typename Lambda>
+[[nodiscard]] inline auto LambdaDelayed(int duration, Guard &&object, Lambda &&lambda) {
+	auto guarded = crl::guard(
+		std::forward<Guard>(object),
+		std::forward<Lambda>(lambda));
+	return [saved = std::move(guarded), duration] {
+		auto copy = saved;
+		base::call_delayed(duration, std::move(copy));
 	};
 }
 
-template <typename ...PointersAndLambda>
-inline base::lambda_once<void()> LambdaDelayedOnce(int duration, PointersAndLambda&&... qobjectsAndLambda) {
-	auto guarded = base::lambda_guarded(std::forward<PointersAndLambda>(qobjectsAndLambda)...);
-	return [guarded = std::move(guarded), duration]() mutable {
-		internal::CallDelayed(duration, [guarded = std::move(guarded)] { guarded(); });
-	};
-}
-
-void sendBotCommand(PeerData *peer, UserData *bot, const QString &cmd, MsgId replyTo = 0);
+void sendBotCommand(
+	PeerData *peer,
+	UserData *bot,
+	const QString &cmd,
+	MsgId replyTo = 0);
 bool insertBotCommand(const QString &cmd);
-void activateBotCommand(const HistoryItem *msg, int row, int col);
+void activateBotCommand(
+	not_null<const HistoryItem*> msg,
+	int row,
+	int column);
 void searchByHashtag(const QString &tag, PeerData *inPeer);
-void openPeerByName(const QString &username, MsgId msgId = ShowAtUnreadMsgId, const QString &startToken = QString());
-void joinGroupByHash(const QString &hash);
-void stickersBox(const QString &name);
-void openLocalUrl(const QString &url);
-bool forward(const PeerId &peer, ForwardWhatMessages what);
-void removeDialog(History *history);
 void showSettings();
-
-void activateClickHandler(ClickHandlerPtr handler, Qt::MouseButton button);
-
-void logOutDelayed();
 
 } // namespace App
 
 namespace Ui {
-namespace internal {
 
-void showBox(object_ptr<BoxContent> content, ShowLayerOptions options);
-
-} // namespace internal
-
-void showMediaPreview(DocumentData *document);
-void showMediaPreview(PhotoData *photo);
-void hideMediaPreview();
-
-template <typename BoxType>
-QPointer<BoxType> show(object_ptr<BoxType> content, ShowLayerOptions options = CloseOtherLayers) {
-	auto result = QPointer<BoxType>(content.data());
-	internal::showBox(std::move(content), options);
-	return result;
-}
-
-void hideLayer(bool fast = false);
-void hideSettingsAndLayer(bool fast = false);
-bool isLayerShown();
-bool isMediaViewShown();
-
-void repaintHistoryItem(const HistoryItem *item);
-void autoplayMediaInlineAsync(const FullMsgId &msgId);
+// Legacy global methods.
 
 void showPeerProfile(const PeerId &peer);
-inline void showPeerProfile(const PeerData *peer) {
-	showPeerProfile(peer->id);
-}
-inline void showPeerProfile(const History *history) {
-	showPeerProfile(history->peer->id);
-}
+void showPeerProfile(const PeerData *peer);
+void showPeerProfile(not_null<const History*> history);
 
-void showPeerOverview(const PeerId &peer, MediaOverviewType type);
-inline void showPeerOverview(const PeerData *peer, MediaOverviewType type) {
-	showPeerOverview(peer->id, type);
-}
-inline void showPeerOverview(const History *history, MediaOverviewType type) {
-	showPeerOverview(history->peer->id, type);
-}
+void showPeerHistory(const PeerId &peer, MsgId msgId);
+void showPeerHistoryAtItem(not_null<const HistoryItem*> item);
 
-enum class ShowWay {
-	ClearStack,
-	Forward,
-	Backward,
-};
-void showPeerHistory(const PeerId &peer, MsgId msgId, ShowWay way = ShowWay::ClearStack);
-inline void showPeerHistory(const PeerData *peer, MsgId msgId, ShowWay way = ShowWay::ClearStack) {
-	showPeerHistory(peer->id, msgId, way);
-}
-inline void showPeerHistory(const History *history, MsgId msgId, ShowWay way = ShowWay::ClearStack) {
-	showPeerHistory(history->peer->id, msgId, way);
-}
-inline void showPeerHistoryAtItem(const HistoryItem *item, ShowWay way = ShowWay::ClearStack) {
-	showPeerHistory(item->history()->peer->id, item->id, way);
-}
-void showPeerHistoryAsync(const PeerId &peer, MsgId msgId, ShowWay way = ShowWay::ClearStack);
+void showPeerHistory(const PeerData *peer, MsgId msgId);
+void showPeerHistory(not_null<const History*> history, MsgId msgId);
 inline void showChatsList() {
-	showPeerHistory(PeerId(0), 0, ShowWay::ClearStack);
-}
-inline void showChatsListAsync() {
-	showPeerHistoryAsync(PeerId(0), 0, ShowWay::ClearStack);
+	showPeerHistory(PeerId(0), 0);
 }
 PeerData *getPeerForMouseAction();
-
-bool hideWindowNoQuit();
 
 bool skipPaintEvent(QWidget *widget, QPaintEvent *event);
 
@@ -164,7 +82,6 @@ enum ClipStopperType {
 namespace Notify {
 
 void userIsBotChanged(UserData *user);
-void userIsContactChanged(UserData *user, bool fromThisApp = false);
 void botCommandsChanged(UserData *user);
 
 void inlineBotRequesting(bool requesting);
@@ -172,15 +89,7 @@ void replyMarkupUpdated(const HistoryItem *item);
 void inlineKeyboardMoved(const HistoryItem *item, int oldKeyboardTop, int newKeyboardTop);
 bool switchInlineBotButtonReceived(const QString &query, UserData *samePeerBot = nullptr, MsgId samePeerReplyTo = 0);
 
-void migrateUpdated(PeerData *peer);
-
-void historyItemLayoutChanged(const HistoryItem *item);
-void historyMuteUpdated(History *history);
-
-// handle pending resize() / paint() on history items
-void handlePendingHistoryUpdate();
 void unreadCounterUpdated();
-
 
 enum class ScreenCorner {
 	TopLeft     = 0,
@@ -205,32 +114,12 @@ inline bool IsTopCorner(ScreenCorner corner) {
 #define DeclareVar(Type, Name) DeclareRefVar(Type, Name) \
 	void Set##Name(const Type &Name);
 
-namespace Sandbox {
-
-bool CheckBetaVersionDir();
-void WorkingDirReady();
-
-void MainThreadTaskAdded();
-
-void start();
-bool started();
-void finish();
-
-uint64 UserTag();
-
-DeclareReadOnlyVar(QString, LangSystemISO);
-DeclareReadOnlyVar(int32, LangSystem);
-DeclareVar(QByteArray, LastCrashDump);
-DeclareVar(ProxyData, PreLaunchProxy);
-
-} // namespace Sandbox
-
 namespace Adaptive {
 
 enum class WindowLayout {
 	OneColumn,
-	SmallColumn,
 	Normal,
+	ThreeColumn,
 };
 
 enum class ChatLayout {
@@ -246,63 +135,21 @@ enum Flags {
 };
 } // namespace DebugLogging
 
-namespace Stickers {
-
-constexpr uint64 DefaultSetId = 0; // for backward compatibility
-constexpr uint64 CustomSetId = 0xFFFFFFFFFFFFFFFFULL;
-constexpr uint64 RecentSetId = 0xFFFFFFFFFFFFFFFEULL; // for emoji/stickers panel, should not appear in Sets
-constexpr uint64 NoneSetId = 0xFFFFFFFFFFFFFFFDULL; // for emoji/stickers panel, should not appear in Sets
-constexpr uint64 CloudRecentSetId = 0xFFFFFFFFFFFFFFFCULL; // for cloud-stored recent stickers
-constexpr uint64 FeaturedSetId = 0xFFFFFFFFFFFFFFFBULL; // for emoji/stickers panel, should not appear in Sets
-struct Set {
-	Set(uint64 id, uint64 access, const QString &title, const QString &shortName, int32 count, int32 hash, MTPDstickerSet::Flags flags)
-		: id(id)
-		, access(access)
-		, title(title)
-		, shortName(shortName)
-		, count(count)
-		, hash(hash)
-		, flags(flags) {
-	}
-	uint64 id, access;
-	QString title, shortName;
-	int32 count, hash;
-	MTPDstickerSet::Flags flags;
-	StickerPack stickers;
-	StickersByEmojiMap emoji;
-};
-using Sets = QMap<uint64, Set>;
-using Order = QList<uint64>;
-
-inline MTPInputStickerSet inputSetId(const Set &set) {
-	if (set.id && set.access) {
-		return MTP_inputStickerSetID(MTP_long(set.id), MTP_long(set.access));
-	}
-	return MTP_inputStickerSetShortName(MTP_string(set.shortName));
-}
-
-Set *feedSet(const MTPDstickerSet &set);
-
-} // namespace Stickers
-
 namespace Global {
 
 bool started();
 void start();
 void finish();
 
-DeclareRefVar(SingleQueuedInvokation, HandleHistoryUpdate);
 DeclareRefVar(SingleQueuedInvokation, HandleUnreadCounterUpdate);
 DeclareRefVar(SingleQueuedInvokation, HandleDelayedPeerUpdates);
-DeclareRefVar(SingleQueuedInvokation, HandleObservables);
 
 DeclareVar(Adaptive::WindowLayout, AdaptiveWindowLayout);
 DeclareVar(Adaptive::ChatLayout, AdaptiveChatLayout);
 DeclareVar(bool, AdaptiveForWide);
 DeclareRefVar(base::Observable<void>, AdaptiveChanged);
 
-DeclareVar(bool, DialogsModeEnabled);
-DeclareVar(Dialogs::Mode, DialogsMode);
+DeclareVar(bool, DialogsFiltersEnabled);
 DeclareVar(bool, ModerateModeEnabled);
 
 DeclareVar(bool, ScreenIsLocked);
@@ -328,63 +175,54 @@ DeclareVar(int32, OnlineFocusTimeout); // not from config
 DeclareVar(int32, OnlineCloudTimeout);
 DeclareVar(int32, NotifyCloudDelay);
 DeclareVar(int32, NotifyDefaultDelay);
-DeclareVar(int32, ChatBigSize);
 DeclareVar(int32, PushChatPeriod);
 DeclareVar(int32, PushChatLimit);
 DeclareVar(int32, SavedGifsLimit);
 DeclareVar(int32, EditTimeLimit);
+DeclareVar(int32, RevokeTimeLimit);
+DeclareVar(int32, RevokePrivateTimeLimit);
+DeclareVar(bool, RevokePrivateInbox);
 DeclareVar(int32, StickersRecentLimit);
+DeclareVar(int32, StickersFavedLimit);
 DeclareVar(int32, PinnedDialogsCountMax);
+DeclareVar(int32, PinnedDialogsInFolderMax);
 DeclareVar(QString, InternalLinksDomain);
+DeclareVar(int32, ChannelsReadMediaPeriod);
 DeclareVar(int32, CallReceiveTimeoutMs);
 DeclareVar(int32, CallRingTimeoutMs);
 DeclareVar(int32, CallConnectTimeoutMs);
 DeclareVar(int32, CallPacketTimeoutMs);
+DeclareVar(int32, WebFileDcId);
+DeclareVar(QString, TxtDomainString);
 DeclareVar(bool, PhoneCallsEnabled);
+DeclareVar(bool, BlockedMode);
+DeclareVar(int32, CaptionLengthMax);
 DeclareRefVar(base::Observable<void>, PhoneCallsEnabledChanged);
 
 typedef QMap<PeerId, MsgId> HiddenPinnedMessagesMap;
 DeclareVar(HiddenPinnedMessagesMap, HiddenPinnedMessages);
-
-typedef OrderedSet<HistoryItem*> PendingItemsMap;
-DeclareRefVar(PendingItemsMap, PendingRepaintItems);
-
-DeclareVar(Stickers::Sets, StickerSets);
-DeclareVar(Stickers::Order, StickerSetsOrder);
-DeclareVar(TimeMs, LastStickersUpdate);
-DeclareVar(TimeMs, LastRecentStickersUpdate);
-DeclareVar(Stickers::Order, FeaturedStickerSetsOrder);
-DeclareVar(int, FeaturedStickerSetsUnreadCount);
-DeclareRefVar(base::Observable<void>, FeaturedStickerSetsUnreadCountChanged);
-DeclareVar(TimeMs, LastFeaturedStickersUpdate);
-DeclareVar(Stickers::Order, ArchivedStickerSetsOrder);
-
-typedef QMap<uint64, QPixmap> CircleMasksMap;
-DeclareRefVar(CircleMasksMap, CircleMasks);
-
-DeclareRefVar(base::Observable<void>, SelfChanged);
 
 DeclareVar(bool, AskDownloadPath);
 DeclareVar(QString, DownloadPath);
 DeclareVar(QByteArray, DownloadPathBookmark);
 DeclareRefVar(base::Observable<void>, DownloadPathChanged);
 
+DeclareVar(bool, VoiceMsgPlaybackDoubled);
 DeclareVar(bool, SoundNotify);
 DeclareVar(bool, DesktopNotify);
 DeclareVar(bool, RestoreSoundNotifyFromTray);
-DeclareVar(bool, IncludeMuted);
 DeclareVar(DBINotifyView, NotifyView);
 DeclareVar(bool, NativeNotifications);
 DeclareVar(int, NotificationsCount);
 DeclareVar(Notify::ScreenCorner, NotificationsCorner);
 DeclareVar(bool, NotificationsDemoIsShown);
 
-DeclareVar(DBIConnectionType, ConnectionType);
 DeclareVar(bool, TryIPv6);
-DeclareVar(ProxyData, ConnectionProxy);
+DeclareVar(std::vector<MTP::ProxyData>, ProxiesList);
+DeclareVar(MTP::ProxyData, SelectedProxy);
+DeclareVar(MTP::ProxyData::Settings, ProxySettings);
+DeclareVar(bool, UseProxyForCalls);
 DeclareRefVar(base::Observable<void>, ConnectionTypeChanged);
-
-DeclareRefVar(base::Observable<void>, ChooseCustomLang);
 
 DeclareVar(int, AutoLock);
 DeclareVar(bool, LocalPasscode);
@@ -392,9 +230,14 @@ DeclareRefVar(base::Observable<void>, LocalPasscodeChanged);
 
 DeclareRefVar(base::Variable<DBIWorkMode>, WorkMode);
 
-DeclareRefVar(base::Observable<HistoryItem*>, ItemRemoved);
 DeclareRefVar(base::Observable<void>, UnreadCounterUpdate);
 DeclareRefVar(base::Observable<void>, PeerChooseCancel);
+
+DeclareVar(QString, CallOutputDeviceID);
+DeclareVar(QString, CallInputDeviceID);
+DeclareVar(int, CallOutputVolume);
+DeclareVar(int, CallInputVolume);
+DeclareVar(bool, CallAudioDuckingEnabled);
 
 } // namespace Global
 
@@ -408,16 +251,17 @@ inline bool OneColumn() {
 	return Global::AdaptiveWindowLayout() == WindowLayout::OneColumn;
 }
 
-inline bool SmallColumn() {
-	return Global::AdaptiveWindowLayout() == WindowLayout::SmallColumn;
-}
-
 inline bool Normal() {
 	return Global::AdaptiveWindowLayout() == WindowLayout::Normal;
 }
 
+inline bool ThreeColumn() {
+	return Global::AdaptiveWindowLayout() == WindowLayout::ThreeColumn;
+}
+
 inline bool ChatNormal() {
-	return !Global::AdaptiveForWide() || (Global::AdaptiveChatLayout() == ChatLayout::Normal);
+	return !Global::AdaptiveForWide()
+		|| (Global::AdaptiveChatLayout() == ChatLayout::Normal);
 }
 
 inline bool ChatWide() {

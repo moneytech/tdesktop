@@ -1,24 +1,14 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/win/windows_dlls.h"
+
+#include <VersionHelpers.h>
+#include <QtCore/QSysInfo>
 
 namespace Platform {
 namespace Dlls {
@@ -55,12 +45,22 @@ f_WindowsCreateStringReference WindowsCreateStringReference;
 f_WindowsDeleteString WindowsDeleteString;
 f_PropVariantToString PropVariantToString;
 f_PSStringFromPropertyKey PSStringFromPropertyKey;
+f_DwmIsCompositionEnabled DwmIsCompositionEnabled;
+f_RmStartSession RmStartSession;
+f_RmRegisterResources RmRegisterResources;
+f_RmGetList RmGetList;
+f_RmShutdown RmShutdown;
+f_RmEndSession RmEndSession;
+f_GetProcessMemoryInfo GetProcessMemoryInfo;
 
 HINSTANCE LibUxTheme;
 HINSTANCE LibShell32;
 HINSTANCE LibWtsApi32;
 HINSTANCE LibPropSys;
 HINSTANCE LibComBase;
+HINSTANCE LibDwmApi;
+HINSTANCE LibRstrtMgr;
+HINSTANCE LibPsApi;
 
 void start() {
 	init();
@@ -74,15 +74,10 @@ void start() {
 	load(LibShell32, "SHChangeNotify", SHChangeNotify);
 	load(LibShell32, "SetCurrentProcessExplicitAppUserModelID", SetCurrentProcessExplicitAppUserModelID);
 
-	if (cBetaVersion() == 10020001 && SHChangeNotify) { // Temp - app icon was changed
-		SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
-	}
-
 	LibUxTheme = LoadLibrary(L"UXTHEME.DLL");
 	load(LibUxTheme, "SetWindowTheme", SetWindowTheme);
 
-	auto version = QSysInfo::windowsVersion();
-	if (version >= QSysInfo::WV_VISTA) {
+	if (IsWindowsVistaOrGreater()) {
 		LibWtsApi32 = LoadLibrary(L"WTSAPI32.DLL");
 		load(LibWtsApi32, "WTSRegisterSessionNotification", WTSRegisterSessionNotification);
 		load(LibWtsApi32, "WTSUnRegisterSessionNotification", WTSUnRegisterSessionNotification);
@@ -91,13 +86,26 @@ void start() {
 		load(LibPropSys, "PropVariantToString", PropVariantToString);
 		load(LibPropSys, "PSStringFromPropertyKey", PSStringFromPropertyKey);
 
-		if (version >= QSysInfo::WV_WINDOWS8) {
+		if (IsWindows8OrGreater()) {
 			LibComBase = LoadLibrary(L"COMBASE.DLL");
 			load(LibComBase, "RoGetActivationFactory", RoGetActivationFactory);
 			load(LibComBase, "WindowsCreateStringReference", WindowsCreateStringReference);
 			load(LibComBase, "WindowsDeleteString", WindowsDeleteString);
 		}
+
+		LibDwmApi = LoadLibrary(L"DWMAPI.DLL");
+		load(LibDwmApi, "DwmIsCompositionEnabled", DwmIsCompositionEnabled);
+
+		LibRstrtMgr = LoadLibrary(L"RSTRTMGR.DLL");
+		load(LibRstrtMgr, "RmStartSession", RmStartSession);
+		load(LibRstrtMgr, "RmRegisterResources", RmRegisterResources);
+		load(LibRstrtMgr, "RmGetList", RmGetList);
+		load(LibRstrtMgr, "RmShutdown", RmShutdown);
+		load(LibRstrtMgr, "RmEndSession", RmEndSession);
 	}
+
+	LibPsApi = LoadLibrary(L"PSAPI.DLL");
+	load(LibPsApi, "GetProcessMemoryInfo", GetProcessMemoryInfo);
 }
 
 } // namespace Dlls

@@ -1,22 +1,9 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
@@ -24,26 +11,60 @@ namespace Dialogs {
 
 class Row;
 class FakeRow;
+class BasicRow;
 
 namespace Layout {
 
-const style::icon *ChatTypeIcon(PeerData *peer, bool active, bool selected);
+const style::icon *ChatTypeIcon(
+	not_null<PeerData*> peer,
+	bool active,
+	bool selected);
+//const style::icon *FeedTypeIcon( // #feed
+//	not_null<Data::Feed*> feed,
+//	bool active,
+//	bool selected);
 
 class RowPainter {
 public:
-	static void paint(Painter &p, const Row *row, int fullWidth, bool active, bool selected, bool onlyBackground, TimeMs ms);
-	static void paint(Painter &p, const FakeRow *row, int fullWidth, bool active, bool selected, bool onlyBackground, TimeMs ms);
-	static QRect sendActionAnimationRect(int animationWidth, int animationHeight, int fullWidth, bool textUpdated);
+	static void paint(
+		Painter &p,
+		not_null<const Row*> row,
+		FilterId filterId,
+		int fullWidth,
+		bool active,
+		bool selected,
+		crl::time ms);
+	static void paint(
+		Painter &p,
+		not_null<const FakeRow*> row,
+		int fullWidth,
+		bool active,
+		bool selected,
+		crl::time ms,
+		bool displayUnreadInfo);
+	static QRect sendActionAnimationRect(
+		int animationWidth,
+		int animationHeight,
+		int fullWidth,
+		bool textUpdated);
 
 };
 
-void paintImportantSwitch(Painter &p, Mode current, int fullWidth, bool selected, bool onlyBackground);
+void PaintCollapsedRow(
+	Painter &p,
+	const BasicRow &row,
+	Data::Folder *folder,
+	const QString &text,
+	int unread,
+	int fullWidth,
+	bool selected);
 
 enum UnreadBadgeSize {
 	UnreadBadgeInDialogs = 0,
 	UnreadBadgeInHistoryToDown,
 	UnreadBadgeInStickersPanel,
 	UnreadBadgeInStickersBox,
+	UnreadBadgeInTouchBar,
 
 	UnreadBadgeSizesCount
 };
@@ -60,7 +81,14 @@ struct UnreadBadgeStyle {
 	UnreadBadgeSize sizeId;
 	style::font font;
 };
-void paintUnreadCount(Painter &p, const QString &text, int x, int y, const UnreadBadgeStyle &st, int *outUnreadWidth = nullptr);
+void paintUnreadCount(
+	Painter &p,
+	const QString &t,
+	int x,
+	int y,
+	const UnreadBadgeStyle &st,
+	int *outUnreadWidth = nullptr,
+	int allowDigits = 0);
 
 void clearUnreadBadgesCache();
 

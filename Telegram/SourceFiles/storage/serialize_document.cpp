@@ -1,26 +1,17 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "storage/serialize_document.h"
 
 #include "storage/serialize_common.h"
+#include "chat_helpers/stickers.h"
+#include "data/data_session.h"
+#include "ui/image/image.h"
+#include "main/main_session.h"
 
 namespace {
 
@@ -35,9 +26,10 @@ enum StickerSetType {
 namespace Serialize {
 
 void Document::writeToStream(QDataStream &stream, DocumentData *document) {
+	const auto version = 0;
 	stream << quint64(document->id) << quint64(document->_access) << qint32(document->date);
-	stream << qint32(document->_version);
-	stream << document->name << document->mime << qint32(document->_dc) << qint32(document->size);
+	stream << document->_fileReference << qint32(version);
+	stream << document->filename() << document->mimeString() << qint32(document->_dc) << qint32(document->size);
 	stream << qint32(document->dimensions.width()) << qint32(document->dimensions.height());
 	stream << qint32(document->type);
 	if (auto sticker = document->sticker()) {
@@ -56,8 +48,12 @@ void Document::writeToStream(QDataStream &stream, DocumentData *document) {
 		}
 		writeStorageImageLocation(stream, document->sticker()->loc);
 	} else {
-		stream << qint32(document->duration());
-		writeStorageImageLocation(stream, document->thumb->location());
+		stream << qint32(document->getDuration());
+		if (const auto thumb = document->thumbnail()) {
+			writeStorageImageLocation(stream, thumb->location());
+		} else {
+			writeStorageImageLocation(stream, StorageImageLocation());
+		}
 	}
 }
 
@@ -65,8 +61,12 @@ DocumentData *Document::readFromStreamHelper(int streamAppVersion, QDataStream &
 	quint64 id, access;
 	QString name, mime;
 	qint32 date, dc, size, width, height, type, version;
+	QByteArray fileReference;
 	stream >> id >> access >> date;
 	if (streamAppVersion >= 9061) {
+		if (streamAppVersion >= 1003013) {
+			stream >> fileReference;
+		}
 		stream >> version;
 	} else {
 		version = 0;
@@ -81,18 +81,21 @@ DocumentData *Document::readFromStreamHelper(int streamAppVersion, QDataStream &
 	}
 
 	qint32 duration = -1;
-	StorageImageLocation thumb;
+	std::optional<StorageImageLocation> thumb;
 	if (type == StickerDocument) {
 		QString alt;
 		qint32 typeOfSet;
 		stream >> alt >> typeOfSet;
 
-		thumb = readStorageImageLocation(stream);
+		thumb = readStorageImageLocation(streamAppVersion, stream);
 
 		if (typeOfSet == StickerSetTypeEmpty) {
 			attributes.push_back(MTP_documentAttributeSticker(MTP_flags(0), MTP_string(alt), MTP_inputStickerSetEmpty(), MTPMaskCoords()));
 		} else if (info) {
-			if (info->setId == Stickers::DefaultSetId || info->setId == Stickers::CloudRecentSetId || info->setId == Stickers::CustomSetId) {
+			if (info->setId == Stickers::DefaultSetId
+				|| info->setId == Stickers::CloudRecentSetId
+				|| info->setId == Stickers::FavedSetId
+				|| info->setId == Stickers::CustomSetId) {
 				typeOfSet = StickerSetTypeEmpty;
 			}
 
@@ -114,7 +117,7 @@ DocumentData *Document::readFromStreamHelper(int streamAppVersion, QDataStream &
 		if (type == AnimatedDocument) {
 			attributes.push_back(MTP_documentAttributeAnimated());
 		}
-		thumb = readStorageImageLocation(stream);
+		thumb = readStorageImageLocation(streamAppVersion, stream);
 	}
 	if (width > 0 && height > 0) {
 		if (duration >= 0) {
@@ -128,10 +131,26 @@ DocumentData *Document::readFromStreamHelper(int streamAppVersion, QDataStream &
 		}
 	}
 
-	if (!dc && !access) {
+	if ((!dc && !access)
+		|| !thumb
+		|| (thumb->valid() && !thumb->file().isDocumentThumbnail())) {
+		stream.setStatus(QDataStream::ReadCorruptData);
+		// We can't convert legacy thumbnail location to modern, because
+		// size letter ('s' or 'm') is lost, it was not saved in legacy.
 		return nullptr;
 	}
-	return App::documentSet(id, nullptr, access, version, date, attributes, mime, thumb.isNull() ? ImagePtr() : ImagePtr(thumb), dc, size, thumb);
+	return Auth().data().document(
+		id,
+		access,
+		fileReference,
+		date,
+		attributes,
+		mime,
+		ImagePtr(),
+		Images::Create(*thumb),
+		dc,
+		size,
+		*thumb);
 }
 
 DocumentData *Document::readStickerFromStream(int streamAppVersion, QDataStream &stream, const StickerSetInfo &info) {
@@ -148,7 +167,7 @@ int Document::sizeInStream(DocumentData *document) {
 	// id + access + date + version
 	result += sizeof(quint64) + sizeof(quint64) + sizeof(qint32) + sizeof(qint32);
 	// + namelen + name + mimelen + mime + dc + size
-	result += stringSize(document->name) + stringSize(document->mime) + sizeof(qint32) + sizeof(qint32);
+	result += stringSize(document->filename()) + stringSize(document->mimeString()) + sizeof(qint32) + sizeof(qint32);
 	// + width + height
 	result += sizeof(qint32) + sizeof(qint32);
 	// + type
@@ -157,13 +176,17 @@ int Document::sizeInStream(DocumentData *document) {
 	if (auto sticker = document->sticker()) { // type == StickerDocument
 		// + altlen + alt + type-of-set
 		result += stringSize(sticker->alt) + sizeof(qint32);
-		// + thumb loc
-		result += Serialize::storageImageLocationSize();
+		// + sticker loc
+		result += Serialize::storageImageLocationSize(document->sticker()->loc);
 	} else {
 		// + duration
 		result += sizeof(qint32);
 		// + thumb loc
-		result += Serialize::storageImageLocationSize();
+		if (const auto thumb = document->thumbnail()) {
+			result += Serialize::storageImageLocationSize(thumb->location());
+		} else {
+			result += Serialize::storageImageLocationSize(StorageImageLocation());
+		}
 	}
 
 	return result;

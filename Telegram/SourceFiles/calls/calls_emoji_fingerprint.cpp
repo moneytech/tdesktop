@@ -1,31 +1,19 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "calls/calls_emoji_fingerprint.h"
 
 #include "calls/calls_call.h"
+#include "ui/emoji_config.h"
 
 namespace Calls {
 namespace {
 
-ushort Data[] = {
+const ushort Data[] = {
 0xd83d, 0xde09, 0xd83d, 0xde0d, 0xd83d, 0xde1b, 0xd83d, 0xde2d, 0xd83d, 0xde31, 0xd83d, 0xde21,
 0xd83d, 0xde0e, 0xd83d, 0xde34, 0xd83d, 0xde35, 0xd83d, 0xde08, 0xd83d, 0xde2c, 0xd83d, 0xde07,
 0xd83d, 0xde0f, 0xd83d, 0xdc6e, 0xd83d, 0xdc77, 0xd83d, 0xdc82, 0xd83d, 0xdc76, 0xd83d, 0xdc68,
@@ -82,7 +70,7 @@ ushort Data[] = {
 0x0030, 0x20e3, 0xd83d, 0xdd1f, 0x2757, 0x2753, 0x2665, 0x2666, 0xd83d, 0xdcaf, 0xd83d, 0xdd17,
 0xd83d, 0xdd31, 0xd83d, 0xdd34, 0xd83d, 0xdd35, 0xd83d, 0xdd36, 0xd83d, 0xdd37 };
 
-ushort Offsets[] = {
+const ushort Offsets[] = {
 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22,
 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46,
 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70,
@@ -112,7 +100,7 @@ ushort Offsets[] = {
 620, 622, 624, 626, 628, 630, 632, 634, 636, 638, 640, 641,
 642, 643, 644, 646, 648, 650, 652, 654, 656, 658 };
 
-uint64 ComputeEmojiIndex(base::const_byte_span bytes) {
+uint64 ComputeEmojiIndex(bytes::const_span bytes) {
 	Expects(bytes.size() == 8);
 	return ((gsl::to_integer<uint64>(bytes[0]) & 0x7F) << 56)
 		| (gsl::to_integer<uint64>(bytes[1]) << 48)
@@ -126,15 +114,17 @@ uint64 ComputeEmojiIndex(base::const_byte_span bytes) {
 
 } // namespace
 
-std::vector<EmojiPtr> ComputeEmojiFingerprint(gsl::not_null<Call*> call) {
+std::vector<EmojiPtr> ComputeEmojiFingerprint(not_null<Call*> call) {
 	auto result = std::vector<EmojiPtr>();
 	constexpr auto EmojiCount = (base::array_size(Offsets) - 1);
 	for (auto index = 0; index != EmojiCount; ++index) {
 		auto offset = Offsets[index];
 		auto size = Offsets[index + 1] - offset;
-		auto string = QString::fromRawData(reinterpret_cast<QChar*>(Data + offset), size);
+		auto string = QString::fromRawData(
+			reinterpret_cast<const QChar*>(Data + offset),
+			size);
 		auto emoji = Ui::Emoji::Find(string);
-		t_assert(emoji != nullptr);
+		Assert(emoji != nullptr);
 	}
 	if (call->isKeyShaForFingerprintReady()) {
 		auto sha256 = call->getKeyShaForFingerprint();
@@ -144,9 +134,11 @@ std::vector<EmojiPtr> ComputeEmojiFingerprint(gsl::not_null<Call*> call) {
 			auto index = value % EmojiCount;
 			auto offset = Offsets[index];
 			auto size = Offsets[index + 1] - offset;
-			auto string = QString::fromRawData(reinterpret_cast<QChar*>(Data + offset), size);
+			auto string = QString::fromRawData(
+				reinterpret_cast<const QChar*>(Data + offset),
+				size);
 			auto emoji = Ui::Emoji::Find(string);
-			t_assert(emoji != nullptr);
+			Assert(emoji != nullptr);
 			result.push_back(emoji);
 		}
 	}

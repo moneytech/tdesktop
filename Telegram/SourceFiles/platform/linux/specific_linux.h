@@ -1,92 +1,81 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include <execinfo.h>
+#include "platform/platform_specific.h"
+
 #include <signal.h>
+
+namespace Data {
+class LocationPoint;
+} // namespace Data
 
 namespace Platform {
 
 inline void SetWatchingMediaKeys(bool watching) {
 }
 
-inline void StartTranslucentPaint(QPainter &p, QPaintEvent *e) {
+bool InSandbox();
+bool InSnap();
+bool InAppImage();
+bool IsStaticBinary();
+bool IsGtkFileDialogForced();
+
+bool IsXDGDesktopPortalPresent();
+bool UseXDGDesktopPortal();
+
+QString ProcessNameByPID(const QString &pid);
+QString RealExecutablePath(int argc, char *argv[]);
+QString CurrentExecutablePath(int argc, char *argv[]);
+
+QString AppRuntimeDirectory();
+QString SingleInstanceLocalServerName(const QString &hash);
+
+QString GetLauncherBasename();
+QString GetLauncherFilename();
+
+QString GetIconName();
+
+inline void IgnoreApplicationActivationRightNow() {
 }
 
-inline void InitOnTopPanel(QWidget *panel) {
-}
-
-inline void DeInitOnTopPanel(QWidget *panel) {
-}
-
-inline void ReInitOnTopPanel(QWidget *panel) {
-}
+void FallbackFontConfigCheckBegin();
+void FallbackFontConfigCheckEnd();
 
 } // namespace Platform
 
-inline QString psServerPrefix() {
-    return qsl("/tmp/");
-}
 inline void psCheckLocalSocket(const QString &serverName) {
-    QFile address(serverName);
+	QFile address(serverName);
 	if (address.exists()) {
 		address.remove();
 	}
 }
 
 void psWriteDump();
-QString psPrepareCrashDump(const QByteArray &crashdump, QString dumpfile);
 
 void psDeleteDir(const QString &dir);
-
-void psUserActionDone();
-bool psIdleSupported();
-TimeMs psIdleTime();
 
 QStringList psInitLogs();
 void psClearInitLogs();
 
 void psActivateProcess(uint64 pid = 0);
 QString psLocalServerPrefix();
-QString psCurrentCountry();
-QString psCurrentLanguage();
 QString psAppDataPath();
-QString psDownloadPath();
-QString psCurrentExeDirectory(int argc, char *argv[]);
-QString psCurrentExeName(int argc, char *argv[]);
 void psAutoStart(bool start, bool silent = false);
 void psSendToMenu(bool send, bool silent = false);
 
 QRect psDesktopRect();
-void psShowOverAll(QWidget *w, bool canFocus = true);
-void psBringToBack(QWidget *w);
 
 int psCleanup();
 int psFixPrevious();
 
-void psExecUpdater();
-void psExecTelegram(const QString &arg = QString());
-
-QAbstractNativeEventFilter *psNativeEventFilter();
-
 void psNewVersion();
 
-void psUpdateOverlayed(QWidget *widget);
 inline QByteArray psDownloadPathBookmark(const QString &path) {
 	return QByteArray();
 }
@@ -119,4 +108,4 @@ public:
 
 bool linuxMoveFile(const char *from, const char *to);
 
-bool psLaunchMaps(const LocationCoords &coords);
+bool psLaunchMaps(const Data::LocationPoint &point);

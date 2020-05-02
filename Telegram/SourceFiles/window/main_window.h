@@ -1,45 +1,52 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "window/window_title.h"
+#include "ui/rp_widget.h"
+#include "base/timer.h"
+#include "base/object_ptr.h"
 
-class MediaView;
+#include <QtWidgets/QSystemTrayIcon>
+
+namespace Main {
+class Account;
+} // namespace Main
+
+namespace Ui {
+class BoxContent;
+} // namespace Ui
 
 namespace Window {
 
+class Controller;
+class SessionController;
 class TitleWidget;
+struct TermsLock;
 
 QImage LoadLogo();
 QImage LoadLogoNoMargin();
-QIcon CreateIcon();
+QIcon CreateIcon(Main::Account *account = nullptr);
+void ConvertIconToBlack(QImage &image);
 
-class MainWindow : public QWidget, protected base::Subscriber {
+class MainWindow : public Ui::RpWidget, protected base::Subscriber {
 	Q_OBJECT
 
 public:
-	MainWindow();
+	explicit MainWindow(not_null<Controller*> controller);
+
+	Window::Controller &controller() const {
+		return *_controller;
+	}
+	Main::Account &account() const;
+	Window::SessionController *sessionController() const;
 
 	bool hideNoQuit();
-	void hideMediaview();
 
 	void init();
 	HitTestResult hitTest(const QPoint &p) const;
@@ -59,36 +66,39 @@ public:
 		return _titleText;
 	}
 
-	void reActivateWindow() {
-		onReActivate();
-		QTimer::singleShot(200, this, SLOT(onReActivate()));
-	}
-
-	void showPhoto(const PhotoOpenClickHandler *lnk, HistoryItem *item = 0);
-	void showPhoto(PhotoData *photo, HistoryItem *item);
-	void showPhoto(PhotoData *photo, PeerData *item);
-	void showDocument(DocumentData *doc, HistoryItem *item);
-	bool ui_isMediaViewShown();
-
-	QWidget *filedialogParent();
+	void reActivateWindow();
 
 	void showRightColumn(object_ptr<TWidget> widget);
-	bool canExtendWidthBy(int addToWidth);
-	void tryToExtendWidthBy(int addToWidth);
+	int maximalExtendBy() const;
+	bool canExtendNoMove(int extendBy) const;
+
+	// Returns how much could the window get extended.
+	int tryToExtendWidthBy(int addToWidth);
 
 	virtual void updateTrayMenu(bool force = false) {
 	}
 
-	// TODO: rewrite using base::Observable
-	void documentUpdated(DocumentData *doc);
-	virtual void changingMsgId(HistoryItem *row, MsgId newId);
-
 	virtual ~MainWindow();
 
-	TWidget *bodyWidget() {
+	Ui::RpWidget *bodyWidget() {
 		return _body.data();
 	}
-	virtual PeerData *ui_getPeerForMouseAction();
+
+	void launchDrag(std::unique_ptr<QMimeData> data);
+	base::Observable<void> &dragFinished() {
+		return _dragFinished;
+	}
+
+	rpl::producer<> leaveEvents() const;
+
+	virtual void updateWindowIcon();
+
+	void clearWidgets();
+
+	int computeMinWidth() const;
+	int computeMinHeight() const;
+
+	virtual void updateControlsGeometry();
 
 public slots:
 	bool minimizeToTray();
@@ -98,8 +108,11 @@ public slots:
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;
+	void leaveEventHook(QEvent *e) override;
 
 	void savePosition(Qt::WindowState state = Qt::WindowActive);
+	void handleStateChanged(Qt::WindowState state);
+	void handleActiveChanged();
 
 	virtual void initHook() {
 	}
@@ -107,11 +120,11 @@ protected:
 	virtual void updateIsActiveHook() {
 	}
 
-	void clearWidgets();
-	virtual void clearWidgetsHook() {
+	virtual void handleActiveChangedHook() {
 	}
 
-	virtual void updateWindowIcon();
+	virtual void clearWidgetsHook() {
+	}
 
 	virtual void stateChangedHook(Qt::WindowState state) {
 	}
@@ -129,6 +142,8 @@ protected:
 	virtual void updateGlobalMenuHook() {
 	}
 
+	virtual void initTrayMenuHook() {
+	}
 	virtual bool hasTrayIcon() const {
 		return false;
 	}
@@ -138,23 +153,20 @@ protected:
 	virtual void workmodeUpdated(DBIWorkMode mode) {
 	}
 
-	virtual void updateControlsGeometry();
+	virtual void createGlobalMenu() {
+	}
+	virtual void initShadows() {
+	}
+	virtual void firstShadowsUpdate() {
+	}
 
 	// This one is overriden in Windows for historical reasons.
 	virtual int32 screenNameChecksum(const QString &name) const;
 
 	void setPositionInited();
-
-	void createMediaView();
-
-private slots:
-	void savePositionByTimer() {
-		savePosition();
-	}
-	void onReActivate();
-	void updateIsActiveByTimer() {
-		updateIsActive(0);
-	}
+	void attachToTrayIcon(not_null<QSystemTrayIcon*> icon);
+	virtual void handleTrayIconActication(
+		QSystemTrayIcon::ActivationReason reason) = 0;
 
 private:
 	void updatePalette();
@@ -162,21 +174,30 @@ private:
 	void initSize();
 
 	bool computeIsActive() const;
+	void checkLockByTerms();
+	void showTermsDecline();
+	void showTermsDelete();
 
-	object_ptr<QTimer> _positionUpdatedTimer;
+	not_null<Window::Controller*> _controller;
+
+	base::Timer _positionUpdatedTimer;
 	bool _positionInited = false;
 
 	object_ptr<TitleWidget> _title = { nullptr };
-	object_ptr<TWidget> _body;
+	object_ptr<Ui::RpWidget> _outdated;
+	object_ptr<Ui::RpWidget> _body;
 	object_ptr<TWidget> _rightColumn = { nullptr };
+	QPointer<Ui::BoxContent> _termsBox;
 
 	QIcon _icon;
+	bool _usingSupportIcon = false;
 	QString _titleText;
 
-	object_ptr<QTimer> _isActiveTimer;
 	bool _isActive = false;
+	base::Timer _isActiveTimer;
 
-	object_ptr<MediaView> _mediaView = { nullptr };
+	base::Observable<void> _dragFinished;
+	rpl::event_stream<> _leaveEvents;
 
 };
 

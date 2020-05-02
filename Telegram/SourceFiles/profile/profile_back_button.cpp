@@ -1,29 +1,18 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "profile/profile_back_button.h"
 
-#include "window/top_bar_widget.h"
+//#include "history/view/history_view_top_bar_widget.h"
+#include "facades.h"
 #include "styles/style_widgets.h"
 #include "styles/style_window.h"
 #include "styles/style_profile.h"
+#include "styles/style_info.h"
 
 namespace Profile {
 
@@ -33,6 +22,11 @@ BackButton::BackButton(QWidget *parent, const QString &text) : Ui::AbstractButto
 
 	subscribe(Adaptive::Changed(), [this] { updateAdaptiveLayout(); });
 	updateAdaptiveLayout();
+}
+
+void BackButton::setText(const QString &text) {
+	_text = text.toUpper();
+	update();
 }
 
 int BackButton::resizeGetHeight(int newWidth) {
@@ -48,13 +42,11 @@ void BackButton::paintEvent(QPaintEvent *e) {
 	p.setFont(st::topBarButton.font);
 	p.setPen(st::topBarButton.textFg);
 	p.drawTextLeft(st::topBarArrowPadding.left(), st::topBarButton.padding.top() + st::topBarButton.textTop, width(), _text);
-
-	Window::TopBarWidget::paintUnreadCounter(p, width());
 }
 
 void BackButton::onStateChanged(State was, StateChangeSource source) {
 	if (isDown() && !(was & StateFlag::Down)) {
-		emit clicked();
+		clicked(Qt::KeyboardModifiers(), Qt::LeftButton);
 	}
 }
 

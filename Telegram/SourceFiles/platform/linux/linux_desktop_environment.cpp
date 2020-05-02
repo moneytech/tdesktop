@@ -1,24 +1,13 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/linux/linux_desktop_environment.h"
+
+#include "platform/linux/specific_linux.h"
 
 namespace Platform {
 namespace DesktopEnvironment {
@@ -35,7 +24,14 @@ Type Compute() {
 	auto xdgCurrentDesktop = GetEnv("XDG_CURRENT_DESKTOP").toLower();
 	auto list = xdgCurrentDesktop.split(':', QString::SkipEmptyParts);
 	auto desktopSession = GetEnv("DESKTOP_SESSION").toLower();
+	auto slash = desktopSession.lastIndexOf('/');
 	auto kdeSession = GetEnv("KDE_SESSION_VERSION");
+
+	// DESKTOP_SESSION can contain a path
+	if (slash != -1) {
+		desktopSession = desktopSession.mid(slash + 1);
+	}
+
 	if (!list.isEmpty()) {
 		if (list.contains("unity")) {
 			// gnome-fallback sessions set XDG_CURRENT_DESKTOP to Unity
@@ -44,10 +40,6 @@ Type Compute() {
 				return Type::Gnome;
 			}
 			return Type::Unity;
-		} else if (list.contains("xfce")) {
-			return Type::XFCE;
-		} else if (list.contains("pantheon")) {
-			return Type::Pantheon;
 		} else if (list.contains("gnome")) {
 			return Type::Gnome;
 		} else if (list.contains("kde")) {
@@ -55,11 +47,13 @@ Type Compute() {
 				return Type::KDE5;
 			}
 			return Type::KDE4;
+		} else if (list.contains("mate")) {
+			return Type::MATE;
 		}
 	}
 
 	if (!desktopSession.isEmpty()) {
-		if (desktopSession == qstr("gnome") || desktopSession == qstr("mate")) {
+		if (desktopSession == qstr("gnome")) {
 			return Type::Gnome;
 		} else if (desktopSession == qstr("kde4") || desktopSession == qstr("kde-plasma")) {
 			return Type::KDE4;
@@ -69,8 +63,8 @@ Type Compute() {
 				return Type::KDE4;
 			}
 			return Type::KDE3;
-		} else if (desktopSession.indexOf(qstr("xfce")) >= 0 || desktopSession == qstr("xubuntu")) {
-			return Type::XFCE;
+		} else if (desktopSession == qstr("mate")) {
+			return Type::MATE;
 		}
 	}
 
@@ -98,8 +92,7 @@ Type ComputeAndLog() {
 		case Type::KDE4: return "KDE4";
 		case Type::KDE5: return "KDE5";
 		case Type::Unity: return "Unity";
-		case Type::XFCE: return "XFCE";
-		case Type::Pantheon: return "Pantheon";
+		case Type::MATE: return "MATE";
 		}
 		return QString::number(static_cast<int>(result));
 	};
@@ -113,18 +106,6 @@ Type ComputeAndLog() {
 Type Get() {
 	static const auto result = ComputeAndLog();
 	return result;
-}
-
-bool TryQtTrayIcon() {
-	return !IsPantheon();
-}
-
-bool PreferAppIndicatorTrayIcon() {
-	return IsXFCE() || IsUnity();
-}
-
-bool TryUnityCounter() {
-	return IsUnity() || IsPantheon();
 }
 
 } // namespace DesktopEnvironment

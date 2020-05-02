@@ -1,39 +1,49 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include <QtCore/QtPlugin>
 
-#ifdef Q_OS_WIN
 Q_IMPORT_PLUGIN(QWebpPlugin)
+
+#if QT_VERSION >= QT_VERSION_CHECK(5, 8, 0)
+Q_IMPORT_PLUGIN(QJpegPlugin)
+Q_IMPORT_PLUGIN(QGifPlugin)
+#endif // Qt 5.8.0
+
+#ifdef Q_OS_WIN
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
 #elif defined Q_OS_MAC // Q_OS_WIN
-Q_IMPORT_PLUGIN(QWebpPlugin)
 Q_IMPORT_PLUGIN(QCocoaIntegrationPlugin)
 Q_IMPORT_PLUGIN(QGenericEnginePlugin)
 #elif defined Q_OS_LINUX // Q_OS_WIN | Q_OS_MAC
-Q_IMPORT_PLUGIN(QWebpPlugin)
+Q_IMPORT_PLUGIN(ShmServerBufferPlugin)
+Q_IMPORT_PLUGIN(DmaBufServerBufferPlugin)
+Q_IMPORT_PLUGIN(DrmEglServerBufferPlugin)
+Q_IMPORT_PLUGIN(QWaylandEglClientBufferPlugin)
+Q_IMPORT_PLUGIN(QWaylandIviShellIntegrationPlugin)
+Q_IMPORT_PLUGIN(QWaylandWlShellIntegrationPlugin)
+Q_IMPORT_PLUGIN(QWaylandXdgShellV5IntegrationPlugin)
+Q_IMPORT_PLUGIN(QWaylandXdgShellV6IntegrationPlugin)
+Q_IMPORT_PLUGIN(QWaylandXdgShellIntegrationPlugin)
+Q_IMPORT_PLUGIN(QWaylandBradientDecorationPlugin)
+Q_IMPORT_PLUGIN(QWaylandMaterialDecorationPlugin)
 Q_IMPORT_PLUGIN(QXcbIntegrationPlugin)
-Q_IMPORT_PLUGIN(QConnmanEnginePlugin)
+Q_IMPORT_PLUGIN(QWaylandIntegrationPlugin)
+Q_IMPORT_PLUGIN(QWaylandEglPlatformIntegrationPlugin)
 Q_IMPORT_PLUGIN(QGenericEnginePlugin)
-Q_IMPORT_PLUGIN(QNetworkManagerEnginePlugin)
 Q_IMPORT_PLUGIN(QComposePlatformInputContextPlugin)
+Q_IMPORT_PLUGIN(QSvgIconPlugin)
+#ifndef TDESKTOP_DISABLE_DBUS_INTEGRATION
+Q_IMPORT_PLUGIN(QConnmanEnginePlugin)
+Q_IMPORT_PLUGIN(QNetworkManagerEnginePlugin)
 Q_IMPORT_PLUGIN(QIbusPlatformInputContextPlugin)
 Q_IMPORT_PLUGIN(QFcitxPlatformInputContextPlugin)
+Q_IMPORT_PLUGIN(QHimePlatformInputContextPlugin)
+Q_IMPORT_PLUGIN(NimfInputContextPlugin)
+Q_IMPORT_PLUGIN(QXdgDesktopPortalThemePlugin)
+#endif // !TDESKTOP_DISABLE_DBUS_INTEGRATION
 #endif // Q_OS_WIN | Q_OS_MAC | Q_OS_LINUX

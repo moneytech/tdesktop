@@ -1,7 +1,7 @@
 #define MyAppShortName "Telegram"
 #define MyAppName "Telegram Desktop"
-#define MyAppPublisher "Telegram Messenger LLP"
-#define MyAppURL "https://tdesktop.com"
+#define MyAppPublisher "Telegram FZ-LLC"
+#define MyAppURL "https://desktop.telegram.org"
 #define MyAppExeName "Telegram.exe"
 #define MyAppId "53F49750-6209-4FBF-9CA8-7A333C87D1ED"
 
@@ -39,6 +39,9 @@ Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "de"; MessagesFile: "compiler:Languages\German.isl"
 Name: "nl"; MessagesFile: "compiler:Languages\Dutch.isl"
 Name: "pt_BR"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
+Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
+Name: "fr"; MessagesFile: "compiler:Languages\French.isl"
+Name: "ua"; MessagesFile: "compiler:Languages\Ukrainian.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"

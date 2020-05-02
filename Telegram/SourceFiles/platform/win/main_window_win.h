@@ -1,27 +1,17 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "platform/platform_main_window.h"
-#include <windows.h>
+#include "base/platform/win/base_windows_h.h"
+#include "base/flags.h"
+
+#include <QtCore/QTimer>
 
 namespace Ui {
 class PopupMenu;
@@ -33,14 +23,13 @@ class MainWindow : public Window::MainWindow {
 	Q_OBJECT
 
 public:
-	MainWindow();
+	explicit MainWindow(not_null<Window::Controller*> controller);
 
 	HWND psHwnd() const;
 	HMENU psMenu() const;
 
-	void psFirstShow();
 	void psInitSysMenu();
-	void psUpdateSysMenu(Qt::WindowState state);
+	void updateSystemMenu(Qt::WindowState state);
 	void psUpdateMargins();
 
 	void psRefreshTaskbarIcon();
@@ -54,13 +43,14 @@ public:
 
 	// Custom shadows.
 	enum class ShadowsChange {
-		Moved    = 0x01,
-		Resized  = 0x02,
-		Shown    = 0x04,
-		Hidden   = 0x08,
-		Activate = 0x10,
+		Moved    = (1 << 0),
+		Resized  = (1 << 1),
+		Shown    = (1 << 2),
+		Hidden   = (1 << 3),
+		Activate = (1 << 4),
 	};
-	Q_DECLARE_FLAGS(ShadowsChanges, ShadowsChange);
+	using ShadowsChanges = base::flags<ShadowsChange>;
+	friend inline constexpr auto is_flag_type(ShadowsChange) { return true; };
 
 	bool shadowsWorking() const {
 		return _shadowsWorking;
@@ -85,6 +75,10 @@ protected:
 	void initHook() override;
 	int32 screenNameChecksum(const QString &name) const override;
 	void unreadCounterChangedHook() override;
+
+	void initShadows() override;
+	void firstShadowsUpdate() override;
+	void stateChangedHook(Qt::WindowState state) override;
 
 	bool hasTrayIcon() const override {
 		return trayIcon;
@@ -112,6 +106,7 @@ private:
 
 	bool _shadowsWorking = false;
 	bool _themeInited = false;
+	bool _inUpdateMargins = false;
 
 	HWND ps_hWnd = nullptr;
 	HWND ps_tbHider_hWnd = nullptr;
@@ -122,9 +117,9 @@ private:
 
 	int _deltaLeft = 0;
 	int _deltaTop = 0;
+	int _deltaRight = 0;
+	int _deltaBottom = 0;
 
 };
-
-Q_DECLARE_OPERATORS_FOR_FLAGS(MainWindow::ShadowsChanges);
 
 } // namespace Platform

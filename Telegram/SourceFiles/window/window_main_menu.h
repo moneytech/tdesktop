@@ -1,64 +1,65 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
+
+#include "base/timer.h"
+#include "base/object_ptr.h"
+#include "ui/rp_widget.h"
+#include "ui/layers/layer_widget.h"
 
 namespace Ui {
 class IconButton;
 class FlatLabel;
 class Menu;
-} // namespace Ui
-
-namespace Profile {
 class UserpicButton;
-} // namespace Profile
+class PopupMenu;
+} // namespace Ui
 
 namespace Window {
 
-class MainMenu : public TWidget, private base::Subscriber {
-public:
-	MainMenu(QWidget *parent);
+class SessionController;
 
-	void setInnerFocus() {
-		setFocus();
-	}
-	void showFinished();
+class MainMenu : public Ui::LayerWidget, private base::Subscriber {
+public:
+	MainMenu(QWidget *parent, not_null<SessionController*> controller);
+
+	void parentResized() override;
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
 
+	void doSetInnerFocus() override {
+		setFocus();
+	}
+
 private:
-	void checkSelf();
 	void updateControlsGeometry();
 	void updatePhone();
+	void initResetScaleButton();
 	void refreshMenu();
+	void refreshBackground();
 
-	object_ptr<Profile::UserpicButton> _userpicButton = { nullptr };
+	class ResetScaleButton;
+	not_null<SessionController*> _controller;
+	object_ptr<Ui::UserpicButton> _userpicButton = { nullptr };
 	object_ptr<Ui::IconButton> _cloudButton = { nullptr };
+	object_ptr<Ui::IconButton> _archiveButton = { nullptr };
+	object_ptr<ResetScaleButton> _resetScaleButton = { nullptr };
 	object_ptr<Ui::Menu> _menu;
 	object_ptr<Ui::FlatLabel> _telegram;
 	object_ptr<Ui::FlatLabel> _version;
+	std::shared_ptr<QPointer<QAction>> _nightThemeAction;
+	base::Timer _nightThemeSwitch;
+	base::unique_qptr<Ui::PopupMenu> _contextMenu;
 
-	bool _showFinished = false;
 	QString _phoneText;
+	QImage _background;
 
 };
 

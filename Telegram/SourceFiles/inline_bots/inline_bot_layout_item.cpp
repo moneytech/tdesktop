@@ -1,33 +1,31 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "inline_bots/inline_bot_layout_item.h"
 
+#include "data/data_photo.h"
+#include "data/data_document.h"
+#include "data/data_peer.h"
+#include "data/data_file_origin.h"
 #include "core/click_handler_types.h"
 #include "inline_bots/inline_bot_result.h"
 #include "inline_bots/inline_bot_layout_internal.h"
 #include "storage/localstorage.h"
 #include "mainwidget.h"
+#include "ui/image/image.h"
+#include "ui/empty_userpic.h"
 
 namespace InlineBots {
 namespace Layout {
+namespace {
+
+NeverFreedPointer<DocumentItems> documentItemsMap;
+
+} // namespace
 
 void ItemBase::setPosition(int32 position) {
 	_position = position;
@@ -78,22 +76,23 @@ PhotoData *ItemBase::getPreviewPhoto() const {
 }
 
 void ItemBase::preload() const {
+	const auto origin = fileOrigin();
 	if (_result) {
 		if (_result->_photo) {
-			_result->_photo->thumb->load();
+			_result->_photo->loadThumbnail(origin);
 		} else if (_result->_document) {
-			_result->_document->thumb->load();
+			_result->_document->loadThumbnail(origin);
 		} else if (!_result->_thumb->isNull()) {
-			_result->_thumb->load();
+			_result->_thumb->load(origin);
 		}
 	} else if (_doc) {
-		_doc->thumb->load();
+		_doc->loadThumbnail(origin);
 	} else if (_photo) {
-		_photo->medium->load();
+		_photo->loadThumbnail(origin);
 	}
 }
 
-void ItemBase::update() {
+void ItemBase::update() const {
 	if (_position >= 0) {
 		context()->inlineItemRepaint(this);
 	}
@@ -105,26 +104,37 @@ void ItemBase::layoutChanged() {
 	}
 }
 
-std::unique_ptr<ItemBase> ItemBase::createLayout(gsl::not_null<Context*> context, Result *result, bool forceThumb) {
+std::unique_ptr<ItemBase> ItemBase::createLayout(not_null<Context*> context, Result *result, bool forceThumb) {
 	using Type = Result::Type;
 
 	switch (result->_type) {
-	case Type::Photo: return std::make_unique<internal::Photo>(context, result); break;
+	case Type::Photo:
+		return std::make_unique<internal::Photo>(context, result);
 	case Type::Audio:
-	case Type::File: return std::make_unique<internal::File>(context, result); break;
-	case Type::Video: return std::make_unique<internal::Video>(context, result); break;
-	case Type::Sticker: return std::make_unique<internal::Sticker>(context, result); break;
-	case Type::Gif: return std::make_unique<internal::Gif>(context, result); break;
+	case Type::File:
+		return std::make_unique<internal::File>(context, result);
+	case Type::Video:
+		return std::make_unique<internal::Video>(context, result);
+	case Type::Sticker:
+		return std::make_unique<internal::Sticker>(context, result);
+	case Type::Gif:
+		return std::make_unique<internal::Gif>(context, result);
 	case Type::Article:
 	case Type::Geo:
-	case Type::Venue: return std::make_unique<internal::Article>(context, result, forceThumb); break;
-	case Type::Game: return std::make_unique<internal::Game>(context, result); break;
-	case Type::Contact: return std::make_unique<internal::Contact>(context, result); break;
+	case Type::Venue:
+		return std::make_unique<internal::Article>(
+			context,
+			result,
+			forceThumb);
+	case Type::Game:
+		return std::make_unique<internal::Game>(context, result);
+	case Type::Contact:
+		return std::make_unique<internal::Contact>(context, result);
 	}
-	return std::unique_ptr<ItemBase>();
+	return nullptr;
 }
 
-std::unique_ptr<ItemBase> ItemBase::createLayoutGif(gsl::not_null<Context*> context, DocumentData *document) {
+std::unique_ptr<ItemBase> ItemBase::createLayoutGif(not_null<Context*> context, DocumentData *document) {
 	return std::make_unique<internal::Gif>(context, document, true);
 }
 
@@ -136,22 +146,25 @@ PhotoData *ItemBase::getResultPhoto() const {
 	return _result ? _result->_photo : nullptr;
 }
 
-ImagePtr ItemBase::getResultThumb() const {
+Image *ItemBase::getResultThumb() const {
 	if (_result) {
-		if (_result->_photo && !_result->_photo->thumb->isNull()) {
-			return _result->_photo->thumb;
+		if (_result->_photo) {
+			return _result->_photo->thumbnail();
+		} else if (!_result->_thumb->isNull()) {
+			return _result->_thumb.get();
+		} else if (!_result->_locationThumb->isNull()) {
+			return _result->_locationThumb.get();
 		}
-		if (!_result->_thumb->isNull()) {
-			return _result->_thumb;
-		}
-		return _result->_locationThumb;
 	}
-	return ImagePtr();
+	return nullptr;
 }
 
 QPixmap ItemBase::getResultContactAvatar(int width, int height) const {
 	if (_result->_type == Result::Type::Contact) {
-		auto result = EmptyUserpic(qHash(_result->_id) % kUserColorsCount, _result->getLayoutTitle()).generate(width);
+		auto result = Ui::EmptyUserpic(
+			Data::PeerUserpicColor(qHash(_result->_id)),
+			_result->getLayoutTitle()
+		).generate(width);
 		if (result.height() != height * cIntRetinaFactor()) {
 			result = result.scaled(QSize(width, height) * cIntRetinaFactor(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 		}
@@ -161,7 +174,7 @@ QPixmap ItemBase::getResultContactAvatar(int width, int height) const {
 }
 
 int ItemBase::getResultDuration() const {
-	return _result->_duration;
+	return 0;
 }
 
 QString ItemBase::getResultUrl() const {
@@ -170,14 +183,21 @@ QString ItemBase::getResultUrl() const {
 
 ClickHandlerPtr ItemBase::getResultUrlHandler() const {
 	if (!_result->_url.isEmpty()) {
-		return MakeShared<UrlClickHandler>(_result->_url);
+		return std::make_shared<UrlClickHandler>(_result->_url);
 	}
 	return ClickHandlerPtr();
 }
 
-ClickHandlerPtr ItemBase::getResultContentUrlHandler() const {
+ClickHandlerPtr ItemBase::getResultPreviewHandler() const {
 	if (!_result->_content_url.isEmpty()) {
-		return MakeShared<UrlClickHandler>(_result->_content_url);
+		return std::make_shared<UrlClickHandler>(
+			_result->_content_url,
+			false);
+	} else if (_result->_document && _result->_document->canBePlayed()) {
+		return std::make_shared<DocumentOpenClickHandler>(
+			_result->_document);
+	} else if (_result->_photo) {
+		return std::make_shared<PhotoOpenClickHandler>(_result->_photo);
 	}
 	return ClickHandlerPtr();
 }
@@ -205,11 +225,9 @@ QString ItemBase::getResultThumbLetter() const {
 	return QString();
 }
 
-namespace {
-
-NeverFreedPointer<DocumentItems> documentItemsMap;
-
-} // namespace
+Data::FileOrigin ItemBase::fileOrigin() const {
+	return _context->inlineItemFileOrigin();
+}
 
 const DocumentItems *documentItems() {
 	return documentItemsMap.data();
@@ -217,18 +235,25 @@ const DocumentItems *documentItems() {
 
 namespace internal {
 
-void regDocumentItem(DocumentData *document, ItemBase *item) {
+void regDocumentItem(
+		not_null<const DocumentData*> document,
+		not_null<ItemBase*> item) {
 	documentItemsMap.createIfNull();
 	(*documentItemsMap)[document].insert(item);
 }
 
-void unregDocumentItem(DocumentData *document, ItemBase *item) {
+void unregDocumentItem(
+		not_null<const DocumentData*> document,
+		not_null<ItemBase*> item) {
 	if (documentItemsMap) {
 		auto i = documentItemsMap->find(document);
 		if (i != documentItemsMap->cend()) {
-			if (i->remove(item) && i->isEmpty()) {
+			if (i->second.remove(item) && i->second.empty()) {
 				documentItemsMap->erase(i);
 			}
+		}
+		if (documentItemsMap->empty()) {
+			documentItemsMap.clear();
 		}
 	}
 }

@@ -1,24 +1,11 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
-using "basic.style";
+using "ui/basic.style";
 
 using "boxes/boxes.style";
 using "ui/widgets/widgets.style";
@@ -28,18 +15,23 @@ switchPmButton: RoundButton(defaultBoxButton) {
 	height: 34px;
 	textTop: 7px;
 }
+stickersRestrictedLabel: FlatLabel(defaultFlatLabel) {
+	minWidth: 200px;
+	align: align(center);
+	textFg: noContactsColor;
+}
 
-stickersTrendingHeader: 45px;
-stickersTrendingSkip: 15px;
+stickersTrendingHeader: 56px;
+stickersTrendingSkip: 4px;
 
 stickersTrendingHeaderFont: semiboldFont;
 stickersTrendingHeaderFg: windowFg;
-stickersTrendingHeaderTop: 0px;
+stickersTrendingHeaderTop: 11px;
 stickersTrendingSubheaderFont: normalFont;
 stickersTrendingSubheaderFg: windowSubTextFg;
-stickersTrendingSubheaderTop: 20px;
+stickersTrendingSubheaderTop: 31px;
 
-stickersTrendingAddTop: 3px;
+stickersTrendingAddTop: 14px;
 stickersTrendingAdd: RoundButton(defaultActiveButton) {
 	width: -16px;
 	height: 26px;
@@ -49,8 +41,8 @@ stickersRemove: IconButton(defaultIconButton) {
 	width: 40px;
 	height: 40px;
 
-	icon: icon {{ "stickers_remove", menuIconFg }};
-	iconOver: icon {{ "stickers_remove", menuIconFgOver }};
+	icon: icon {{ "info_media_delete", menuIconFg }};
+	iconOver: icon {{ "info_media_delete", menuIconFgOver }};
 
 	rippleAreaSize: 40px;
 	rippleAreaPosition: point(0px, 0px);
@@ -87,7 +79,7 @@ stickersFeaturedInstalled: icon {{ "send_control_save", lightButtonFg }};
 stickersMaxHeight: 320px;
 stickersPadding: margins(19px, 13px, 19px, 13px);
 stickersSize: size(64px, 64px);
-stickersScroll: ScrollArea(boxLayerScroll) {
+stickersScroll: ScrollArea(boxScroll) {
 	deltat: 19px;
 	deltab: 9px;
 }
@@ -96,14 +88,21 @@ stickersReorderFg: windowSubTextFg;
 stickersRowDisabledOpacity: 0.4;
 stickersRowDuration: 200;
 
-emojiIconFg: checkboxFg;
-emojiIconFgActive: windowBgActive;
 stickersSettings: icon {{ "emoji_settings", emojiIconFg }};
-stickersTrending: icon {{ "emoji_trending", emojiIconFg }};
-stickersTrendingActive: icon {{ "emoji_trending", emojiIconFgActive }};
+stickersTrending: icon {{ "stickers_add", emojiIconFg }};
+stickersTrendingUnread: icon {
+	{ "stickers_add_unread", emojiIconFg },
+	{ "stickers_add_dot", dialogsUnreadBg }
+};
+stickersRecent: icon {{ "stickers_recent", emojiIconFg }};
+stickersSearch: icon {{ "stickers_search", emojiIconFg, point(0px, 1px) }};
 
-stickersSettingsUnreadSize: 17px;
-stickersSettingsUnreadPosition: point(4px, 5px);
+stickersSettingsUnreadSize: 6px;
+stickersSettingsUnreadPosition: point(6px, 10px);
+
+filtersRemove: IconButton(stickersRemove) {
+	ripple: defaultRippleAnimation;
+}
 
 emojiPanMargins: margins(10px, 10px, 10px, 10px);
 
@@ -130,11 +129,13 @@ emojiObjectsActive: icon {{ "emoji_objects", emojiIconFgActive }};
 emojiSymbols: icon {{ "emoji_symbols", emojiIconFg }};
 emojiSymbolsActive: icon {{ "emoji_symbols", emojiIconFgActive }};
 
+emojiFooterHeight: 46px;
+emojiCategorySkip: 4px;
 emojiCategory: IconButton {
 	width: 42px;
-	height: 46px;
+	height: emojiFooterHeight;
 
-	iconPosition: point(11px, 12px);
+	iconPosition: point(-1px, 9px);
 }
 emojiCategoryRecent: IconButton(emojiCategory) { icon: emojiRecent; }
 emojiCategoryPeople: IconButton(emojiCategory) { icon: emojiPeople; }
@@ -149,7 +150,6 @@ emojiPanAnimation: PanelAnimation(defaultPanelAnimation) {
 	fadeBg: emojiPanBg;
 }
 emojiPanPadding: 12px;
-emojiPanSize: size(45px, 41px);
 emojiPanWidth: 345px;
 emojiPanMinHeight: 278px;
 emojiPanMaxHeight: 640px;
@@ -158,6 +158,10 @@ emojiPanShowDuration: 200;
 emojiPanDuration: 200;
 emojiPanHover: windowBgOver;
 emojiPanSlideDuration: 200;
+emojiPanDesiredSize: 45px;
+
+inlineResultsMinHeight: 278px;
+inlineResultsMaxHeight: 640px;
 
 emojiPanHeader: 42px;
 emojiPanHeaderFont: semiboldFont;
@@ -189,14 +193,18 @@ hashtagClose: IconButton {
 	}
 }
 
-stickerPanSize: size(64px, 64px);
+stickerPanWidthMin: 64px;
+stickerPanSize: size(stickerPanWidthMin, stickerPanWidthMin);
 stickerPanPadding: 11px;
-stickerPanDelete: icon {
-	{ "emoji_delete_bg", stickerPanDeleteBg },
-	{ "emoji_delete", stickerPanDeleteFg },
-};
-stickerPanDeleteOpacity: 0.5;
+stickerPanDeleteIconBg: icon {{ "emoji_delete_bg", stickerPanDeleteBg }};
+stickerPanDeleteIconFg: icon {{ "emoji_delete", stickerPanDeleteFg }};
+stickerPanDeleteOpacityBg: 0.3;
+stickerPanDeleteOpacityBgOver: 0.5;
+stickerPanDeleteOpacityFg: 0.8;
+stickerPanDeleteOpacityFgOver: 1.;
 stickerPanRemoveSet: hashtagClose;
+stickerIconWidth: 42px;
+stickerIconHeight: emojiFooterHeight;
 stickerIconPadding: 5px;
 stickerIconOpacity: 0.7;
 stickerIconSel: 2px;
@@ -205,8 +213,18 @@ stickerIconMove: 400;
 stickerPreviewDuration: 150;
 stickerPreviewMin: 0.1;
 
-stickersToastMaxWidth: 340px;
-stickersToastPadding: margins(16px, 13px, 16px, 12px);
+stickerGroupCategorySize: 28px;
+stickerGroupCategoryAbout: defaultTextStyle;
+stickerGroupCategoryAddMargin: margins(0px, 10px, 0px, 5px);
+stickerGroupCategoryAdd: stickersTrendingAdd;
+
+stickersToast: Toast(defaultToast) {
+	minWidth: 340px;
+	maxWidth: 340px;
+	padding: margins(16px, 13px, 16px, 12px);
+}
+
+stickersEmpty: icon {{ "stickers_empty", windowSubTextFg }};
 
 inlineBotsScroll: ScrollArea(defaultSolidScroll) {
 	deltat: stickerPanPadding;
@@ -219,3 +237,44 @@ gifsSearchCancel: contactsSearchCancel;
 gifsSearchCancelPosition: point(1px, 1px);
 gifsSearchIcon: boxFieldSearchIcon;
 gifsSearchIconPosition: point(6px, 7px);
+
+emojiSuggestionsDropdown: InnerDropdown(defaultInnerDropdown) {
+	scrollMargin: margins(0px, emojiColorsPadding, 0px, emojiColorsPadding);
+	scrollPadding: margins(0px, 0px, 0px, 0px);
+}
+emojiSuggestionSize: 40px;
+emojiSuggestionsScrolledWidth: 240px;
+emojiSuggestionsPadding: margins(emojiColorsPadding, 0px, emojiColorsPadding, 0px);
+emojiSuggestionsFadeAfter: 20px;
+
+mentionHeight: 40px;
+mentionScroll: ScrollArea(defaultScrollArea) {
+	topsh: 0px;
+	bottomsh: 0px;
+}
+mentionPadding: margins(8px, 5px, 8px, 5px);
+mentionTop: 11px;
+mentionFont: linkFont;
+mentionNameFg: windowFg;
+mentionNameFgOver: windowFgOver;
+mentionPhotoSize: msgPhotoSize;
+mentionBg: windowBg;
+mentionBgOver: windowBgOver;
+mentionFg: windowSubTextFg;
+mentionFgOver: windowSubTextFgOver;
+mentionFgActive: windowActiveTextFg;
+mentionFgOverActive: windowActiveTextFg;
+
+autocompleteSearchPadding: margins(16px, 5px, 16px, 5px);
+autocompleteRowPadding: margins(16px, 5px, 16px, 5px);
+autocompleteRowTitle: semiboldTextStyle;
+autocompleteRowKeys: defaultTextStyle;
+autocompleteRowAnswer: defaultTextStyle;
+
+manageEmojiPreview: 22px;
+manageEmojiPreviewWidth: 48px;
+manageEmojiPreviewHeight: 48px;
+manageEmojiPreviewPadding: margins(22px, 9px, 19px, 9px);
+manageEmojiMarginRight: 21px;
+manageEmojiNameTop: 3px;
+manageEmojiStatusTop: 25px;

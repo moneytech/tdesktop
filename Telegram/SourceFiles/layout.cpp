@@ -1,94 +1,24 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "layout.h"
 
-#include "lang.h"
+#include "data/data_document.h"
+#include "lang/lang_keys.h"
 #include "mainwidget.h"
-#include "application.h"
 #include "storage/file_upload.h"
 #include "mainwindow.h"
 #include "core/file_utilities.h"
 #include "boxes/add_contact_box.h"
 #include "boxes/confirm_box.h"
-#include "media/media_audio.h"
+#include "media/audio/media_audio.h"
 #include "storage/localstorage.h"
-
-TextParseOptions _textNameOptions = {
-	0, // flags
-	4096, // maxw
-	1, // maxh
-	Qt::LayoutDirectionAuto, // lang-dependent
-};
-TextParseOptions _textDlgOptions = {
-	TextParseRichText, // flags
-	0, // maxw is style-dependent
-	1, // maxh
-	Qt::LayoutDirectionAuto, // lang-dependent
-};
-TextParseOptions _historyTextOptions = {
-	TextParseLinks | TextParseMentions | TextParseHashtags | TextParseMultiline | TextParseRichText | TextParseMono, // flags
-	0, // maxw
-	0, // maxh
-	Qt::LayoutDirectionAuto, // dir
-};
-TextParseOptions _historyBotOptions = {
-	TextParseLinks | TextParseMentions | TextParseHashtags | TextParseBotCommands | TextParseMultiline | TextParseRichText | TextParseMono, // flags
-	0, // maxw
-	0, // maxh
-	Qt::LayoutDirectionAuto, // dir
-};
-TextParseOptions _historyTextNoMonoOptions = {
-	TextParseLinks | TextParseMentions | TextParseHashtags | TextParseMultiline | TextParseRichText, // flags
-	0, // maxw
-	0, // maxh
-	Qt::LayoutDirectionAuto, // dir
-};
-TextParseOptions _historyBotNoMonoOptions = {
-	TextParseLinks | TextParseMentions | TextParseHashtags | TextParseBotCommands | TextParseMultiline | TextParseRichText, // flags
-	0, // maxw
-	0, // maxh
-	Qt::LayoutDirectionAuto, // dir
-};
-
-const TextParseOptions &itemTextOptions(History *h, PeerData *f) {
-	if ((h->peer->isUser() && h->peer->asUser()->botInfo) || (f->isUser() && f->asUser()->botInfo) || (h->peer->isChat() && h->peer->asChat()->botStatus >= 0) || (h->peer->isMegagroup() && h->peer->asChannel()->mgInfo->botStatus >= 0)) {
-		return _historyBotOptions;
-	}
-	return _historyTextOptions;
-}
-
-const TextParseOptions &itemTextOptions(const HistoryItem *item) {
-	return itemTextOptions(item->history(), item->author());
-}
-
-const TextParseOptions &itemTextNoMonoOptions(History *h, PeerData *f) {
-	if ((h->peer->isUser() && h->peer->asUser()->botInfo) || (f->isUser() && f->asUser()->botInfo) || (h->peer->isChat() && h->peer->asChat()->botStatus >= 0) || (h->peer->isMegagroup() && h->peer->asChannel()->mgInfo->botStatus >= 0)) {
-		return _historyBotNoMonoOptions;
-	}
-	return _historyTextNoMonoOptions;
-}
-
-const TextParseOptions &itemTextNoMonoOptions(const HistoryItem *item) {
-	return itemTextNoMonoOptions(item->history(), item->author());
-}
+#include "history/view/history_view_cursor_state.h"
+#include "app.h"
 
 QString formatSizeText(qint64 size) {
 	if (size >= 1024 * 1024) { // more than 1 mb
@@ -119,7 +49,7 @@ QString formatDownloadText(qint64 ready, qint64 total) {
 		totalStr = QString::number(total);
 		mb = qsl("B");
 	}
-	return lng_save_downloaded(lt_ready, readyStr, lt_total, totalStr, lt_mb, mb);
+	return tr::lng_save_downloaded(tr::now, lt_ready, readyStr, lt_total, totalStr, lt_mb, mb);
 }
 
 QString formatDurationText(qint64 duration) {
@@ -130,47 +60,57 @@ QString formatDurationText(qint64 duration) {
 QString formatDurationWords(qint64 duration) {
 	if (duration > 59) {
 		auto minutes = (duration / 60);
+		auto minutesCount = tr::lng_duration_minsec_minutes(tr::now, lt_count, minutes);
 		auto seconds = (duration % 60);
-		return lng_duration_minutes_seconds(lt_count_minutes, minutes, lt_count_seconds, seconds);
+		auto secondsCount = tr::lng_duration_minsec_seconds(tr::now, lt_count, seconds);
+		return tr::lng_duration_minutes_seconds(tr::now, lt_minutes_count, minutesCount, lt_seconds_count, secondsCount);
 	}
-	return lng_duration_seconds(lt_count, duration);
+	return tr::lng_duration_seconds(tr::now, lt_count, duration);
 }
 
 QString formatDurationAndSizeText(qint64 duration, qint64 size) {
-	return lng_duration_and_size(lt_duration, formatDurationText(duration), lt_size, formatSizeText(size));
+	return tr::lng_duration_and_size(tr::now, lt_duration, formatDurationText(duration), lt_size, formatSizeText(size));
 }
 
 QString formatGifAndSizeText(qint64 size) {
-	return lng_duration_and_size(lt_duration, qsl("GIF"), lt_size, formatSizeText(size));
+	return tr::lng_duration_and_size(tr::now, lt_duration, qsl("GIF"), lt_size, formatSizeText(size));
 }
 
 QString formatPlayedText(qint64 played, qint64 duration) {
-	return lng_duration_played(lt_played, formatDurationText(played), lt_duration, formatDurationText(duration));
+	return tr::lng_duration_played(tr::now, lt_played, formatDurationText(played), lt_duration, formatDurationText(duration));
 }
 
 int32 documentColorIndex(DocumentData *document, QString &ext) {
-	int32 colorIndex = 0;
+	auto colorIndex = 0;
 
-	QString name = document ? (document->name.isEmpty() ? (document->sticker() ? lang(lng_in_dlg_sticker) : qsl("Unknown File")) : document->name) : lang(lng_message_empty);
+	auto name = document
+		? (document->filename().isEmpty()
+			? (document->sticker()
+				? tr::lng_in_dlg_sticker(tr::now)
+				: qsl("Unknown File"))
+			: document->filename())
+		: tr::lng_message_empty(tr::now);
 	name = name.toLower();
-	int32 lastDot = name.lastIndexOf('.');
-	QString mime = document ? document->mime.toLower() : QString();
+	auto lastDot = name.lastIndexOf('.');
+	auto mime = document
+		? document->mimeString().toLower()
+		: QString();
 	if (name.endsWith(qstr(".doc")) ||
+		name.endsWith(qstr(".docx")) ||
 		name.endsWith(qstr(".txt")) ||
 		name.endsWith(qstr(".psd")) ||
-		mime.startsWith(qstr("text/"))
-		) {
+		mime.startsWith(qstr("text/"))) {
 		colorIndex = 0;
 	} else if (
 		name.endsWith(qstr(".xls")) ||
-		name.endsWith(qstr(".csv"))
-		) {
+		name.endsWith(qstr(".xlsx")) ||
+		name.endsWith(qstr(".csv"))) {
 		colorIndex = 1;
 	} else if (
 		name.endsWith(qstr(".pdf")) ||
 		name.endsWith(qstr(".ppt")) ||
-		name.endsWith(qstr(".key"))
-		) {
+		name.endsWith(qstr(".pptx")) ||
+		name.endsWith(qstr(".key"))) {
 		colorIndex = 2;
 	} else if (
 		name.endsWith(qstr(".zip")) ||
@@ -178,15 +118,22 @@ int32 documentColorIndex(DocumentData *document, QString &ext) {
 		name.endsWith(qstr(".ai")) ||
 		name.endsWith(qstr(".mp3")) ||
 		name.endsWith(qstr(".mov")) ||
-		name.endsWith(qstr(".avi"))
-		) {
+		name.endsWith(qstr(".avi"))) {
 		colorIndex = 3;
 	} else {
-		QChar ch = (lastDot >= 0 && lastDot + 1 < name.size()) ? name.at(lastDot + 1) : (name.isEmpty() ? (mime.isEmpty() ? '0' : mime.at(0)) : name.at(0));
+		auto ch = (lastDot >= 0 && lastDot + 1 < name.size())
+			? name.at(lastDot + 1)
+			: (name.isEmpty()
+				? (mime.isEmpty() ? '0' : mime.at(0))
+				: name.at(0));
 		colorIndex = (ch.unicode() % 4);
 	}
 
-	ext = document ? ((lastDot < 0 || lastDot + 2 > name.size()) ? name : name.mid(lastDot + 1)) : QString();
+	ext = document
+		? ((lastDot < 0 || lastDot + 2 > name.size())
+			? name
+			: name.mid(lastDot + 1))
+		: QString();
 
 	return colorIndex;
 }
@@ -235,46 +182,14 @@ RoundCorners documentCorners(int32 colorIndex) {
 	return RoundCorners(Doc1Corners + (colorIndex & 3));
 }
 
-bool documentIsValidMediaFile(const QString &filepath) {
-	static StaticNeverFreedPointer<QList<QString>> validMediaTypes(([] {
-		std::unique_ptr<QList<QString>> result = std::make_unique<QList<QString>>();
-		*result = qsl("\
-webm mkv flv vob ogv ogg drc gif gifv mng avi mov qt wmv yuv rm rmvb asf amv mp4 m4p \
-m4v mpg mp2 mpeg mpe mpv m2v svi 3gp 3g2 mxf roq nsv f4v f4p f4a f4b wma divx evo mk3d \
-mka mks mcf m2p ps ts m2ts ifo aaf avchd cam dat dsh dvr-ms m1v fla flr sol wrap smi swf \
-wtv 8svx 16svx iff aiff aif aifc au bwf cdda raw wav flac la pac m4a ape ofr ofs off rka \
-shn tak tta wv brstm dts dtshd dtsma ast amr mp3 spx gsm aac mpc vqf ra ots swa vox voc \
-dwd smp aup cust mid mus sib sid ly gym vgm psf nsf mod ptb s3m xm it mt2 minipsf psflib \
-2sf dsf gsf psf2 qsf ssf usf rmj spc niff mxl xml txm ym jam mp1 mscz\
-").split(' ');
-		return result.release();
-	})());
-
-	QFileInfo info(filepath);
-	auto parts = info.fileName().split('.', QString::SkipEmptyParts);
-	return !parts.isEmpty() && (validMediaTypes->indexOf(parts.back().toLower()) >= 0);
+[[nodiscard]] HistoryView::TextState LayoutItemBase::getState(
+		QPoint point,
+		StateRequest request) const {
+	return {};
 }
 
-bool documentIsExecutableName(const QString &filename) {
-	static StaticNeverFreedPointer<QList<QString>> executableTypes(([] {
-		std::unique_ptr<QList<QString>> result = std::make_unique<QList<QString>>();
-#ifdef Q_OS_MAC
-		*result = qsl("\
-action app bin command csh osx workflow\
-").split(' ');
-#elif defined Q_OS_LINUX // Q_OS_MAC
-		*result = qsl("\
-bin csh ksh out run\
-").split(' ');
-#else // Q_OS_MAC || Q_OS_LINUX
-		*result = qsl("\
-bat bin cmd com cpl exe gadget inf ins inx isu job jse lnk msc msi \
-msp mst paf pif ps1 reg rgs sct shb shs u3p vb vbe vbs vbscript ws wsf\
-").split(' ');
-#endif // !Q_OS_MAC && !Q_OS_LINUX
-		return result.release();
-	})());
-
-	auto lastDotIndex = filename.lastIndexOf('.');
-	return (lastDotIndex >= 0) && (executableTypes->indexOf(filename.mid(lastDotIndex + 1).toLower()) >= 0);
+[[nodiscard]] TextSelection LayoutItemBase::adjustSelection(
+		TextSelection selection,
+		TextSelectType type) const {
+	return selection;
 }

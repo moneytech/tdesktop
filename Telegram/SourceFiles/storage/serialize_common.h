@@ -1,26 +1,13 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "ui/images.h"
+#include "mtproto/mtproto_auth_key.h"
 
 namespace Serialize {
 
@@ -32,15 +19,22 @@ inline int bytearraySize(const QByteArray &arr) {
 	return sizeof(quint32) + arr.size();
 }
 
-inline int bytesSize(base::const_byte_span bytes) {
+inline int bytesSize(bytes::const_span bytes) {
 	return sizeof(quint32) + bytes.size();
 }
 
+inline int colorSize() {
+	return sizeof(quint32);
+}
+
+void writeColor(QDataStream &stream, const QColor &color);
+QColor readColor(QDataStream &stream);
+
 struct ReadBytesVectorWrap {
-	base::byte_vector &bytes;
+	bytes::vector &bytes;
 };
 
-inline ReadBytesVectorWrap bytes(base::byte_vector &bytes) {
+inline ReadBytesVectorWrap bytes(bytes::vector &bytes) {
 	return ReadBytesVectorWrap { bytes };
 }
 
@@ -70,10 +64,10 @@ inline QDataStream &operator>>(QDataStream &stream, ReadBytesVectorWrap data) {
 }
 
 struct WriteBytesWrap {
-	base::const_byte_span bytes;
+	bytes::const_span bytes;
 };
 
-inline WriteBytesWrap bytes(base::const_byte_span bytes) {
+inline WriteBytesWrap bytes(bytes::const_span bytes) {
 	return WriteBytesWrap { bytes };
 }
 
@@ -97,9 +91,16 @@ inline int dateTimeSize() {
 	return (sizeof(qint64) + sizeof(quint32) + sizeof(qint8));
 }
 
-void writeStorageImageLocation(QDataStream &stream, const StorageImageLocation &loc);
-StorageImageLocation readStorageImageLocation(QDataStream &stream);
-int storageImageLocationSize();
+int storageImageLocationSize(const StorageImageLocation &location);
+void writeStorageImageLocation(
+	QDataStream &stream,
+	const StorageImageLocation &location);
+
+// NB! This method can return StorageFileLocation with Type::Generic!
+// The reader should discard it or convert to one of the valid modern types.
+std::optional<StorageImageLocation> readStorageImageLocation(
+	int streamAppVersion,
+	QDataStream &stream);
 
 template <typename T>
 inline T read(QDataStream &stream) {
@@ -114,5 +115,10 @@ inline MTP::AuthKey::Data read<MTP::AuthKey::Data>(QDataStream &stream) {
 	stream.readRawData(reinterpret_cast<char*>(result.data()), result.size());
 	return result;
 }
+
+uint32 peerSize(not_null<PeerData*> peer);
+void writePeer(QDataStream &stream, PeerData *peer);
+PeerData *readPeer(int streamAppVersion, QDataStream &stream);
+QString peekUserPhone(int streamAppVersion, QDataStream &stream);
 
 } // namespace Serialize

@@ -1,31 +1,20 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/mac/notifications_manager_mac.h"
 
+#include "base/platform/base_platform_info.h"
 #include "platform/platform_specific.h"
-#include "platform/mac/mac_utilities.h"
-#include "styles/style_window.h"
+#include "base/platform/mac/base_utilities_mac.h"
+#include "history/history.h"
+#include "ui/empty_userpic.h"
 #include "mainwindow.h"
-#include "base/task_queue.h"
-#include "base/variant.h"
+#include "facades.h"
+#include "styles/style_window.h"
 
 #include <thread>
 #include <Cocoa/Cocoa.h>
@@ -37,7 +26,7 @@ auto DoNotDisturbEnabled = false;
 auto LastSettingsQueryMs = 0;
 
 void queryDoNotDisturbState() {
-	auto ms = getms(true);
+	auto ms = crl::now();
 	if (LastSettingsQueryMs > 0 && ms <= LastSettingsQueryMs + kQuerySettingsEachMs) {
 		return;
 	}
@@ -61,19 +50,19 @@ NSImage *qt_mac_create_nsimage(const QPixmap &pm);
 @interface NotificationDelegate : NSObject<NSUserNotificationCenterDelegate> {
 }
 
-- (id) initWithManager:(base::weak_unique_ptr<Manager>)manager managerId:(uint64)managerId;
+- (id) initWithManager:(base::weak_ptr<Manager>)manager managerId:(uint64)managerId;
 - (void) userNotificationCenter:(NSUserNotificationCenter*)center didActivateNotification:(NSUserNotification*)notification;
 - (BOOL) userNotificationCenter:(NSUserNotificationCenter*)center shouldPresentNotification:(NSUserNotification*)notification;
 
 @end // @interface NotificationDelegate
 
 @implementation NotificationDelegate {
-	base::weak_unique_ptr<Manager> _manager;
+	base::weak_ptr<Manager> _manager;
 	uint64 _managerId;
 
 }
 
-- (id) initWithManager:(base::weak_unique_ptr<Manager>)manager managerId:(uint64)managerId {
+- (id) initWithManager:(base::weak_ptr<Manager>)manager managerId:(uint64)managerId {
 	if (self = [super init]) {
 		_manager = manager;
 		_managerId = managerId;
@@ -87,7 +76,7 @@ NSImage *qt_mac_create_nsimage(const QPixmap &pm);
 	auto notificationManagerId = managerIdObject ? [managerIdObject unsignedLongLongValue] : 0ULL;
 	DEBUG_LOG(("Received notification with instance %1, mine: %2").arg(notificationManagerId).arg(_managerId));
 	if (notificationManagerId != _managerId) { // other app instance notification
-		base::TaskQueue::Main().Put([] {
+		crl::on_main([] {
 			// Usually we show and activate main window when the application
 			// is activated (receives applicationDidBecomeActive: notification).
 			//
@@ -112,17 +101,18 @@ NSImage *qt_mac_create_nsimage(const QPixmap &pm);
 	NSNumber *msgObject = [notificationUserInfo objectForKey:@"msgid"];
 	auto notificationMsgId = msgObject ? [msgObject intValue] : 0;
 	if (notification.activationType == NSUserNotificationActivationTypeReplied) {
-		auto notificationReply = QString::fromUtf8([[[notification response] string] UTF8String]);
-		base::TaskQueue::Main().Put([manager = _manager, notificationPeerId, notificationMsgId, notificationReply] {
-			if (manager) {
-				manager->notificationReplied(notificationPeerId, notificationMsgId, notificationReply);
-			}
+		const auto notificationReply = QString::fromUtf8([[[notification response] string] UTF8String]);
+		const auto manager = _manager;
+		crl::on_main(manager, [=] {
+			manager->notificationReplied(
+				notificationPeerId,
+				notificationMsgId,
+				{ notificationReply, {} });
 		});
 	} else if (notification.activationType == NSUserNotificationActivationTypeContentsClicked) {
-		base::TaskQueue::Main().Put([manager = _manager, notificationPeerId, notificationMsgId] {
-			if (manager) {
-				manager->notificationActivated(notificationPeerId, notificationMsgId);
-			}
+		const auto manager = _manager;
+		crl::on_main(manager, [=] {
+			manager->notificationActivated(notificationPeerId, notificationMsgId);
 		});
 	}
 
@@ -154,7 +144,7 @@ bool SkipToast() {
 }
 
 bool Supported() {
-	return (cPlatform() != dbipMacOld);
+	return Platform::IsMac10_8OrGreater();
 }
 
 std::unique_ptr<Window::Notifications::Manager> Create(Window::Notifications::System *system) {
@@ -172,9 +162,16 @@ class Manager::Private : public QObject, private base::Subscriber {
 public:
 	Private(Manager *manager);
 
-	void showNotification(PeerData *peer, MsgId msgId, const QString &title, const QString &subtitle, const QString &msg, bool hideNameAndPhoto, bool hideReplyButton);
+	void showNotification(
+		not_null<PeerData*> peer,
+		MsgId msgId,
+		const QString &title,
+		const QString &subtitle,
+		const QString &msg,
+		bool hideNameAndPhoto,
+		bool hideReplyButton);
 	void clearAll();
-	void clearFromHistory(History *history);
+	void clearFromHistory(not_null<History*> history);
 	void updateDelegate();
 
 	~Private();
@@ -214,13 +211,20 @@ Manager::Private::Private(Manager *manager)
 	subscribe(Global::RefWorkMode(), [this](DBIWorkMode mode) {
 		// We need to update the delegate _after_ the tray icon change was done in Qt.
 		// Because Qt resets the delegate.
-		base::TaskQueue::Main().Put(base::lambda_guarded(this, [this] {
+		crl::on_main(this, [=] {
 			updateDelegate();
-		}));
+		});
 	});
 }
 
-void Manager::Private::showNotification(PeerData *peer, MsgId msgId, const QString &title, const QString &subtitle, const QString &msg, bool hideNameAndPhoto, bool hideReplyButton) {
+void Manager::Private::showNotification(
+		not_null<PeerData*> peer,
+		MsgId msgId,
+		const QString &title,
+		const QString &subtitle,
+		const QString &msg,
+		bool hideNameAndPhoto,
+		bool hideReplyButton) {
 	@autoreleasepool {
 
 	NSUserNotification *notification = [[[NSUserNotification alloc] init] autorelease];
@@ -235,7 +239,9 @@ void Manager::Private::showNotification(PeerData *peer, MsgId msgId, const QStri
 	[notification setSubtitle:Q2NSString(subtitle)];
 	[notification setInformativeText:Q2NSString(msg)];
 	if (!hideNameAndPhoto && [notification respondsToSelector:@selector(setContentImage:)]) {
-		auto userpic = peer->genUserpic(st::notifyMacPhotoSize);
+		auto userpic = peer->isSelf()
+			? Ui::EmptyUserpic::GenerateSavedMessages(st::notifyMacPhotoSize)
+			: peer->genUserpic(st::notifyMacPhotoSize);
 		NSImage *img = [qt_mac_create_nsimage(userpic) autorelease];
 		[notification setContentImage:img];
 	}
@@ -316,7 +322,7 @@ void Manager::Private::clearAll() {
 	putClearTask(ClearAll());
 }
 
-void Manager::Private::clearFromHistory(History *history) {
+void Manager::Private::clearFromHistory(not_null<History*> history) {
 	putClearTask(ClearFromHistory { history->peer->id });
 }
 
@@ -330,6 +336,8 @@ Manager::Private::~Private() {
 		putClearTask(ClearFinish());
 		_clearingThread.join();
 	}
+	NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
+	[center setDelegate:nil];
 	[_delegate release];
 }
 
@@ -339,15 +347,29 @@ Manager::Manager(Window::Notifications::System *system) : NativeManager(system)
 
 Manager::~Manager() = default;
 
-void Manager::doShowNativeNotification(PeerData *peer, MsgId msgId, const QString &title, const QString &subtitle, const QString &msg, bool hideNameAndPhoto, bool hideReplyButton) {
-	_private->showNotification(peer, msgId, title, subtitle, msg, hideNameAndPhoto, hideReplyButton);
+void Manager::doShowNativeNotification(
+		not_null<PeerData*> peer,
+		MsgId msgId,
+		const QString &title,
+		const QString &subtitle,
+		const QString &msg,
+		bool hideNameAndPhoto,
+		bool hideReplyButton) {
+	_private->showNotification(
+		peer,
+		msgId,
+		title,
+		subtitle,
+		msg,
+		hideNameAndPhoto,
+		hideReplyButton);
 }
 
 void Manager::doClearAllFast() {
 	_private->clearAll();
 }
 
-void Manager::doClearFromHistory(History *history) {
+void Manager::doClearFromHistory(not_null<History*> history) {
 	_private->clearFromHistory(history);
 }
 

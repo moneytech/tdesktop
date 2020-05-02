@@ -1,27 +1,18 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "chat_helpers/tabbed_selector.h"
+#include "base/timer.h"
 #include "inline_bots/inline_bot_layout_item.h"
+#include "app.h"
+
+#include <QtCore/QTimer>
 
 namespace InlineBots {
 namespace Layout {
@@ -35,27 +26,33 @@ class RoundButton;
 } // namespace Ui
 
 namespace Window {
-class Controller;
+class SessionController;
 } // namespace Window
 
 namespace ChatHelpers {
 
-class GifsListWidget : public TabbedSelector::Inner, public InlineBots::Layout::Context, private base::Subscriber, private MTP::Sender {
-	Q_OBJECT
-
+class GifsListWidget
+	: public TabbedSelector::Inner
+	, public InlineBots::Layout::Context
+	, private base::Subscriber {
 public:
-	GifsListWidget(QWidget *parent, gsl::not_null<Window::Controller*> controller);
+	using InlineChosen = TabbedSelector::InlineChosen;
+
+	GifsListWidget(QWidget *parent, not_null<Window::SessionController*> controller);
+
+	rpl::producer<not_null<DocumentData*>> fileChosen() const;
+	rpl::producer<not_null<PhotoData*>> photoChosen() const;
+	rpl::producer<InlineChosen> inlineResultChosen() const;
 
 	void refreshRecent() override;
 	void preloadImages() override;
 	void clearSelection() override;
 	object_ptr<TabbedSelector::InnerFooter> createFooter() override;
 
-	void setVisibleTopBottom(int visibleTop, int visibleBottom) override;
-
 	void inlineItemLayoutChanged(const InlineBots::Layout::ItemBase *layout) override;
 	void inlineItemRepaint(const InlineBots::Layout::ItemBase *layout) override;
 	bool inlineItemVisible(const InlineBots::Layout::ItemBase *layout) override;
+	Data::FileOrigin inlineItemFileOrigin() override;
 
 	void afterShown() override;
 	void beforeHiding() override;
@@ -66,9 +63,16 @@ public:
 	void searchForGifs(const QString &query);
 	void sendInlineRequest();
 
+	void cancelled();
+	rpl::producer<> cancelRequests() const;
+
 	~GifsListWidget();
 
 protected:
+	void visibleTopBottomUpdated(
+		int visibleTop,
+		int visibleBottom) override;
+
 	void mousePressEvent(QMouseEvent *e) override;
 	void mouseReleaseEvent(QMouseEvent *e) override;
 	void mouseMoveEvent(QMouseEvent *e) override;
@@ -80,20 +84,7 @@ protected:
 	TabbedSelector::InnerFooter *getFooter() const override;
 	void processHideFinished() override;
 	void processPanelHideFinished() override;
-	int countHeight() override;
-
-private slots:
-	void onPreview();
-	void onUpdateInlineItems();
-
-signals:
-	void selected(DocumentData *sticker);
-	void selected(PhotoData *photo);
-	void selected(InlineBots::Result *result, UserData *bot);
-	void cancelled();
-
-	void emptyInlineRows();
-	void scrollUpdated();
+	int countDesiredHeight(int newWidth) override;
 
 private:
 	enum class Section {
@@ -124,12 +115,18 @@ private:
 	void updateSelected();
 	void paintInlineItems(Painter &p, QRect clip);
 
+	void updateInlineItems();
+	void showPreview();
+
+	MTP::Sender _api;
+
 	Section _section = Section::Gifs;
-	TimeMs _lastScrolled = 0;
-	QTimer _updateInlineItems;
+	crl::time _lastScrolled = 0;
+	base::Timer _updateInlineItems;
 	bool _inlineWithThumb = false;
 
 	struct Row {
+		int maxWidth = 0;
 		int height = 0;
 		QVector<LayoutItem*> items;
 	};
@@ -145,7 +142,7 @@ private:
 	bool inlineRowsAddItem(DocumentData *savedGif, InlineResult *result, Row &row, int32 &sumWidth);
 	bool inlineRowFinalize(Row &row, int32 &sumWidth, bool force = false);
 
-	Row &layoutInlineRow(Row &row, int32 sumWidth = 0);
+	void layoutInlineRow(Row &row, int fullWidth);
 	void deleteUnusedGifLayouts();
 
 	void deleteUnusedInlineLayouts();
@@ -159,7 +156,7 @@ private:
 	int _pressed = -1;
 	QPoint _lastMousePos;
 
-	QTimer _previewTimer;
+	base::Timer _previewTimer;
 	bool _previewShown = false;
 
 	std::map<QString, std::unique_ptr<InlineCacheEntry>> _inlineCache;
@@ -170,6 +167,11 @@ private:
 	PeerData *_inlineQueryPeer = nullptr;
 	QString _inlineQuery, _inlineNextQuery, _inlineNextOffset;
 	mtpRequestId _inlineRequestId = 0;
+
+	rpl::event_stream<not_null<DocumentData*>> _fileChosen;
+	rpl::event_stream<not_null<PhotoData*>> _photoChosen;
+	rpl::event_stream<InlineChosen> _inlineResultChosen;
+	rpl::event_stream<> _cancelled;
 
 };
 

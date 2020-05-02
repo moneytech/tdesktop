@@ -1,30 +1,23 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "styles/style_widgets.h"
+#include "ui/effects/animations.h"
+#include "ui/rp_widget.h"
+
+namespace base {
+class Timer;
+} // namespace base
 
 namespace Ui {
 
-class ContinuousSlider : public TWidget {
+class ContinuousSlider : public RpWidget {
 public:
 	ContinuousSlider(QWidget *parent);
 
@@ -38,18 +31,21 @@ public:
 	}
 
 	float64 value() const;
-	void setValue(float64 value, bool animated);
+	void setValue(float64 value);
+	void setValue(float64 value, float64 receivedTill);
 	void setFadeOpacity(float64 opacity);
 	void setDisabled(bool disabled);
 	bool isDisabled() const {
 		return _disabled;
 	}
 
-	using Callback = base::lambda<void(float64)>;
-	void setChangeProgressCallback(Callback &&callback) {
+	void setAdjustCallback(Fn<float64(float64)> callback) {
+		_adjustCallback = std::move(callback);
+	}
+	void setChangeProgressCallback(Fn<void(float64)> callback) {
 		_changeProgressCallback = std::move(callback);
 	}
-	void setChangeFinishedCallback(Callback &&callback) {
+	void setChangeFinishedCallback(Fn<void(float64)> callback) {
 		_changeFinishedCallback = std::move(callback);
 	}
 	bool isChanging() const {
@@ -69,12 +65,14 @@ protected:
 	float64 fadeOpacity() const {
 		return _fadeOpacity;
 	}
-	float64 getCurrentValue(TimeMs ms) {
-		_a_value.step(ms);
-		return _mouseDown ? _downValue : a_value.current();
+	float64 getCurrentValue() const {
+		return _mouseDown ? _downValue : _value;
 	}
-	float64 getCurrentOverFactor(TimeMs ms) {
-		return _disabled ? 0. : _a_over.current(ms, _over ? 1. : 0.);
+	float64 getCurrentReceivedTill() const {
+		return _receivedTill;
+	}
+	float64 getCurrentOverFactor() {
+		return _disabled ? 0. : _overAnimation.value(_over ? 1. : 0.);
 	}
 	Direction getDirection() const {
 		return _direction;
@@ -82,16 +80,16 @@ protected:
 	bool isHorizontal() const {
 		return (_direction == Direction::Horizontal);
 	}
+	QRect getSeekRect() const;
+	virtual QSize getSeekDecreaseSize() const = 0;
 
 private:
-	virtual QRect getSeekRect() const = 0;
 	virtual float64 getOverDuration() const = 0;
 
 	bool moveByWheel() const {
 		return _byWheelFinished != nullptr;
 	}
 
-	void step_value(float64 ms, bool timer);
 	void setOver(bool over);
 	float64 computeValue(const QPoint &pos) const;
 	void updateDownValueFromPos(const QPoint &pos);
@@ -99,18 +97,17 @@ private:
 	Direction _direction = Direction::Horizontal;
 	bool _disabled = false;
 
-	std::unique_ptr<SingleTimer> _byWheelFinished;
+	std::unique_ptr<base::Timer> _byWheelFinished;
 
-	Callback _changeProgressCallback;
-	Callback _changeFinishedCallback;
+	Fn<float64(float64)> _adjustCallback;
+	Fn<void(float64)> _changeProgressCallback;
+	Fn<void(float64)> _changeFinishedCallback;
 
 	bool _over = false;
-	Animation _a_over;
+	Ui::Animations::Simple _overAnimation;
 
-	// This can animate for a very long time (like in music playing),
-	// so it should be a BasicAnimation, not an Animation.
-	anim::value a_value;
-	BasicAnimation _a_value;
+	float64 _value = 0.;
+	float64 _receivedTill = 0.;
 
 	bool _mouseDown = false;
 	float64 _downValue = 0.;
@@ -127,7 +124,7 @@ protected:
 	void paintEvent(QPaintEvent *e) override;
 
 private:
-	QRect getSeekRect() const override;
+	QSize getSeekDecreaseSize() const override;
 	float64 getOverDuration() const override;
 
 	const style::FilledSlider &_st;
@@ -142,16 +139,56 @@ public:
 		_alwaysDisplayMarker = alwaysDisplayMarker;
 		update();
 	}
+	void disablePaint(bool disabled);
+
+	template <
+		typename Value,
+		typename Convert,
+		typename Callback,
+		typename = std::enable_if_t<
+			rpl::details::is_callable_plain_v<Callback, Value>
+			&& std::is_same_v<Value, decltype(std::declval<Convert>()(1))>>>
+	void setPseudoDiscrete(
+			int valuesCount,
+			Convert &&convert,
+			Value current,
+			Callback &&callback) {
+		Expects(valuesCount > 1);
+
+		setAlwaysDisplayMarker(true);
+		setDirection(Ui::ContinuousSlider::Direction::Horizontal);
+
+		const auto sectionsCount = (valuesCount - 1);
+		setValue(1.);
+		for (auto index = index_type(); index != valuesCount; ++index) {
+			if (current <= convert(index)) {
+				setValue(index / float64(sectionsCount));
+				break;
+			}
+		}
+		setAdjustCallback([=](float64 value) {
+			return std::round(value * sectionsCount) / sectionsCount;
+		});
+		setChangeProgressCallback([
+			=,
+			convert = std::forward<Convert>(convert),
+			callback = std::forward<Callback>(callback)
+		](float64 value) {
+			const auto index = int(std::round(value * sectionsCount));
+			callback(convert(index));
+		});
+	}
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
 
 private:
-	QRect getSeekRect() const override;
+	QSize getSeekDecreaseSize() const override;
 	float64 getOverDuration() const override;
 
 	const style::MediaSlider &_st;
 	bool _alwaysDisplayMarker = false;
+	bool _paintDisabled = false;
 
 };
 

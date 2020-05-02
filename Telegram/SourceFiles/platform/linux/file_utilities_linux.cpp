@@ -1,32 +1,31 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/linux/file_utilities_linux.h"
 
-#include <private/qguiapplication_p.h>
 #include "platform/linux/linux_libs.h"
 #include "platform/linux/linux_gdk_helper.h"
+#include "platform/linux/specific_linux.h"
+#include "core/application.h"
 #include "mainwindow.h"
+#include "boxes/abstract_box.h"
 #include "storage/localstorage.h"
+#include "base/platform/base_platform_file_utilities.h"
+#include "base/call_delayed.h"
+#include "facades.h"
+
+#include <QtCore/QProcess>
+#include <QtGui/QDesktopServices>
+
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
+#include <private/qguiapplication_p.h>
 
 QStringList qt_make_filter_list(const QString &filter);
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 namespace Platform {
 namespace File {
@@ -60,40 +59,55 @@ QByteArray EscapeShell(const QByteArray &content) {
 
 } // namespace internal
 
-void UnsafeShowInFolder(const QString &filepath) {
-	Ui::hideLayer(true); // Hide mediaview to make other apps visible.
-
-	auto absolutePath = QFileInfo(filepath).absoluteFilePath();
-	QProcess process;
-	process.start("xdg-mime", QStringList() << "query" << "default" << "inode/directory");
-	process.waitForFinished();
-	auto output = QString::fromLatin1(process.readLine().simplified());
-	auto command = qsl("xdg-open");
-	auto arguments = QStringList();
-	if (output == qstr("dolphin.desktop") || output == qstr("org.kde.dolphin.desktop")) {
-		command = qsl("dolphin");
-		arguments << "--select" << absolutePath;
-	} else if (output == qstr("nautilus.desktop") || output == qstr("org.gnome.Nautilus.desktop") || output == qstr("nautilus-folder-handler.desktop")) {
-		command = qsl("nautilus");
-		arguments << "--no-desktop" << absolutePath;
-	} else if (output == qstr("nemo.desktop")) {
-		command = qsl("nemo");
-		arguments << "--no-desktop" << absolutePath;
-	} else if (output == qstr("konqueror.desktop") || output == qstr("kfmclient_dir.desktop")) {
-		command = qsl("konqueror");
-		arguments << "--select" << absolutePath;
+void UnsafeOpenUrl(const QString &url) {
+	if (InSnap()) {
+		const QStringList arguments{
+			url
+		};
+		QProcess process;
+		process.startDetached(qsl("xdg-open"), arguments);
 	} else {
-		arguments << QFileInfo(filepath).absoluteDir().absolutePath();
+		QDesktopServices::openUrl(url);
 	}
-	if (!process.startDetached(command, arguments)) {
-		LOG(("Failed to launch '%1 %2'").arg(command).arg(arguments.join(' ')));
+}
+
+void UnsafeOpenEmailLink(const QString &email) {
+	const auto url = qstr("mailto:") + email;
+
+	if (InSnap()) {
+		const QStringList arguments{
+			url
+		};
+		QProcess process;
+		process.startDetached(qsl("xdg-open"), arguments);
+	} else {
+		QDesktopServices::openUrl(QUrl(url));
 	}
+}
+
+void UnsafeLaunch(const QString &filepath) {
+	if (InSnap()) {
+		const QStringList arguments{
+			QFileInfo(filepath).absoluteFilePath()
+		};
+		QProcess process;
+		process.startDetached(qsl("xdg-open"), arguments);
+	} else {
+		QDesktopServices::openUrl(QUrl::fromLocalFile(filepath));
+	}
+}
+
+void UnsafeShowInFolder(const QString &filepath) {
+	// Hide mediaview to make other apps visible.
+	Ui::hideLayer(anim::type::instant);
+	base::Platform::ShowInFolder(filepath);
 }
 
 } // namespace File
 
 namespace FileDialog {
 namespace {
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 
 // GTK file chooser image preview: thanks to Chromium
 
@@ -104,11 +118,17 @@ namespace {
 // be preserved.
 constexpr auto kPreviewWidth = 256;
 constexpr auto kPreviewHeight = 512;
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 using Type = ::FileDialog::internal::Type;
 
-bool NativeSupported() {
-	return Platform::internal::GdkHelperLoaded()
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
+bool NativeSupported(Type type = Type::ReadFile) {
+#ifndef TDESKTOP_FORCE_GTK_FILE_DIALOG
+	return false;
+#endif // TDESKTOP_FORCE_GTK_FILE_DIALOG
+	return (!Platform::UseXDGDesktopPortal() || type == Type::ReadFolder)
+		&& Platform::internal::GdkHelperLoaded()
 		&& (Libs::gtk_widget_hide_on_delete != nullptr)
 		&& (Libs::gtk_clipboard_store != nullptr)
 		&& (Libs::gtk_clipboard_get != nullptr)
@@ -148,8 +168,14 @@ bool PreviewSupported() {
 		&& (Libs::gdk_pixbuf_new_from_file_at_size != nullptr);
 }
 
-bool GetNative(QStringList &files, QByteArray &remoteContent, const QString &caption, const QString &filter, Type type, QString startFile) {
-	auto parent = App::wnd() ? App::wnd()->filedialogParent() : nullptr;
+bool GetNative(
+		QPointer<QWidget> parent,
+		QStringList &files,
+		QByteArray &remoteContent,
+		const QString &caption,
+		const QString &filter,
+		Type type,
+		QString startFile) {
 	internal::GtkFileDialog dialog(parent, caption, QString(), filter);
 
 	dialog.setModal(true);
@@ -190,16 +216,44 @@ bool GetNative(QStringList &files, QByteArray &remoteContent, const QString &cap
 	remoteContent = QByteArray();
 	return false;
 }
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 } // namespace
 
-bool Get(QStringList &files, QByteArray &remoteContent, const QString &caption, const QString &filter, Type type, QString startFile) {
-	if (NativeSupported()) {
-		return GetNative(files, remoteContent, caption, filter, type, startFile);
+bool Get(
+		QPointer<QWidget> parent,
+		QStringList &files,
+		QByteArray &remoteContent,
+		const QString &caption,
+		const QString &filter,
+		Type type,
+		QString startFile) {
+	if (parent) {
+		parent = parent->window();
 	}
-	return ::FileDialog::internal::GetDefault(files, remoteContent, caption, filter, type, startFile);
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
+	if (NativeSupported(type)) {
+		return GetNative(
+			parent,
+			files,
+			remoteContent,
+			caption,
+			filter,
+			type,
+			startFile);
+	}
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
+	return ::FileDialog::internal::GetDefault(
+		parent,
+		files,
+		remoteContent,
+		caption,
+		filter,
+		type,
+		startFile);
 }
 
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 namespace internal {
 
 QGtkDialog::QGtkDialog(GtkWidget *gtkWidget) : gtkWidget(gtkWidget) {
@@ -222,9 +276,6 @@ GtkDialog *QGtkDialog::gtkDialog() const {
 }
 
 void QGtkDialog::exec() {
-	if (auto w = App::wnd()) {
-		w->reActivateWindow();
-	}
 	if (modality() == Qt::ApplicationModal) {
 		// block input to the whole app, including other GTK dialogs
 		Libs::gtk_dialog_run(gtkDialog());
@@ -301,6 +352,7 @@ void QGtkDialog::onParentWindowDestroyed() {
 	// The Gtk*DialogHelper classes own this object. Make sure the parent doesn't delete it.
 	setParent(nullptr);
 }
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 namespace {
 
@@ -320,6 +372,7 @@ QStringList cleanFilterList(const QString &filter) {
 
 } // namespace
 
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 GtkFileDialog::GtkFileDialog(QWidget *parent, const QString &caption, const QString &directory, const QString &filter) : QDialog(parent)
 , _windowTitle(caption)
 , _initialDirectory(directory) {
@@ -333,7 +386,7 @@ GtkFileDialog::GtkFileDialog(QWidget *parent, const QString &caption, const QStr
 	d.reset(new QGtkDialog(Libs::gtk_file_chooser_dialog_new("", nullptr,
 		GTK_FILE_CHOOSER_ACTION_OPEN,
 		GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
-		GTK_STOCK_OK, GTK_RESPONSE_OK, NULL)));
+		GTK_STOCK_OK, GTK_RESPONSE_OK, nullptr)));
 	connect(d.data(), SIGNAL(accept()), this, SLOT(onAccepted()));
 	connect(d.data(), SIGNAL(reject()), this, SLOT(onRejected()));
 
@@ -385,6 +438,12 @@ int GtkFileDialog::exec() {
 	setResult(0);
 
 	show();
+
+	if (const auto parent = parentWidget()) {
+		base::call_delayed(200, parent, [=] {
+			parent->activateWindow();
+		});
+	}
 
 	QPointer<QDialog> guard = this;
 	d->exec();
@@ -623,5 +682,6 @@ void GtkFileDialog::setNameFilters(const QStringList &filters) {
 }
 
 } // namespace internal
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 } // namespace FileDialog
 } // namespace Platform

@@ -1,45 +1,64 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "base/weak_unique_ptr.h"
+#include "base/weak_ptr.h"
 #include "base/timer.h"
 #include "calls/calls_call.h"
 #include "ui/widgets/tooltip.h"
+#include "ui/effects/animations.h"
+#include "ui/rp_widget.h"
 
 namespace Ui {
 class IconButton;
 class FlatLabel;
 template <typename Widget>
-class WidgetFadeWrap;
+class FadeWrap;
 } // namespace Ui
+
+namespace style {
+struct CallSignalBars;
+} // namespace style
 
 namespace Calls {
 
-class Panel : public TWidget, private base::Subscriber, private Ui::AbstractTooltipShower {
+class SignalBars : public Ui::RpWidget, private base::Subscriber {
 public:
-	Panel(gsl::not_null<Call*> call);
+	SignalBars(
+		QWidget *parent,
+		not_null<Call*> call,
+		const style::CallSignalBars &st,
+		Fn<void()> displayedChangedCallback = nullptr);
+
+	bool isDisplayed() const;
+
+protected:
+	void paintEvent(QPaintEvent *e) override;
+
+private:
+	void changed(int count);
+
+	const style::CallSignalBars &_st;
+	int _count = Call::kSignalBarStarting;
+	Fn<void()> _displayedChangedCallback;
+
+};
+
+class Panel
+	: public Ui::RpWidget
+	, private base::Subscriber
+	, private Ui::AbstractTooltipShower {
+
+public:
+	Panel(not_null<Call*> call);
 
 	void showAndActivate();
-	void replaceCall(gsl::not_null<Call*> call);
+	void replaceCall(not_null<Call*> call);
 	void hideAndDestroy();
 
 protected:
@@ -51,7 +70,7 @@ protected:
 	void mouseMoveEvent(QMouseEvent *e) override;
 	void leaveEventHook(QEvent *e) override;
 	void leaveToChildEvent(QEvent *e, QWidget *child) override;
-	bool event(QEvent *e) override;
+	bool eventHook(QEvent *e) override;
 
 private:
 	using State = Call::State;
@@ -74,7 +93,9 @@ private:
 	void processUserPhoto();
 	void refreshUserPhoto();
 	bool isGoodUserPhoto(PhotoData *photo);
-	void createUserpicCache(ImagePtr image);
+	void createUserpicCache(Image *image, Data::FileOrigin origin);
+	QRect signalBarsRect() const;
+	void paintSignalBarsBg(Painter &p);
 
 	void updateControlsGeometry();
 	void updateHangupGeometry();
@@ -82,14 +103,14 @@ private:
 	void stateChanged(State state);
 	void showControls();
 	void updateStatusText(State state);
-	void startDurationUpdateTimer(TimeMs currentDuration);
+	void startDurationUpdateTimer(crl::time currentDuration);
 	void fillFingerprint();
 	void toggleOpacityAnimation(bool visible);
-	void finishAnimation();
+	void finishAnimating();
 	void destroyDelayed();
 
 	Call *_call = nullptr;
-	gsl::not_null<UserData*> _user;
+	not_null<UserData*> _user;
 
 	bool _useTransparency = true;
 	style::margins _padding;
@@ -103,13 +124,14 @@ private:
 
 	class Button;
 	object_ptr<Button> _answerHangupRedial;
-	object_ptr<Ui::WidgetFadeWrap<Button>> _decline;
-	object_ptr<Ui::WidgetFadeWrap<Button>> _cancel;
+	object_ptr<Ui::FadeWrap<Button>> _decline;
+	object_ptr<Ui::FadeWrap<Button>> _cancel;
 	bool _hangupShown = false;
-	Animation _hangupShownProgress;
+	Ui::Animations::Simple _hangupShownProgress;
 	object_ptr<Ui::IconButton> _mute;
 	object_ptr<Ui::FlatLabel> _name;
 	object_ptr<Ui::FlatLabel> _status;
+	object_ptr<SignalBars> _signalBars;
 	std::vector<EmojiPtr> _fingerprint;
 	QRect _fingerprintArea;
 
@@ -121,7 +143,7 @@ private:
 	PhotoId _userPhotoId = 0;
 	bool _userPhotoFull = false;
 
-	Animation _opacityAnimation;
+	Ui::Animations::Simple _opacityAnimation;
 	QPixmap _animationCache;
 	QPixmap _bottomCache;
 	QPixmap _cache;

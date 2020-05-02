@@ -1,32 +1,25 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "window/notifications_manager.h"
-#include "core/single_timer.h"
+#include "ui/effects/animations.h"
+#include "ui/rp_widget.h"
+#include "base/timer.h"
+#include "base/binary_guard.h"
+#include "base/object_ptr.h"
+
+#include <QtCore/QTimer>
 
 namespace Ui {
 class IconButton;
 class RoundButton;
-class InputArea;
+class InputField;
 } // namespace Ui
 
 namespace Window {
@@ -64,11 +57,13 @@ private:
 	QPixmap hiddenUserpicPlaceholder() const;
 
 	void doUpdateAll() override;
-	void doShowNotification(HistoryItem *item, int forwardedCount) override;
+	void doShowNotification(
+		not_null<HistoryItem*> item,
+		int forwardedCount) override;
 	void doClearAll() override;
 	void doClearAllFast() override;
-	void doClearFromHistory(History *history) override;
-	void doClearFromItem(HistoryItem *item) override;
+	void doClearFromHistory(not_null<History*> history) override;
+	void doClearFromItem(not_null<HistoryItem*> item) override;
 
 	void showNextFromQueue();
 	void unlinkFromShown(Notification *remove);
@@ -92,26 +87,21 @@ private:
 	std::unique_ptr<HideAllButton> _hideAll;
 
 	bool _positionsOutdated = false;
-	SingleTimer _inputCheckTimer;
+	base::Timer _inputCheckTimer;
 
 	struct QueuedNotification {
-		QueuedNotification(HistoryItem *item, int forwardedCount)
-		: history(item->history())
-		, peer(history->peer)
-		, author((item->hasFromName() && !item->isPost()) ? item->author() : nullptr)
-		, item((forwardedCount > 1) ? nullptr : item)
-		, forwardedCount(forwardedCount) {
-		}
+		QueuedNotification(not_null<HistoryItem*> item, int forwardedCount);
 
-		History *history;
-		PeerData *peer;
-		PeerData *author;
-		HistoryItem *item;
-		int forwardedCount;
+		not_null<History*> history;
+		not_null<PeerData*> peer;
+		QString author;
+		HistoryItem *item = nullptr;
+		int forwardedCount = 0;
+		bool fromScheduled = false;
 	};
 	std::deque<QueuedNotification> _queuedNotifications;
 
-	Animation _demoMasterOpacity;
+	Ui::Animations::Simple _demoMasterOpacity;
 
 	mutable QPixmap _hiddenUserpicPlaceholder;
 
@@ -125,7 +115,11 @@ public:
 		Up,
 		Down,
 	};
-	Widget(Manager *manager, QPoint startPosition, int shift, Direction shiftDirection);
+	Widget(
+		not_null<Manager*> manager,
+		QPoint startPosition,
+		int shift,
+		Direction shiftDirection);
 
 	bool isShowing() const {
 		return _a_opacity.animating() && !_hiding;
@@ -134,7 +128,7 @@ public:
 	void updateOpacity();
 	void changeShift(int top);
 	int currentShift() const {
-		return a_shift.current();
+		return _shift.current();
 	}
 	void updatePosition(QPoint startPosition, Direction shiftDirection);
 	void addToHeight(int add);
@@ -149,7 +143,7 @@ protected:
 	virtual void updateGeometry(int x, int y, int width, int height);
 
 protected:
-	Manager *manager() const {
+	not_null<Manager*> manager() const {
 		return _manager;
 	}
 
@@ -158,18 +152,19 @@ private:
 	void destroyDelayed();
 	void moveByShift();
 	void hideAnimated(float64 duration, const anim::transition &func);
-	void step_shift(float64 ms, bool timer);
+	bool shiftAnimationCallback(crl::time now);
 
-	Manager *_manager = nullptr;
+	const not_null<Manager*> _manager;
 
 	bool _hiding = false;
 	bool _deleted = false;
-	Animation _a_opacity;
+	base::binary_guard _hidingDelayed;
+	Ui::Animations::Simple _a_opacity;
 
 	QPoint _startPosition;
 	Direction _direction;
-	anim::value a_shift;
-	BasicAnimation _a_shift;
+	anim::value _shift;
+	Ui::Animations::Basic _shiftAnimation;
 
 };
 
@@ -183,10 +178,18 @@ protected:
 };
 
 class Notification : public Widget {
-	Q_OBJECT
-
 public:
-	Notification(Manager *manager, History *history, PeerData *peer, PeerData *author, HistoryItem *item, int forwardedCount, QPoint startPosition, int shift, Direction shiftDirection);
+	Notification(
+		not_null<Manager*> manager,
+		not_null<History*> history,
+		not_null<PeerData*> peer,
+		const QString &author,
+		HistoryItem *item,
+		int forwardedCount,
+		bool fromScheduled,
+		QPoint startPosition,
+		int shift,
+		Direction shiftDirection);
 
 	void startHiding();
 	void stopHiding();
@@ -213,14 +216,12 @@ protected:
 	void mousePressEvent(QMouseEvent *e) override;
 	bool eventFilter(QObject *o, QEvent *e) override;
 
-private slots:
-	void onHideByTimer();
-	void onReplyResize();
-	void onReplySubmit(bool ctrlShiftEnter);
-	void onReplyCancel();
-
 private:
+	void refreshLang();
+	void updateReplyGeometry();
 	bool canReply() const;
+	void replyResized();
+	void replyCancel();
 
 	void unlinkHistoryInManager();
 	void toggleActionButtons(bool visible);
@@ -235,22 +236,21 @@ private:
 
 	bool _hideReplyButton = false;
 	bool _actionsVisible = false;
-	Animation a_actionsOpacity;
+	Ui::Animations::Simple a_actionsOpacity;
 	QPixmap _buttonsCache;
 
-#ifdef Q_OS_WIN
-	TimeMs _started;
-#endif // Q_OS_WIN
+	crl::time _started;
 
-	History *_history;
-	PeerData *_peer;
-	PeerData *_author;
-	HistoryItem *_item;
-	int _forwardedCount;
+	History *_history = nullptr;
+	PeerData *_peer = nullptr;
+	QString _author;
+	HistoryItem *_item = nullptr;
+	int _forwardedCount = 0;
+	bool _fromScheduled = false;
 	object_ptr<Ui::IconButton> _close;
 	object_ptr<Ui::RoundButton> _reply;
 	object_ptr<Background> _background = { nullptr };
-	object_ptr<Ui::InputArea> _replyArea = { nullptr };
+	object_ptr<Ui::InputField> _replyArea = { nullptr };
 	object_ptr<Ui::IconButton> _replySend = { nullptr };
 	bool _waitingForInput = true;
 
@@ -264,7 +264,11 @@ private:
 
 class HideAllButton : public Widget {
 public:
-	HideAllButton(Manager *manager, QPoint startPosition, int shift, Direction shiftDirection);
+	HideAllButton(
+		not_null<Manager*> manager,
+		QPoint startPosition,
+		int shift,
+		Direction shiftDirection);
 
 	void startHiding();
 	void startHidingFast();

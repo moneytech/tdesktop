@@ -1,31 +1,23 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "platform/platform_file_utilities.h"
 
+#include <QtGui/QWindow>
+#include <QtWidgets/QFileDialog>
+
 extern "C" {
 #undef signals
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 #define signals public
 } // extern "C"
 
@@ -41,20 +33,12 @@ inline QString UrlToLocal(const QUrl &url) {
 	return ::File::internal::UrlToLocalDefault(url);
 }
 
-inline void UnsafeOpenEmailLink(const QString &email) {
-	return ::File::internal::UnsafeOpenEmailLinkDefault(email);
-}
-
 inline bool UnsafeShowOpenWithDropdown(const QString &filepath, QPoint menuPosition) {
 	return false;
 }
 
 inline bool UnsafeShowOpenWith(const QString &filepath) {
 	return false;
-}
-
-inline void UnsafeLaunch(const QString &filepath) {
-	return ::File::internal::UnsafeLaunchDefault(filepath);
 }
 
 inline void PostprocessDownloaded(const QString &filepath) {
@@ -69,6 +53,7 @@ inline void InitLastPath() {
 }
 
 namespace internal {
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 
 // This is a patched copy of qgtk2 theme plugin.
 // We need to use our own gtk file dialog instead of
@@ -173,6 +158,7 @@ private:
 	QHash<GtkFileFilter*, QString> _filterNames;
 	QScopedPointer<QGtkDialog> d;
 };
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 } // namespace internal
 } // namespace FileDialog

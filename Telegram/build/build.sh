@@ -4,7 +4,7 @@ pushd `dirname $0` > /dev/null
 FullScriptPath=`pwd`
 popd > /dev/null
 
-if [ ! -d "$FullScriptPath/../../../TelegramPrivate" ]; then
+if [ ! -d "$FullScriptPath/../../../DesktopPrivate" ]; then
   echo ""
   echo "This script is for building the production version of Telegram Desktop."
   echo ""
@@ -33,17 +33,17 @@ while IFS='' read -r line || [[ -n "$line" ]]; do
 done < "$FullScriptPath/version"
 
 VersionForPacker="$AppVersion"
-if [ "$BetaVersion" != "0" ]; then
-  AppVersion="$BetaVersion"
-  AppVersionStrFull="${AppVersionStr}_${BetaVersion}"
-  AlphaBetaParam="-beta $BetaVersion"
-  BetaKeyFile="tbeta_${AppVersion}_key"
-elif [ "$AlphaChannel" == "0" ]; then
+if [ "$AlphaVersion" != "0" ]; then
+  AppVersion="$AlphaVersion"
+  AppVersionStrFull="${AppVersionStr}_${AlphaVersion}"
+  AlphaBetaParam="-alpha $AlphaVersion"
+  AlphaKeyFile="talpha_${AppVersion}_key"
+elif [ "$BetaChannel" == "0" ]; then
   AppVersionStrFull="$AppVersionStr"
   AlphaBetaParam=''
 else
-  AppVersionStrFull="$AppVersionStr.alpha"
-  AlphaBetaParam='-alpha'
+  AppVersionStrFull="$AppVersionStr.beta"
+  AlphaBetaParam='-beta'
 fi
 
 echo ""
@@ -52,67 +52,69 @@ if [ "$BuildTarget" == "linux" ]; then
   echo "Building version $AppVersionStrFull for Linux 64bit.."
   UpdateFile="tlinuxupd$AppVersion"
   SetupFile="tsetup.$AppVersionStrFull.tar.xz"
-  ReleasePath="$HomePath/../out/Release"
+  ProjectPath="$HomePath/../out"
+  ReleasePath="$ProjectPath/Release"
   BinaryName="Telegram"
 elif [ "$BuildTarget" == "linux32" ]; then
   echo "Building version $AppVersionStrFull for Linux 32bit.."
   UpdateFile="tlinux32upd$AppVersion"
   SetupFile="tsetup32.$AppVersionStrFull.tar.xz"
-  ReleasePath="$HomePath/../out/Release"
+  ProjectPath="$HomePath/../out"
+  ReleasePath="$ProjectPath/Release"
   BinaryName="Telegram"
 elif [ "$BuildTarget" == "mac" ]; then
-  echo "Building version $AppVersionStrFull for OS X 10.8+.."
+  echo "Building version $AppVersionStrFull for macOS 10.12+.."
+  if [ "$AC_USERNAME" == "" ]; then
+    Error "AC_USERNAME not found!"
+  fi
   UpdateFile="tmacupd$AppVersion"
   SetupFile="tsetup.$AppVersionStrFull.dmg"
-  ReleasePath="$HomePath/../out/Release"
+  ProjectPath="$HomePath/../out"
+  ReleasePath="$ProjectPath/Release"
   BinaryName="Telegram"
-elif [ "$BuildTarget" == "mac32" ]; then
-  echo "Building version $AppVersionStrFull for OS X 10.6 and 10.7.."
-  UpdateFile="tmac32upd$AppVersion"
-  SetupFile="tsetup32.$AppVersionStrFull.dmg"
-  ReleasePath="$HomePath/../out/Release"
+elif [ "$BuildTarget" == "osx" ]; then
+  echo "Building version $AppVersionStrFull for OS X 10.10 and 10.11.."
+  UpdateFile="tosxupd$AppVersion"
+  SetupFile="tsetup-osx.$AppVersionStrFull.dmg"
+  ProjectPath="$HomePath/../out"
+  ReleasePath="$ProjectPath/Release"
   BinaryName="Telegram"
 elif [ "$BuildTarget" == "macstore" ]; then
-  if [ "$BetaVersion" != "0" ]; then
-    Error "Can't build macstore beta version!"
+  if [ "$AlphaVersion" != "0" ]; then
+    Error "Can't build macstore alpha version!"
   fi
 
   echo "Building version $AppVersionStrFull for Mac App Store.."
-  ReleasePath="$HomePath/../out/Release"
-  BinaryName="Telegram Desktop"
+  ProjectPath="$HomePath/../out"
+  ReleasePath="$ProjectPath/Release"
+  BinaryName="Telegram Lite"
 else
   Error "Invalid target!"
 fi
 
-#if [ "$BuildTarget" == "linux" ] || [ "$BuildTarget" == "linux32" ] || [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarget" == "macstore" ]; then
-  if [ "$BetaVersion" != "0" ]; then
-    if [ -f "$ReleasePath/$BetaKeyFile" ]; then
-      Error "Beta version key file for version $AppVersion already exists!"
-    fi
-
-    if [ -d "$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStrFull" ]; then
-      Error "Deploy folder for version $AppVersionStrFull already exists!"
-    fi
-  else
-    if [ -d "$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStr.alpha" ]; then
-      Error "Deploy folder for version $AppVersionStr.alpha already exists!"
-    fi
-
-    if [ -d "$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStr.dev" ]; then
-      Error "Deploy folder for version $AppVersionStr.dev already exists!"
-    fi
-
-    if [ -d "$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStr" ]; then
-      Error "Deploy folder for version $AppVersionStr already exists!"
-    fi
-
-    if [ -f "$ReleasePath/$UpdateFile" ]; then
-      Error "Update file for version $AppVersion already exists!"
-    fi
+if [ "$AlphaVersion" != "0" ]; then
+  if [ -d "$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStrFull" ]; then
+    Error "Deploy folder for version $AppVersionStrFull already exists!"
+  fi
+else
+  if [ -d "$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStr.alpha" ]; then
+    Error "Deploy folder for version $AppVersionStr.alpha already exists!"
   fi
 
-  DeployPath="$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStrFull"
-#fi
+  if [ -d "$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStr.beta" ]; then
+    Error "Deploy folder for version $AppVersionStr.beta already exists!"
+  fi
+
+  if [ -d "$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStr" ]; then
+    Error "Deploy folder for version $AppVersionStr already exists!"
+  fi
+
+  if [ -f "$ReleasePath/$UpdateFile" ]; then
+    Error "Update file for version $AppVersion already exists!"
+  fi
+fi
+
+DeployPath="$ReleasePath/deploy/$AppVersionStrMajor/$AppVersionStrFull"
 
 if [ "$BuildTarget" == "linux" ] || [ "$BuildTarget" == "linux32" ]; then
 
@@ -121,26 +123,77 @@ if [ "$BuildTarget" == "linux" ] || [ "$BuildTarget" == "linux32" ]; then
     Error "Dropbox path not found!"
   fi
 
-  gyp/refresh.sh
+  BackupPath="/media/psf/backup/tdesktop/$AppVersionStrMajor/$AppVersionStrFull/t$BuildTarget"
+  if [ ! -d "/media/psf/backup/tdesktop" ]; then
+    Error "Backup folder not found!"
+  fi
 
+  ./configure.sh
+
+  cd $ProjectPath
+  cmake --build . --config Release --target Telegram -- -j8
   cd $ReleasePath
-  make -j4
+
   echo "$BinaryName build complete!"
 
   if [ ! -f "$ReleasePath/$BinaryName" ]; then
     Error "$BinaryName not found!"
   fi
 
+  # BadCount=`objdump -T $ReleasePath/$BinaryName | grep GLIBC_2\.1[6-9] | wc -l`
+  # if [ "$BadCount" != "0" ]; then
+  #   Error "Bad GLIBC usages found: $BadCount"
+  # fi
+
+  # BadCount=`objdump -T $ReleasePath/$BinaryName | grep GLIBC_2\.2[0-9] | wc -l`
+  # if [ "$BadCount" != "0" ]; then
+  #   Error "Bad GLIBC usages found: $BadCount"
+  # fi
+
+  BadCount=`objdump -T $ReleasePath/$BinaryName | grep GCC_4\.[3-9] | wc -l`
+  if [ "$BadCount" != "0" ]; then
+    Error "Bad GCC usages found: $BadCount"
+  fi
+
+  BadCount=`objdump -T $ReleasePath/$BinaryName | grep GCC_[5-9]\. | wc -l`
+  if [ "$BadCount" != "0" ]; then
+    Error "Bad GCC usages found: $BadCount"
+  fi
+
   if [ ! -f "$ReleasePath/Updater" ]; then
     Error "Updater not found!"
   fi
 
+  BadCount=`objdump -T $ReleasePath/Updater | grep GLIBC_2\.1[6-9] | wc -l`
+  if [ "$BadCount" != "0" ]; then
+    Error "Bad GLIBC usages found: $BadCount"
+  fi
+
+  BadCount=`objdump -T $ReleasePath/Updater | grep GLIBC_2\.2[0-9] | wc -l`
+  if [ "$BadCount" != "0" ]; then
+    Error "Bad GLIBC usages found: $BadCount"
+  fi
+
+  BadCount=`objdump -T $ReleasePath/Updater | grep GCC_4\.[3-9] | wc -l`
+  if [ "$BadCount" != "0" ]; then
+    Error "Bad GCC usages found: $BadCount"
+  fi
+
+  BadCount=`objdump -T $ReleasePath/Updater | grep GCC_[5-9]\. | wc -l`
+  if [ "$BadCount" != "0" ]; then
+    Error "Bad GCC usages found: $BadCount"
+  fi
+
   echo "Dumping debug symbols.."
-  "$HomePath/../../Libraries/breakpad/src/tools/linux/dump_syms/dump_syms" "$ReleasePath/$BinaryName" > "$ReleasePath/$BinaryName.sym"
+  "$HomePath/../../Libraries/breakpad/out/Default/dump_syms" "$ReleasePath/$BinaryName" > "$ReleasePath/$BinaryName.sym"
   echo "Done!"
 
   echo "Stripping the executable.."
   strip -s "$ReleasePath/$BinaryName"
+  echo "Done!"
+
+  echo "Removing RPATH.."
+  chrpath -d "$ReleasePath/$BinaryName"
   echo "Done!"
 
   echo "Preparing version $AppVersionStrFull, executing Packer.."
@@ -148,17 +201,17 @@ if [ "$BuildTarget" == "linux" ] || [ "$BuildTarget" == "linux32" ]; then
   "./Packer" -path "$BinaryName" -path Updater -version $VersionForPacker $AlphaBetaParam
   echo "Packer done!"
 
-  if [ "$BetaVersion" != "0" ]; then
-    if [ ! -f "$ReleasePath/$BetaKeyFile" ]; then
-      Error "Beta version key file not found!"
+  if [ "$AlphaVersion" != "0" ]; then
+    if [ ! -f "$ReleasePath/$AlphaKeyFile" ]; then
+      Error "Alpha version key file not found!"
     fi
 
     while IFS='' read -r line || [[ -n "$line" ]]; do
-      BetaSignature="$line"
-    done < "$ReleasePath/$BetaKeyFile"
+      AlphaSignature="$line"
+    done < "$ReleasePath/$AlphaKeyFile"
 
-    UpdateFile="${UpdateFile}_${BetaSignature}"
-    SetupFile="tbeta${BetaVersion}_${BetaSignature}.tar.xz"
+    UpdateFile="${UpdateFile}_${AlphaSignature}"
+    SetupFile="talpha${AlphaVersion}_${AlphaSignature}.tar.xz"
   fi
 
   SymbolsHash=`head -n 1 "$ReleasePath/$BinaryName.sym" | awk -F " " 'END {print $4}'`
@@ -181,23 +234,37 @@ if [ "$BuildTarget" == "linux" ] || [ "$BuildTarget" == "linux32" ]; then
   mv "$ReleasePath/$BinaryName" "$DeployPath/$BinaryName/"
   mv "$ReleasePath/Updater" "$DeployPath/$BinaryName/"
   mv "$ReleasePath/$UpdateFile" "$DeployPath/"
-  if [ "$BetaVersion" != "0" ]; then
-    mv "$ReleasePath/$BetaKeyFile" "$DeployPath/"
+  if [ "$AlphaVersion" != "0" ]; then
+    mv "$ReleasePath/$AlphaKeyFile" "$DeployPath/"
   fi
   cd "$DeployPath"
   tar -cJvf "$SetupFile" "$BinaryName/"
+
+  mkdir -p $BackupPath
+  cp "$SetupFile" "$BackupPath/"
+  cp "$UpdateFile" "$BackupPath/"
+  if [ "$AlphaVersion" != "0" ]; then
+    cp -v "$AlphaKeyFile" "$BackupPath/"
+  fi
 fi
 
-if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarget" == "macstore" ]; then
+if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "osx" ] || [ "$BuildTarget" == "macstore" ]; then
 
-  DropboxSymbolsPath="/Volumes/Storage/Dropbox/Telegram/symbols"
+  DropboxSymbolsPath="$HOME/Dropbox/Telegram/symbols"
   if [ ! -d "$DropboxSymbolsPath" ]; then
     Error "Dropbox path not found!"
   fi
 
-  gyp/refresh.sh
-  cd ../
-  xcodebuild -project Telegram.xcodeproj -alltargets -configuration Release build
+  BackupPath="$HOME/Projects/backup/tdesktop/$AppVersionStrMajor/$AppVersionStrFull"
+  if [ ! -d "$HOME/Projects/backup/tdesktop" ]; then
+    Error "Backup path not found!"
+  fi
+
+  ./configure.sh
+
+  cd $ProjectPath
+  cmake --build . --config Release --target Telegram
+  cd $ReleasePath
 
   if [ ! -d "$ReleasePath/$BinaryName.app" ]; then
     Error "$BinaryName.app not found!"
@@ -207,7 +274,7 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
     Error "$BinaryName.app.dSYM not found!"
   fi
 
-  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ]; then
+  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "osx" ]; then
     if [ ! -f "$ReleasePath/$BinaryName.app/Contents/Frameworks/Updater" ]; then
       Error "Updater not found!"
     fi
@@ -222,7 +289,7 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
   fi
 
   echo "Dumping debug symbols.."
-  "$HomePath/../../Libraries/breakpad/src/tools/mac/dump_syms/build/Release/dump_syms" "$ReleasePath/$BinaryName.app.dSYM" > "$ReleasePath/$BinaryName.sym" 2>/dev/null
+  "$HomePath/../../Libraries/macos/breakpad/src/tools/mac/dump_syms/build/Release/dump_syms" "$ReleasePath/$BinaryName.app.dSYM" > "$ReleasePath/$BinaryName.sym" 2>/dev/null
   echo "Done!"
 
   echo "Stripping the executable.."
@@ -230,10 +297,10 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
   echo "Done!"
 
   echo "Signing the application.."
-  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ]; then
-    codesign --force --deep --sign "Developer ID Application: John Preston" "$ReleasePath/$BinaryName.app"
+  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "osx" ]; then
+    codesign --force --deep --timestamp --options runtime --sign "Developer ID Application: John Preston" "$ReleasePath/$BinaryName.app" --entitlements "$HomePath/Telegram/Telegram.entitlements"
   elif [ "$BuildTarget" == "macstore" ]; then
-    codesign --force --deep --sign "3rd Party Mac Developer Application: TELEGRAM MESSENGER LLP (6N38VWS5BX)" "$ReleasePath/$BinaryName.app" --entitlements "$HomePath/Telegram/Telegram Desktop.entitlements"
+    codesign --force --deep --sign "3rd Party Mac Developer Application: TELEGRAM MESSENGER LLP (6N38VWS5BX)" "$ReleasePath/$BinaryName.app" --entitlements "$HomePath/Telegram/Telegram Lite.entitlements"
     echo "Making an installer.."
     productbuild --sign "3rd Party Mac Developer Installer: TELEGRAM MESSENGER LLP (6N38VWS5BX)" --component "$ReleasePath/$BinaryName.app" /Applications "$ReleasePath/$BinaryName.pkg"
   fi
@@ -257,7 +324,7 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
     Error "$BinaryName signature not found!"
   fi
 
-  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ]; then
+  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "osx" ]; then
     if [ ! -f "$ReleasePath/$BinaryName.app/Contents/Frameworks/Updater" ]; then
       Error "Updater not found in Frameworks!"
     fi
@@ -273,9 +340,9 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
   cp "$ReleasePath/$BinaryName.sym" "$DropboxSymbolsPath/$BinaryName/$SymbolsHash/"
   echo "Done!"
 
-  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ]; then
-    if [ "$BetaVersion" == "0" ]; then
-      cd "$ReleasePath"
+  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "osx" ]; then
+    cd "$ReleasePath"
+    if [ "$AlphaVersion" == "0" ]; then
       cp -f tsetup_template.dmg tsetup.temp.dmg
       TempDiskPath=`hdiutil attach -nobrowse -noautoopenrw -readwrite tsetup.temp.dmg | awk -F "\t" 'END {print $3}'`
       cp -R "./$BinaryName.app" "$TempDiskPath/"
@@ -284,22 +351,105 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
       hdiutil convert tsetup.temp.dmg -format UDZO -imagekey zlib-level=9 -ov -o "$SetupFile"
       rm tsetup.temp.dmg
     fi
-    cd "$ReleasePath"
-    "./Packer" -path "$BinaryName.app" -target "$BuildTarget" -version $VersionForPacker $AlphaBetaParam
-    echo "Packer done!"
 
-    if [ "$BetaVersion" != "0" ]; then
-      if [ ! -f "$ReleasePath/$BetaKeyFile" ]; then
-        Error "Beta version key file not found!"
+    if [ "$AlphaVersion" != "0" ]; then
+      "./Packer" -path "$BinaryName.app" -target "$BuildTarget" -version $VersionForPacker $AlphaBetaParam -alphakey
+
+      if [ ! -f "$ReleasePath/$AlphaKeyFile" ]; then
+        Error "Alpha version key file not found!"
       fi
 
       while IFS='' read -r line || [[ -n "$line" ]]; do
-        BetaSignature="$line"
-      done < "$ReleasePath/$BetaKeyFile"
+        AlphaSignature="$line"
+      done < "$ReleasePath/$AlphaKeyFile"
 
-      UpdateFile="${UpdateFile}_${BetaSignature}"
-      SetupFile="tbeta${BetaVersion}_${BetaSignature}.zip"
+      UpdateFile="${UpdateFile}_${AlphaSignature}"
+      SetupFile="talpha${AlphaVersion}_${AlphaSignature}.zip"
+
+      rm -rf "$ReleasePath/AlphaTemp"
+      mkdir "$ReleasePath/AlphaTemp"
+      mkdir "$ReleasePath/AlphaTemp/$BinaryName"
+      cp -r "$ReleasePath/$BinaryName.app" "$ReleasePath/AlphaTemp/$BinaryName/"
+      cd "$ReleasePath/AlphaTemp"
+      zip -r "$SetupFile" "$BinaryName"
+      mv "$SetupFile" "$ReleasePath/"
+      cd "$ReleasePath"
     fi
+    if [ "$BuildTarget" == "mac" ]; then
+      echo "Beginning notarization process."
+      set +e
+      xcrun altool --notarize-app --primary-bundle-id "com.tdesktop.Telegram" --username "$AC_USERNAME" --password "@keychain:AC_PASSWORD" --file "$SetupFile" > request_uuid.txt
+      set -e
+      while IFS='' read -r line || [[ -n "$line" ]]; do
+        Prefix=$(echo $line | cut -d' ' -f 1)
+        Value=$(echo $line | cut -d' ' -f 3)
+        if [ "$Prefix" == "RequestUUID" ]; then
+          RequestUUID=$Value
+        fi
+      done < "request_uuid.txt"
+      if [ "$RequestUUID" == "" ]; then
+        cat request_uuid.txt
+        Error "Could not extract Request UUID."
+      fi
+      echo "Request UUID: $RequestUUID"
+      rm request_uuid.txt
+
+      RequestStatus=
+      LogFile=
+      while [[ "$RequestStatus" == "" ]]; do
+        sleep 5
+        xcrun altool --notarization-info "$RequestUUID" --username "$AC_USERNAME" --password "@keychain:AC_PASSWORD" > request_result.txt
+        while IFS='' read -r line || [[ -n "$line" ]]; do
+          Prefix=$(echo $line | cut -d' ' -f 1)
+          Value=$(echo $line | cut -d' ' -f 2)
+          if [ "$Prefix" == "LogFileURL:" ]; then
+            LogFile=$Value
+          fi
+          if [ "$Prefix" == "Status:" ]; then
+            if [ "$Value" == "in" ]; then
+              echo "In progress..."
+            else
+              RequestStatus=$Value
+              echo "Status: $RequestStatus"
+            fi
+          fi
+        done < "request_result.txt"
+      done
+      if [ "$RequestStatus" != "success" ]; then
+        echo "Notarization problems, response:"
+        cat request_result.txt
+        if [ "$LogFile" != "" ]; then
+          echo "Requesting log..."
+          curl $LogFile
+        fi
+        Error "Notarization FAILED."
+      fi
+      rm request_result.txt
+
+      if [ "$LogFile" != "" ]; then
+        echo "Requesting log..."
+        curl $LogFile > request_log.txt
+      fi
+
+      xcrun stapler staple "$ReleasePath/$BinaryName.app"
+
+      if [ "$AlphaVersion" != "0" ]; then
+        rm -rf "$ReleasePath/AlphaTemp"
+        mkdir "$ReleasePath/AlphaTemp"
+        mkdir "$ReleasePath/AlphaTemp/$BinaryName"
+        cp -r "$ReleasePath/$BinaryName.app" "$ReleasePath/AlphaTemp/$BinaryName/"
+        cd "$ReleasePath/AlphaTemp"
+        zip -r "$SetupFile" "$BinaryName"
+        mv "$SetupFile" "$ReleasePath/"
+        cd "$ReleasePath"
+        echo "Alpha archive re-created."
+      else
+        xcrun stapler staple "$ReleasePath/$SetupFile"
+      fi
+    fi
+
+    "./Packer" -path "$BinaryName.app" -target "$BuildTarget" -version $VersionForPacker $AlphaBetaParam
+    echo "Packer done!"
   fi
 
   if [ ! -d "$ReleasePath/deploy" ]; then
@@ -310,16 +460,13 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
     mkdir "$ReleasePath/deploy/$AppVersionStrMajor"
   fi
 
-  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ]; then
+  if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "osx" ]; then
     echo "Copying $BinaryName.app and $UpdateFile to deploy/$AppVersionStrMajor/$AppVersionStr..";
     mkdir "$DeployPath"
     mkdir "$DeployPath/$BinaryName"
     cp -r "$ReleasePath/$BinaryName.app" "$DeployPath/$BinaryName/"
-    if [ "$BetaVersion" != "0" ]; then
-      cd "$DeployPath"
-      zip -r "$SetupFile" "$BinaryName"
-      mv "$SetupFile" "$ReleasePath/"
-      mv "$ReleasePath/$BetaKeyFile" "$DeployPath/"
+    if [ "$AlphaVersion" != "0" ]; then
+      mv "$ReleasePath/$AlphaKeyFile" "$DeployPath/"
     fi
     mv "$ReleasePath/$BinaryName.app.dSYM" "$DeployPath/"
     rm "$ReleasePath/$BinaryName.app/Contents/MacOS/$BinaryName"
@@ -329,21 +476,20 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
     mv "$ReleasePath/$UpdateFile" "$DeployPath/"
     mv "$ReleasePath/$SetupFile" "$DeployPath/"
 
-    if [ "$BuildTarget" == "mac32" ]; then
-      ReleaseToPath="$HomePath/../../tother/tmac32"
-      DeployToPath="$ReleaseToPath/$AppVersionStrMajor/$AppVersionStrFull"
-      if [ ! -d "$ReleaseToPath/$AppVersionStrMajor" ]; then
-        mkdir "$ReleaseToPath/$AppVersionStrMajor"
+    if [ "$BuildTarget" == "mac" ]; then
+      mkdir -p "$BackupPath/tmac"
+      cp "$DeployPath/$UpdateFile" "$BackupPath/tmac/"
+      cp "$DeployPath/$SetupFile" "$BackupPath/tmac/"
+      if [ "$AlphaVersion" != "0" ]; then
+        cp -v "$DeployPath/$AlphaKeyFile" "$BackupPath/tmac/"
       fi
-
-      if [ ! -d "$DeployToPath" ]; then
-        mkdir "$DeployToPath"
-      fi
-
-      cp -v "$DeployPath/$UpdateFile" "$DeployToPath/"
-      cp -v "$DeployPath/$SetupFile" "$DeployToPath/"
-      if [ "$BetaVersion" != "0" ]; then
-        cp -v "$DeployPath/$BetaKeyFile" "$DeployToPath/"
+    fi
+    if [ "$BuildTarget" == "osx" ]; then
+      mkdir -p "$BackupPath/tosx"
+      cp "$DeployPath/$UpdateFile" "$BackupPath/tosx/"
+      cp "$DeployPath/$SetupFile" "$BackupPath/tosx/"
+      if [ "$AlphaVersion" != "0" ]; then
+        cp -v "$DeployPath/$AlphaKeyFile" "$BackupPath/tosx/"
       fi
     fi
   elif [ "$BuildTarget" == "macstore" ]; then
@@ -359,3 +505,39 @@ if [ "$BuildTarget" == "mac" ] || [ "$BuildTarget" == "mac32" ] || [ "$BuildTarg
 fi
 
 echo "Version $AppVersionStrFull is ready!";
+echo -en "\007";
+sleep 1;
+echo -en "\007";
+sleep 1;
+echo -en "\007";
+
+if [ "$BuildTarget" == "mac" ]; then
+  if [ -f "$ReleasePath/request_log.txt" ]; then
+    DisplayingLog=
+    while IFS='' read -r line || [[ -n "$line" ]]; do
+      if [ "$DisplayingLog" == "1" ]; then
+        echo $line
+      else
+        Prefix=$(echo $line | cut -d' ' -f 1)
+        Value=$(echo $line | cut -d' ' -f 2)
+        if [ "$Prefix" == '"issues":' ]; then
+          if [ "$Value" != "null" ]; then
+            echo "NB! Notarization log issues:"
+            echo $line
+            DisplayingLog=1
+          else
+            DisplayingLog=0
+          fi
+        fi
+      fi
+    done < "$ReleasePath/request_log.txt"
+    if [ "$DisplayingLog" != "0" ] && [ "$DisplayingLog" != "1" ]; then
+      echo "NB! Notarization issues not found:"
+      cat "$ReleasePath/request_log.txt"
+    else
+      rm "$ReleasePath/request_log.txt"
+    fi
+  else
+    echo "NB! Notarization log not found :("
+  fi
+fi

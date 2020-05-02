@@ -1,3 +1,855 @@
+2.1.1 (01.05.20)
+
+- Improve quiz explanation tooltip layout.
+- Fix possible crash in theme editor.
+- Other minor bug fixes and improvements.
+
+2.1 (24.04.20)
+
+- Access a catalog of over 20,000 stickers made by professional artists from the updated Sticker Panel by clicking the '+' icon.
+- Use sticker search to find the stickers you're looking for - or scroll from the latest packs all the way to the classics.
+- Add explanations that appear after users respond to a quiz question.
+- See how much time you have left to answer a question from @QuizBot with the new countdown animation.
+- Send a single :dart: emoji to see if you hit the bullseye.
+
+2.0.1 (31.03.20)
+
+- Switch between folders using Ctrl+1, ..., Ctrl+8.
+- Fix crash when a pinned in folder chat was added to archive.
+- Fix font issues in Linux version.
+
+2.0 (30.03.20)
+
+- Organize chats into Chat Folders if you have too many chats.
+- Create custom folders with flexible settings, or use default recommendations.
+- Pin an unlimited number of chats in each folder.
+- Switch between folders in the new side bar to easily access all of your chats.
+- Send :dice: to any chat to try your luck and get a random number from the animated dice.
+- Send :virus:, :face_with_thermometer:, :mask:, :face_with_head_bandage:, :sneeze:, :sick:, :soap: or :ambulance: to try out the new animated emoji.
+
+1.9.22 beta (27.03.20)
+
+- Organize chats into Chat Folders if you have too many chats.
+
+1.9.21 (16.03.20)
+
+- Mark new messages as read while scrolling down through them.
+- Improved spellchecking on Windows 7 and Linux.
+
+1.9.20 beta (14.03.20)
+
+- Fix crash in shared links search.
+- Fix blurred thumbnails in albums with video files.
+- Fix a possible crash in animated stickers rendering.
+
+1.9.19 beta (25.02.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.18 beta (25.02.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.17 beta (24.02.20)
+
+- Spell checker on Windows 7.
+- Bug fixes and other minor improvements.
+
+1.9.16 beta (23.02.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.15 beta (21.02.20)
+
+- Mark new messages as read while scrolling down through them.
+- Bug fixes and other minor improvements.
+
+1.9.14 (17.02.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.13 (12.02.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.12 (11.02.20)
+
+- Switch to Picture-in-Picture mode to watch your video in a small window while doing something else.
+- Change playback speed in the '...' menu when watching videos.
+- Rotate photos and videos in the media viewer using the rotate button in the bottom right corner.
+
+1.9.11 beta (10.02.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.10 beta (05.02.20)
+
+- Switch to the Picture-in-Picture mode to watch your video in a small window.
+- Change video playback speed in the playback controls '...' menu.
+- Rotate photos and videos in the media viewer using the rotate button in the bottom right corner.
+
+1.9.9 (28.01.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.8 (24.01.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.7 (23.01.20)
+
+- Create three new kinds of polls.
+- See who voted for what in polls with visible votes.
+- Vote for several options in polls that allow multiple answers.
+- Guess the correct answer in quiz-style polls.
+- Explore various ways of combining the different poll options.
+- Add polls from the '...' menu in any group or channel.
+- Use bots like @QuizBot to create quizzes with several questions and media attachments.
+- Schedule messages to be sent when your recipient comes online (only works if you know their online status).
+
+1.9.6 (22.01.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.5 (21.01.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.4 (17.01.20)
+
+- Bug fixes and other minor improvements.
+
+1.9.3 (31.12.19)
+
+- Videos in chats start playing automatically.
+- Resume playback from where you left off when watching long videos and listening to long audio tracks.
+- Control automatic playback for videos, GIFs and round video messages in Settings > Advanced > Automatic media download.
+- Enjoy system spell checker support on all modern systems.
+
+1.9.2 beta (29.12.19)
+
+- Videos in chats start playing automatically.
+- Resume playback from where you left off when watching long videos.
+- Control videos, GIFs and round video messages automatic playback in Settings > Advanced > Automatic media download.
+- Spell checker on Linux using Enchant.
+
+1.9.1 beta (06.11.19)
+
+- Bug fixes and other minor improvements.
+
+1.9 beta (05.11.19)
+
+- System spellchecker on Windows 8+ and macOS 10.12+.
+
+1.8.15 (07.10.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.14 (03.10.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.13 (03.10.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.12 (02.10.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.11 (01.10.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.10 (30.09.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.9 (27.09.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.8 (10.09.19)
+
+- Create new themes based on your color and wallpaper choices.
+- Share your themes with other users via links.
+- Update your theme for all its users when you change something.
+
+1.8.7 beta (10.09.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.6 beta (09.09.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.5 beta (08.09.19)
+
+- Create new themes based on your color and wallpaper choices.
+- Share your themes with other users via links.
+- Update your theme for all its users when you change something.
+
+1.8.4 (06.09.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.3 (05.09.19)
+
+- Right click the 'Send' button and select 'Schedule Message' to automatically send something at a specified time.
+- Schedule reminders for yourself in the 'Saved Messages' chat.
+- Get a notification when any of your scheduled messages are sent.
+- Customize your app's appearance by choosing accent colors for the 'Day', 'Night' and 'Tinted' themes.
+- Choose who can find you on Telegram when they add your number to their phone contacts.
+- Send a single :grin:, :anguished:, :rage:, :poo:, :cry: or :open_mouth: to check out what's new in the animated emoji department.
+
+1.8.2 (20.08.19)
+
+- Bug fixes and other minor improvements.
+
+1.8.1 (09.08.19)
+
+- Bug fixes and other minor improvements.
+
+1.8 (09.08.19)
+
+- Right click the Send button to send any message without sound - in case the recipient is sleeping.
+- Enable Slow Mode in Group Permissions to control how frequently members can post.
+- Set custom titles for group admins - like 'Founder', 'CFO' or 'Spam Fighter'.
+- Toggle looped playback for animated stickers in Chat Settings.
+- Send a single :heart:, :like:, :unamused:, :flushed: or :party: to add a mighty animated emoji to the chat.
+
+1.7.15 beta (18.07.19)
+
+- Bug fixes and other minor improvements.
+
+1.7.14 (07.07.19)
+
+- Bug fixes and other minor improvements.
+
+1.7.13 (06.07.19)
+
+- Send ultra-lightweight high-quality animated stickers to express emotion with motion.
+- Receive animated stickers instantly on any connection at just 20-30 KB per sticker.
+- Enjoy smooth animations at 60 frames per second.
+- Create new animated sets and upload them to @stickers for everybody to use.
+- Try out these sample stickers: t.me/addstickers/hotcherry
+- Use strikethrough and underline formatting.
+
+1.7.12 beta (05.07.19)
+
+- Bug fixes and other minor improvements.
+
+1.7.11 beta (04.07.19)
+
+- Use strikethrough and underline formatting.
+- Bug fixes and other minor improvements.
+
+1.7.10 (24.06.19)
+
+- Bug fixes and other minor improvements.
+
+1.7.9 (23.06.19)
+
+- You can now add any users to your contacts, even if their phone numbers are not visible.
+- Transfer ownership of group chats and channels by granting full rights to another admin. Useful when switching jobs or if you just want to retire as creator.
+- Hide archived chats to the main menu.
+- See who is online straight from the chat list.
+- Use the MacBook Pro TouchBar to apply formatting to selected text, insert emoji, and send stickers.
+
+1.7.8 beta (17.06.19)
+
+- Hide archived chats in the main menu.
+- See who is online straight from the chat list.
+- Apply formatting to selected text parts from the MacBook Pro TouchBar.
+
+1.7.7 (10.06.19)
+
+- Bug fixes and other minor improvements.
+
+1.7.6 beta (06.06.19)
+
+- Bug fixes and other minor improvements.
+
+1.7.5 beta (05.06.19)
+
+- Crash fix.
+
+1.7.4 beta (04.06.19)
+
+- Download video files while watching them using streaming.
+- Set EOL for Windows XP / Vista and OS X 10.6 to 10.9 at September 1.
+
+1.7.3 (01.06.19)
+
+- Bug fixes and other minor improvements.
+
+1.7.2 (31.05.19)
+
+- Choose who can see your phone number with granular precision in Privacy & Security settings.
+- Add group chats to "Always/Never Share" exceptions for any privacy setting. Permissions will update as users leave and join the groups.
+- Connect a discussion group to your channel, subscribers will see a "Discuss" button.
+- Integrate bots seamlessly with web services. For example, see t.me/DiscussThis/1
+- Use TouchBar on MacBooks Pro to control music playback and switch between pinned chats.
+
+1.7.1 beta (28.05.19)
+
+- Disable pinned messages notifications in Settings.
+
+1.7 (08.05.19)
+
+Introducing Archived Chats:
+
+- Archive any chat from the right-click menu.
+- Chats with enabled notifications will pop out of the archive when a notification arrives.
+- Muted chats will stay in the archive.
+- Pin an unlimited number of chats in your archive.
+
+1.6.7 (13.04.19)
+
+- Replace media when editing messages with media content.
+- Jump quickly to the top of your chats list.
+- Get emoji suggestions for the first word you type in a message.
+- Help Telegram improve emoji suggestions in your language using this interface https://translations.telegram.org/en/emoji
+
+1.6.6 beta (11.04.19)
+
+- Bug fixes and other minor improvements.
+
+1.6.5 beta (06.04.19)
+
+- Bug fixes and other minor improvements.
+
+1.6.4 beta (05.04.19)
+
+- Replace media when editing messages with media content.
+- Jump quickly to the top of your chats list.
+- Get emoji suggestions for the first word you type in a message.
+- Help Telegram improve emoji suggestions in your language using this interface https://translations.telegram.org/en/emoji
+
+1.6.3 (25.03.19)
+
+- Bug fixes and other minor improvements.
+
+1.6.2 (24.03.19)
+
+- Delete any message on both ends in any private chat, anytime.
+- Control whether your forwarded messages link back to your account.
+- Control who may see your profile picture.
+- Enjoy the new streamlined group management screen.
+
+1.6.1 (20.03.19)
+
+- Bug fixes and other minor improvements.
+
+1.6 (18.03.19)
+
+- Play video files and listen to music without waiting for them to fully download.
+- Press CTRL+0 (CMD+0 on macOS) to jump to your Saved Messages.
+
+1.5.18 beta (15.03.19)
+
+- Bug fixes and other minor improvements.
+
+1.5.17 beta (13.03.19)
+
+- Bug fixes and other minor improvements.
+
+1.5.16 beta (12.03.19)
+
+- Play video files and listen to received music without waiting for them to download.
+- Press CTRL+0 (CMD+0 on macOS) to jump to your Saved Messages.
+
+1.5.15 (12.02.19)
+
+- Crash fix.
+
+1.5.14 (12.02.19)
+
+- Crash fix.
+
+1.5.13 (12.02.19)
+
+- Bug fixes and other minor improvements.
+
+1.5.12 (09.02.19)
+
+- Apply blur effects to backgrounds.
+- Use the backgrounds you set in Telegram Desktop in all other Telegram apps.
+
+1.5.11 (01.02.19)
+
+- Bug fixes and other minor improvements.
+
+1.5.10 (01.02.19)
+
+- Bug fixes and other minor improvements.
+
+1.5.9 (31.01.19)
+
+- Bug fixes and other minor improvements.
+
+1.5.8 (21.01.19)
+
+- Global permissions for groups. Restrict all members in any group from posting certain types of content.
+- Unified group settings. Make groups public, set admins with granular permissions and toggle persistent history in just a few clicks in any group.
+- Choose the emoji set you would like to use in Chat Settings.
+- Choose input and output devices for Telegram Calls in Settings > Advanced > Call Settings.
+- Support for automatically downloading files and music.
+
+1.5.7 beta (11.01.19)
+
+- Choose the emoji set you would like to use in Settings > Chat Settings.
+- Choose input and output devices for Telegram Calls in Settings > Adavanced > Call Settings.
+
+1.5.6 beta (27.12.18)
+
+- Fix crash on macOS.
+
+1.5.5 beta (27.12.18)
+
+- Support for auto-download of files and music.
+- Improved auto-download settings.
+- Bug fixes and other minor improvements.
+
+1.5.4 (24.12.18)
+
+- Bug fixes and other minor improvements.
+
+1.5.3 (23.12.18)
+
+- Create polls in groups and channels - right from the chat menu.
+
+1.5.2 (13.12.18)
+
+- Bug fixes and other minor improvements.
+
+1.5.1 (11.12.18)
+
+- Bug fixes and other minor improvements.
+
+1.5 (10.12.18)
+
+- Support for custom languages. Crowdsource a cloud-based language pack for Telegram in any language using our Translations platform - then apply it in real time.
+- Interface scaling for large screens, up to 300% (up to 150% for macOS retina screens).
+- 'Count unread messages' setting for the Badge counter in Settings > Notifications. Disable to show number of unread chats.
+- Video messages displayed in shared media (under voice messages).
+- Updated emoji. Farewell to question marks!
+
+Also in this update:
+- Listen to voice and video messages in 2X mode if you're in a hurry.
+- Add a comment when sharing posts from channels.
+- View all photos and videos in Twitter and Instagram link previews.
+- Add emoji to media captions.
+
+1.4.8 beta (04.12.18)
+
+- Add emoji to media captions.
+- Switch off the 'Count unread messages' option in Settings > Notifications if you want to see the unread chats count in the badge instead.
+
+1.4.7 beta (10.11.18)
+
+- Crash fix.
+
+1.4.6 beta (09.11.18)
+
+- Bug fixes and other minor improvements.
+
+1.4.5 beta (08.11.18)
+
+- Listen to voice and video messages in 2X mode if you're in a hurry.
+- Find video messages in the shared voice messages section.
+- Add a comment when you share posts from channels.
+- View all photos and videos in Twitter and Instagram link previews.
+- Bug fixes and other minor improvements.
+
+1.4.4 beta (16.10.18)
+
+- Interface scaling for large screens, up to 300% (up to 150% for macOS retina screens).
+- Updated emoji.
+
+1.4.3 (13.10.18)
+
+- Bug fixes and other minor improvements.
+
+1.4.2 (10.10.18)
+
+- Crash fix.
+
+1.4.1 (09.10.18)
+
+- Reduce crashes due to the out of memory exceptions.
+- Load map previews through mtproto.
+- Bug fixes and other minor improvements.
+
+1.4 (28.09.18)
+
+- Fully redesigned Settings section.
+- New theme selector in Chat Settings.
+- New local storage settings: Control how much disk space is used by the cache and for how long the cached files are stored.
+- Improved local caching for images and GIF animations.
+- New settings: Peer-to-Peer settings for calls, disable animations for low performance computers.
+- Various other improvements.
+
+1.3.17 beta (26.09.18)
+
+- Fully redisigned Settings section.
+- New theme selector in Chat Settings.
+- New settings: Peer-to-Peer settings for calls, disable animations for low performance computers.
+- Various other improvements.
+
+1.3.16 alpha (04.09.18)
+
+- Update libtgvoip, fix crash in calls.
+- Fix crash in local cache database.
+- Clear old local cache asynchronously.
+
+1.3.15 alpha (01.09.18)
+
+- Improved local caching for images and GIF animations.
+- Control how much disk space is used by the cache and for how long the cached files are stored.
+
+1.3.14 (27.08.18)
+
+- Fix a crash in calls.
+
+1.3.13 (25.08.18)
+
+- Export data from individual chats using the '...' menu.
+- Added a new night theme.
+- You can now assign custom themes as night and day themes to quickly switch between them.
+- Support for Telegram Passport 1.1 and improved password hashing algorithm to better protect Telegram Passport data.
+
+1.3.12 alpha (04.08.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.11 alpha (01.08.18)
+
+- Added a new night theme.
+- You can now assign custom themes as night and day themes to quickly switch between them.
+
+1.3.10 (13.07.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.9 (28.06.18)
+
+- Mark chats in the chat list as Read or Unread.
+- Improved censorship circumvention.
+
+1.3.8 (24.06.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.7 (11.06.18)
+
+- Push fixes to stable version.
+
+1.3.6 alpha (11.06.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.5 alpha (08.06.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.4 alpha (07.06.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.3 alpha (07.06.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.2 alpha (07.06.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.1 alpha (04.06.18)
+
+- Bug fixes and other minor improvements.
+
+1.3.0 (01.06.18)
+
+- Improved censorship circumvention.
+- Improved stability when working through proxy servers.
+- Save several proxy servers to quickly switch between them in Settings.
+- Use proxy for calls.
+- Emoji and text replacement now happens immediately after typing (instead of after sending) and can be rolled back using Backspace or CTRL/CMD + Z. Replacement no longer happens when pasting text.
+
+Added formatting shortcuts. Select text and use:
+- CTRL/CMD + B/I for bold and italic
+- CTRL/CMD + K to create or edit a custom link
+- CTRL/CMD + SHIFT + M for monospace font
+- CTRL/CMD + SHIFT + N to clear formatting
+
+1.2.25 alpha (31.05.18)
+
+- Apply markdown formatting (```, `, **, __) only when sending the message.
+- Display connection quality bars in calls.
+- Telegram Desktop can update itself through MTProto.
+- Bug fixes and other minor improvements.
+
+1.2.24 alpha (26.05.18)
+
+- Add links with custom text from context menu or by Ctrl/Cmd + K keyboard shortcut.
+
+1.2.23 alpha (25.05.18)
+
+- Apply formatting from input field context menu.
+- Apply formatting by hotkeys.
+- Bug fixes and other minor improvements.
+
+1.2.22 alpha (24.05.18)
+
+- Use markdown in media captions (**bold**, __italic__, `tag` and ```code```).
+- Use emoji replacement in media captions, group and channel titles and descriptions (:like: etc.)
+- Markdown replacement now happens immediately after typing (instead of after sending) and can be rolled back using Backspace or Ctrl/Cmd + Z. Replacement no longer happens when pasting text.
+
+1.2.21 alpha (18.05.18)
+
+- Support domain names in mtproto proxy.
+- Bug fixes and other minor improvements.
+
+1.2.20 alpha (13.05.18)
+
+- Emoji and text replacements are done while you type the message.
+- Revert emoji and text replacements by pressing backspace.
+- Disable emoji replacements or suggestions in Settings.
+- Some critical bug fixes.
+
+1.2.19 alpha (08.05.18)
+
+- Enable proxy for calls in Settings.
+- Bug fixes and other minor improvements.
+
+1.2.18 alpha (05.05.18)
+
+- Improve working through proxy servers.
+- Bug fixes and other minor improvements.
+
+1.2.17 (08.04.18)
+
+- Bug fixes and other minor improvements.
+
+1.2.16 (07.04.18)
+
+- Bug fixes and other minor improvements.
+
+1.2.15 (26.03.18)
+
+- Bug fixes and other minor improvements.
+
+1.2.14 (21.03.18)
+
+- Discover new stickers. Type one emoji to see suggestions from popular sticker sets. Suggestions from your installed sticker sets will come first.
+- Search for Stickers. Click on the new search icon to access your sticker sets or find new ones.
+- Quick Reply. Double click near a message for a quick reply.
+
+1.2.13 alpha (21.03.18)
+
+- Bug fixes and other minor improvements.
+
+1.2.12 alpha (12.03.18)
+
+- Bug fixes and other minor improvements.
+
+1.2.11 alpha (10.03.18)
+
+- Bug fixes and other minor improvements.
+
+1.2.10 alpha (09.03.18)
+
+- Bug fixes and other minor improvements.
+
+1.2.9 alpha (07.03.18)
+
+- Quick Reply. Double click near a message for a quick reply.
+- Search for Stickers. Click on the new search icon to access your sticker sets or find new ones.
+
+1.2.8 alpha (03.01.18)
+
+- Bug fixes and other minor improvements.
+
+1.2.7 alpha (31.12.17)
+
+- Use fast reply button in group chats.
+- Select a message you want to reply to by pressing Ctrl+Up and Ctrl+Down.
+
+1.2.6 (30.12.17)
+
+- Grouped Photos. Group media into an album when sharing multiple photos and videos. Choose the exact order of media you send.
+
+1.2.5 alpha (29.12.17)
+
+- When viewing a photo from an album, you'll see other pictures from the same group as thumbnails in the lower part of the screen.
+- When composing an album paste additional media from the clipboard.
+- Bug fixes and other minor improvements.
+
+1.2.4 alpha (26.12.17)
+
+- Group media into an album when sharing multiple photos and videos.
+- Bug fixes and other minor improvements.
+
+1.2.3 alpha (17.12.17)
+
+- Several crash fixes.
+
+1.2.2 alpha (16.12.17)
+
+- Grouped photos and videos are displayed as albums.
+
+1.2.1 (12.12.17)
+
+- Bug fixes and other minor improvements.
+
+1.2.0 (10.12.17)
+
+- Radically improved navigation. New side panel on the right with quick access to shared media and group members.
+- Saved Messages. Bookmark messages by forwarding them to "Saved Messages". Access them from the Chats list or from the side menu.
+- Pinned Messages. If you are a channel admin, pin messages to focus your subscribers' attention on important announcements.
+- Easily recognize messages from group admins by the new 'admin' badge.
+- Also supported clearing history in supergroups and added a host of minor improvements.
+
+1.1.29 alpha (09.12.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.28 alpha (09.12.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.27 alpha (06.12.17)
+
+- Bookmark messages by forwarding them to "Saved Messages". Access them from the Chats list or from the side menu.
+
+1.1.26 alpha (02.12.17)
+
+- Admin badges in supergroup messages.
+- Fix crashing on launch in OS X 10.6.
+- Bug fixes and other minor improvements.
+
+1.1.25 alpha (30.11.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.24 alpha (29.11.17)
+
+- Radically improved navigation. New side panel on the right with quick access to shared media and group members.
+- Pinned Messages. If you are a channel admin, pin messages to focus your subscribers' attention on important announcements.
+- Also supported clearing history in supergroups and added a host of minor improvements.
+
+1.1.23 (05.09.17)
+
+- See the message author photo and name while searching specific chat messages.
+- Fix "Send To" menu action on Windows.
+
+1.1.22 (04.09.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.21 (03.09.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.20 (03.09.17)
+
+- Groups with unread mentions and replies are now marked with an '@' badge in the chats list.
+- Navigate new mentions and replies in a group using the new '@' button.
+- Mark your stickers as “favorite” to quickly access them from the redesigned sticker panel.
+- Add an official sticker set for your group which all members will be able to use while chatting in your group (100+ member groups only).
+
+1.1.19 (01.08.17)
+
+- Search by messages of specific group members.
+- Bug fixes and other minor improvements.
+
+1.1.18 (27.07.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.17 (26.07.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.16 (26.07.17)
+
+- Autocompletion for emoji. Start typing :e to get suggestions.
+- Fixed a bug with forwarding messages.
+
+1.1.15 (23.07.17)
+
+- Send **bold** and __italic__ text in your messages.
+- Get a share link for posts in public supergroups.
+- Quickly share posts from channels and media messages from bots.
+- Search large supergroup members by name.
+- Search channel members by name for admins.
+- Use search in the service actions log.
+- Ban supergroup members via the right click menu in the service actions log.
+
+1.1.14 alpha (19.07.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.13 alpha (14.07.17)
+
+- Various bug fixes.
+
+1.1.12 alpha (11.07.17)
+
+- Click on forwarded messages bar to change the recipient chat in case you chose a wrong one first.
+- Quickly share posts from channels and media messages from bots.
+- Search in large supergroup members by name.
+- Search in channel members by name if you're a channel admin.
+- Copy links to messages in public supergroups.
+
+1.1.11 alpha (06.07.17)
+
+- Send **bold** and __italic__ text in your messages (in addition to already supported `monospace` and ```multiline monospace```).
+- Search in channel and supergroup admin event log.
+- Ban members from right click menu in supergroup admin event log.
+
+1.1.10 (04.07.17)
+
+- Add event log filter for channel or supergroup event log.
+- Fix search by username in privacy exceptions editor.
+- Fix adding admins in channels.
+
+1.1.9 (30.06.17)
+
+- Supergroups can now have up to 10.000 members.
+- Appoint supergroup admins with granular rights. Choose who can add users, manage messages, block members, edit group info & username, add new admins, etc.
+- Restrict and ban supergroup members with granular precision. Read-only bans, GIF & sticker bans, media bans, temporary bans and restrictions.
+- Check the new event log to see all service actions taken by members and admins of a channel or supergroup in the last 48 hours.
+- Toggle night mode in the main menu.
+
+1.1.8 alpha (30.06.17)
+
+- Toggle night mode in the main menu.
+
+1.1.7 (30.05.17)
+
+- Improved video messages: radial playback progress, Picture-in-Picture support, duration countdown.
+- Voice and video messages now automatically play one after another.
+
+1.1.6 alpha (26.05.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.5 alpha (26.05.17)
+
+- Bug fixes and other minor improvements.
+
+1.1.4 (24.05.17)
+
+- Fix a crash in animated history scrolling.
+- Fix a bug with pinned chat to supergroup upgrade.
+
+1.1.3 (24.05.17)
+
+- Improved video messages playback.
+- Video and audio messages play one after another.
+
 1.1.2 (17.05.17)
 
 - Emoji icon tooltip about hiding the sidebar.

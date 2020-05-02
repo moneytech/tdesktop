@@ -1,36 +1,24 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include <QtCore/QLibrary>
+
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
+
 extern "C" {
 #undef signals
-#include <libappindicator/app-indicator.h>
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
 #define signals public
 } // extern "C"
 
-#ifndef TDESKTOP_DISABLE_UNITY_INTEGRATION
-#include <unity/unity/unity.h>
-#endif // !TDESKTOP_DISABLE_UNITY_INTEGRATION
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 namespace Platform {
 namespace Libs {
@@ -52,6 +40,7 @@ bool load(QLibrary &lib, const char *name, Function &func) {
 	return false;
 }
 
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 typedef gboolean (*f_gtk_init_check)(int *argc, char ***argv);
 extern f_gtk_init_check gtk_init_check;
 
@@ -264,7 +253,7 @@ inline bool g_type_cit_helper(Object *instance, GType iface_type) {
 	if (ginstance->g_class && ginstance->g_class->g_type == iface_type) {
 		return true;
 	}
-    return g_type_check_instance_is_a(ginstance, iface_type);
+	return g_type_check_instance_is_a(ginstance, iface_type);
 }
 
 typedef gint (*f_gtk_dialog_run)(GtkDialog *dialog);
@@ -283,18 +272,6 @@ inline gulong g_signal_connect_swapped_helper(gpointer instance, const gchar *de
 
 typedef void (*f_g_signal_handler_disconnect)(gpointer instance, gulong handler_id);
 extern f_g_signal_handler_disconnect g_signal_handler_disconnect;
-
-typedef AppIndicator* (*f_app_indicator_new)(const gchar *id, const gchar *icon_name, AppIndicatorCategory category);
-extern f_app_indicator_new app_indicator_new;
-
-typedef void (*f_app_indicator_set_status)(AppIndicator *self, AppIndicatorStatus status);
-extern f_app_indicator_set_status app_indicator_set_status;
-
-typedef void (*f_app_indicator_set_menu)(AppIndicator *self, GtkMenu *menu);
-extern f_app_indicator_set_menu app_indicator_set_menu;
-
-typedef void (*f_app_indicator_set_icon_full)(AppIndicator *self, const gchar *icon_name, const gchar *icon_desc);
-extern f_app_indicator_set_icon_full app_indicator_set_icon_full;
 
 typedef gboolean (*f_gdk_init_check)(gint *argc, gchar ***argv);
 extern f_gdk_init_check gdk_init_check;
@@ -370,17 +347,7 @@ extern f_g_error_free g_error_free;
 
 typedef void (*f_g_slist_free)(GSList *list);
 extern f_g_slist_free g_slist_free;
-
-#ifndef TDESKTOP_DISABLE_UNITY_INTEGRATION
-typedef void (*f_unity_launcher_entry_set_count)(UnityLauncherEntry* self, gint64 value);
-extern f_unity_launcher_entry_set_count unity_launcher_entry_set_count;
-
-typedef void (*f_unity_launcher_entry_set_count_visible)(UnityLauncherEntry* self, gboolean value);
-extern f_unity_launcher_entry_set_count_visible unity_launcher_entry_set_count_visible;
-
-typedef UnityLauncherEntry* (*f_unity_launcher_entry_get_for_desktop_id)(const gchar* desktop_id);
-extern f_unity_launcher_entry_get_for_desktop_id unity_launcher_entry_get_for_desktop_id;
-#endif // !TDESKTOP_DISABLE_UNITY_INTEGRATION
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 } // namespace Libs
 } // namespace Platform

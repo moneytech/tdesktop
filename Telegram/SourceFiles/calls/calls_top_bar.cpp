@@ -1,44 +1,37 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "calls/calls_top_bar.h"
 
-#include "styles/style_calls.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/labels.h"
-#include "lang.h"
+#include "ui/wrap/padding_wrap.h"
+#include "lang/lang_keys.h"
 #include "calls/calls_call.h"
 #include "calls/calls_instance.h"
-#include "styles/style_boxes.h"
+#include "calls/calls_panel.h"
+#include "data/data_user.h"
+#include "main/main_session.h"
 #include "observer_peer.h"
 #include "boxes/abstract_box.h"
 #include "base/timer.h"
+#include "layout.h"
+#include "app.h"
+#include "styles/style_calls.h"
+#include "styles/style_layers.h"
 
 namespace Calls {
 namespace {
 
-constexpr auto kUpdateDebugTimeoutMs = TimeMs(500);
+constexpr auto kUpdateDebugTimeoutMs = crl::time(500);
 
-class DebugInfoBox : public BoxContent {
+class DebugInfoBox : public Ui::BoxContent {
 public:
-	DebugInfoBox(QWidget*, base::weak_unique_ptr<Call> call);
+	DebugInfoBox(QWidget*, base::weak_ptr<Call> call);
 
 protected:
 	void prepare() override;
@@ -46,19 +39,25 @@ protected:
 private:
 	void updateText();
 
-	base::weak_unique_ptr<Call> _call;
+	base::weak_ptr<Call> _call;
 	QPointer<Ui::FlatLabel> _text;
 	base::Timer _updateTextTimer;
 
 };
 
-DebugInfoBox::DebugInfoBox(QWidget*, base::weak_unique_ptr<Call> call) : _call(call) {
+DebugInfoBox::DebugInfoBox(QWidget*, base::weak_ptr<Call> call)
+: _call(call) {
 }
 
 void DebugInfoBox::prepare() {
-	setTitle("Call Debug");
-	addButton(lang(lng_close), [this] { closeBox(); });
-	_text = setInnerWidget(object_ptr<Ui::FlatLabel>(this, st::callDebugLabel));
+	setTitle(rpl::single(qsl("Call Debug")));
+
+	addButton(tr::lng_close(), [this] { closeBox(); });
+	_text = setInnerWidget(
+		object_ptr<Ui::PaddingWrap<Ui::FlatLabel>>(
+			this,
+			object_ptr<Ui::FlatLabel>(this, st::callDebugLabel),
+			st::callDebugPadding))->entity();
 	_text->setSelectable(true);
 	updateText();
 	_updateTextTimer.setCallback([this] { updateText(); });
@@ -74,12 +73,16 @@ void DebugInfoBox::updateText() {
 
 } // namespace
 
-TopBar::TopBar(QWidget *parent, const base::weak_unique_ptr<Call> &call) : TWidget(parent)
+TopBar::TopBar(
+	QWidget *parent,
+	const base::weak_ptr<Call> &call)
+: RpWidget(parent)
 , _call(call)
 , _durationLabel(this, st::callBarLabel)
+, _signalBars(this, _call.get(), st::callBarSignalBars)
 , _fullInfoLabel(this, st::callBarInfoLabel)
 , _shortInfoLabel(this, st::callBarInfoLabel)
-, _hangupLabel(this, st::callBarLabel, lang(lng_call_bar_hangup).toUpper())
+, _hangupLabel(this, st::callBarLabel, tr::lng_call_bar_hangup(tr::now).toUpper())
 , _mute(this, st::callBarMuteToggle)
 , _info(this)
 , _hangup(this, st::callBarHangup) {
@@ -88,13 +91,13 @@ TopBar::TopBar(QWidget *parent, const base::weak_unique_ptr<Call> &call) : TWidg
 }
 
 void TopBar::initControls() {
-	_mute->setClickedCallback([this] {
-		if (auto call = _call.get()) {
+	_mute->setClickedCallback([=] {
+		if (const auto call = _call.get()) {
 			call->setMute(!call->isMute());
 		}
 	});
 	setMuted(_call->isMute());
-	subscribe(_call->muteChanged(), [this](bool mute) {
+	subscribe(_call->muteChanged(), [=](bool mute) {
 		setMuted(mute);
 		update();
 	});
@@ -106,12 +109,13 @@ void TopBar::initControls() {
 		}
 	}));
 	setInfoLabels();
-	_info->setClickedCallback([this] {
-		if (auto call = _call.get()) {
-			if (cDebug() && (_info->clickModifiers() & Qt::ControlModifier)) {
+	_info->setClickedCallback([=] {
+		if (const auto call = _call.get()) {
+			if (Logs::DebugEnabled()
+				&& (_info->clickModifiers() & Qt::ControlModifier)) {
 				Ui::show(Box<DebugInfoBox>(_call));
 			} else {
-				Current().showInfoPanel(call);
+				call->user()->session().calls().showInfoPanel(call);
 			}
 		}
 	});
@@ -130,10 +134,10 @@ void TopBar::updateInfoLabels() {
 }
 
 void TopBar::setInfoLabels() {
-	if (auto call = _call.get()) {
-		auto user = call->user();
-		auto fullName = App::peerName(user);
-		auto shortName = user->firstName;
+	if (const auto call = _call.get()) {
+		const auto user = call->user();
+		const auto fullName = user->name;
+		const auto shortName = user->firstName;
 		_fullInfoLabel->setText(fullName.toUpper());
 		_shortInfoLabel->setText(shortName.toUpper());
 	}
@@ -160,7 +164,7 @@ void TopBar::updateDurationText() {
 	}
 }
 
-void TopBar::startDurationUpdateTimer(TimeMs currentDuration) {
+void TopBar::startDurationUpdateTimer(crl::time currentDuration) {
 	auto msTillNextSecond = 1000 - (currentDuration % 1000);
 	_updateDurationTimer.callOnce(msTillNextSecond + 5);
 }
@@ -171,14 +175,23 @@ void TopBar::resizeEvent(QResizeEvent *e) {
 
 void TopBar::updateControlsGeometry() {
 	auto left = 0;
-	_mute->moveToLeft(left, 0); left += _mute->width();
-	_durationLabel->moveToLeft(left, st::callBarLabelTop); left += _durationLabel->width() + st::callBarSkip;
+	_mute->moveToLeft(left, 0);
+	left += _mute->width();
+	_durationLabel->moveToLeft(left, st::callBarLabelTop);
+	left += _durationLabel->width() + st::callBarSkip;
+	_signalBars->moveToLeft(left, (height() - _signalBars->height()) / 2);
+	left += _signalBars->width() + st::callBarSkip;
 
 	auto right = st::callBarRightSkip;
-	_hangupLabel->moveToRight(right, st::callBarLabelTop); right += _hangupLabel->width();
+	_hangupLabel->moveToRight(right, st::callBarLabelTop);
+	right += _hangupLabel->width();
 	right += st::callBarHangup.width;
 	_hangup->setGeometryToRight(0, 0, right, height());
-	_info->setGeometryToLeft(_mute->width(), 0, width() - _mute->width() - _hangup->width(), height());
+	_info->setGeometryToLeft(
+		_mute->width(),
+		0,
+		width() - _mute->width() - _hangup->width(),
+		height());
 
 	auto fullWidth = _fullInfoLabel->naturalWidth();
 	auto showFull = (left + fullWidth + right <= width());

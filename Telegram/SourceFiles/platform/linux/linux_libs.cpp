@@ -1,49 +1,38 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/linux/linux_libs.h"
 
 #include "platform/linux/linux_gdk_helper.h"
-#include "platform/linux/linux_libnotify.h"
 #include "platform/linux/linux_desktop_environment.h"
+
+#include <QtGui/QGuiApplication>
 
 namespace Platform {
 namespace Libs {
 namespace {
 
 bool loadLibrary(QLibrary &lib, const char *name, int version) {
-    DEBUG_LOG(("Loading '%1' with version %2...").arg(QLatin1String(name)).arg(version));
-    lib.setFileNameAndVersion(QLatin1String(name), version);
-    if (lib.load()) {
-        DEBUG_LOG(("Loaded '%1' with version %2!").arg(QLatin1String(name)).arg(version));
-        return true;
-    }
-    lib.setFileNameAndVersion(QLatin1String(name), QString());
-    if (lib.load()) {
-        DEBUG_LOG(("Loaded '%1' without version!").arg(QLatin1String(name)));
-        return true;
-    }
-    LOG(("Could not load '%1' with version %2 :(").arg(QLatin1String(name)).arg(version));
-    return false;
+	DEBUG_LOG(("Loading '%1' with version %2...").arg(QLatin1String(name)).arg(version));
+	lib.setFileNameAndVersion(QLatin1String(name), version);
+	if (lib.load()) {
+		DEBUG_LOG(("Loaded '%1' with version %2!").arg(QLatin1String(name)).arg(version));
+		return true;
+	}
+	lib.setFileNameAndVersion(QLatin1String(name), QString());
+	if (lib.load()) {
+		DEBUG_LOG(("Loaded '%1' without version!").arg(QLatin1String(name)));
+		return true;
+	}
+	LOG(("Could not load '%1' with version %2 :(").arg(QLatin1String(name)).arg(version));
+	return false;
 }
 
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 bool setupGtkBase(QLibrary &lib_gtk) {
 	if (!load(lib_gtk, "gtk_init_check", gtk_init_check)) return false;
 	if (!load(lib_gtk, "gtk_menu_new", gtk_menu_new)) return false;
@@ -118,8 +107,13 @@ bool setupGtkBase(QLibrary &lib_gtk) {
 		// Otherwise we get segfault in Ubuntu 17.04 in gtk_init_check() call.
 		// See https://github.com/telegramdesktop/tdesktop/issues/3176
 		// See https://github.com/telegramdesktop/tdesktop/issues/3162
-		DEBUG_LOG(("Limit allowed GDK backends to x11"));
-		gdk_set_allowed_backends("x11");
+		if(QGuiApplication::platformName().startsWith(qsl("wayland"), Qt::CaseInsensitive)) {
+			DEBUG_LOG(("Limit allowed GDK backends to wayland"));
+			gdk_set_allowed_backends("wayland");
+		} else if (QGuiApplication::platformName() == qsl("xcb")) {
+			DEBUG_LOG(("Limit allowed GDK backends to x11"));
+			gdk_set_allowed_backends("x11");
+		}
 	}
 
 	DEBUG_LOG(("Library gtk functions loaded!"));
@@ -132,19 +126,11 @@ bool setupGtkBase(QLibrary &lib_gtk) {
 	DEBUG_LOG(("Checked gtk with gtk_init_check!"));
 	return true;
 }
-
-bool setupAppIndicator(QLibrary &lib_indicator) {
-	if (!load(lib_indicator, "app_indicator_new", app_indicator_new)) return false;
-	if (!load(lib_indicator, "app_indicator_set_status", app_indicator_set_status)) return false;
-	if (!load(lib_indicator, "app_indicator_set_menu", app_indicator_set_menu)) return false;
-	if (!load(lib_indicator, "app_indicator_set_icon_full", app_indicator_set_icon_full)) return false;
-
-	DEBUG_LOG(("Library appindicator functions loaded!"));
-	return true;
-}
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 } // namespace
 
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 f_gtk_init_check gtk_init_check = nullptr;
 f_gtk_menu_new gtk_menu_new = nullptr;
 f_gtk_menu_get_type gtk_menu_get_type = nullptr;
@@ -201,10 +187,6 @@ f_g_type_check_instance_cast g_type_check_instance_cast = nullptr;
 f_g_type_check_instance_is_a g_type_check_instance_is_a = nullptr;
 f_g_signal_connect_data g_signal_connect_data = nullptr;
 f_g_signal_handler_disconnect g_signal_handler_disconnect = nullptr;
-f_app_indicator_new app_indicator_new = nullptr;
-f_app_indicator_set_status app_indicator_set_status = nullptr;
-f_app_indicator_set_menu app_indicator_set_menu = nullptr;
-f_app_indicator_set_icon_full app_indicator_set_icon_full = nullptr;
 f_gdk_init_check gdk_init_check = nullptr;
 f_gdk_pixbuf_new_from_data gdk_pixbuf_new_from_data = nullptr;
 f_gdk_pixbuf_new_from_file gdk_pixbuf_new_from_file = nullptr;
@@ -230,42 +212,21 @@ f_g_list_free g_list_free = nullptr;
 f_g_list_free_full g_list_free_full = nullptr;
 f_g_error_free g_error_free = nullptr;
 f_g_slist_free g_slist_free = nullptr;
-#ifndef TDESKTOP_DISABLE_UNITY_INTEGRATION
-f_unity_launcher_entry_set_count unity_launcher_entry_set_count = nullptr;
-f_unity_launcher_entry_set_count_visible unity_launcher_entry_set_count_visible = nullptr;
-f_unity_launcher_entry_get_for_desktop_id unity_launcher_entry_get_for_desktop_id = nullptr;
-#endif // !TDESKTOP_DISABLE_UNITY_INTEGRATION
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 
 void start() {
 	DEBUG_LOG(("Loading libraries"));
+#ifndef TDESKTOP_DISABLE_GTK_INTEGRATION
 
 	bool gtkLoaded = false;
-	bool indicatorLoaded = false;
-	QLibrary lib_gtk, lib_indicator;
-	if (loadLibrary(lib_indicator, "appindicator3", 1)) {
-		if (loadLibrary(lib_gtk, "gtk-3", 0)) {
-			gtkLoaded = setupGtkBase(lib_gtk);
-			indicatorLoaded = setupAppIndicator(lib_indicator);
-		}
-	}
-	if (!gtkLoaded || !indicatorLoaded) {
-		if (loadLibrary(lib_indicator, "appindicator", 1)) {
-			if (loadLibrary(lib_gtk, "gtk-x11-2.0", 0)) {
-				gtkLoaded = indicatorLoaded = false;
-				gtkLoaded = setupGtkBase(lib_gtk);
-				indicatorLoaded = setupAppIndicator(lib_indicator);
-			}
-		}
-	}
+	bool isWayland = QGuiApplication::platformName().startsWith(qsl("wayland"), Qt::CaseInsensitive);
+	QLibrary lib_gtk;
 
-	// If no appindicator, try at least load gtk.
-	if (!gtkLoaded && !indicatorLoaded) {
-		if (loadLibrary(lib_gtk, "gtk-3", 0)) {
-			gtkLoaded = setupGtkBase(lib_gtk);
-		}
-		if (!gtkLoaded && loadLibrary(lib_gtk, "gtk-x11-2.0", 0)) {
-			gtkLoaded = setupGtkBase(lib_gtk);
-		}
+	if (loadLibrary(lib_gtk, "gtk-3", 0)) {
+		gtkLoaded = setupGtkBase(lib_gtk);
+	}
+	if (!gtkLoaded && !isWayland && loadLibrary(lib_gtk, "gtk-x11-2.0", 0)) {
+		gtkLoaded = setupGtkBase(lib_gtk);
 	}
 
 	if (gtkLoaded) {
@@ -293,23 +254,9 @@ void start() {
 		load(lib_gtk, "gtk_button_set_label", gtk_button_set_label);
 		load(lib_gtk, "gtk_button_get_type", gtk_button_get_type);
 	} else {
-		LOG(("Could not load gtk-x11-2.0!"));
+		LOG(("Could not load gtk-3 or gtk-x11-2.0!"));
 	}
-
-#ifndef TDESKTOP_DISABLE_UNITY_INTEGRATION
-	if (DesktopEnvironment::TryUnityCounter()) {
-		QLibrary lib_unity(qstr("unity"), 9, 0);
-		loadLibrary(lib_unity, "unity", 9);
-
-		load(lib_unity, "unity_launcher_entry_get_for_desktop_id", unity_launcher_entry_get_for_desktop_id);
-		load(lib_unity, "unity_launcher_entry_set_count", unity_launcher_entry_set_count);
-		load(lib_unity, "unity_launcher_entry_set_count_visible", unity_launcher_entry_set_count_visible);
-	}
-#endif // !TDESKTOP_DISABLE_UNITY_INTEGRATION
-
-	if (gtkLoaded) {
-		startLibNotify();
-	}
+#endif // !TDESKTOP_DISABLE_GTK_INTEGRATION
 }
 
 } // namespace Libs

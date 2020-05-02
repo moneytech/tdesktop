@@ -1,22 +1,9 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
@@ -29,17 +16,25 @@ class Track;
 } // namespace Audio
 } // namespace Media
 
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace Calls {
 
 class Panel;
 
-class Instance : private MTP::Sender, private Call::Delegate, private base::Subscriber {
+class Instance
+	: private Call::Delegate
+	, private base::Subscriber
+	, public base::has_weak_ptr {
 public:
-	Instance();
+	explicit Instance(not_null<Main::Session*> session);
 
-	void startOutgoingCall(gsl::not_null<UserData*> user);
+	void startOutgoingCall(not_null<UserData*> user);
 	void handleUpdate(const MTPDupdatePhoneCall &update);
-	void showInfoPanel(gsl::not_null<Call*> call);
+	void showInfoPanel(not_null<Call*> call);
+	Call* currentCall();
 
 	base::Observable<Call*> &currentCallChanged() {
 		return _currentCallChanged;
@@ -54,30 +49,35 @@ public:
 	~Instance();
 
 private:
-	gsl::not_null<Call::Delegate*> getCallDelegate() {
+	not_null<Call::Delegate*> getCallDelegate() {
 		return static_cast<Call::Delegate*>(this);
 	}
 	DhConfig getDhConfig() const override {
 		return _dhConfig;
 	}
-	void callFinished(gsl::not_null<Call*> call) override;
-	void callFailed(gsl::not_null<Call*> call) override;
-	void callRedial(gsl::not_null<Call*> call) override;
+	void callFinished(not_null<Call*> call) override;
+	void callFailed(not_null<Call*> call) override;
+	void callRedial(not_null<Call*> call) override;
 	using Sound = Call::Delegate::Sound;
 	void playSound(Sound sound) override;
-	void createCall(gsl::not_null<UserData*> user, Call::Type type);
-	void destroyCall(gsl::not_null<Call*> call);
+	void createCall(not_null<UserData*> user, Call::Type type);
+	void destroyCall(not_null<Call*> call);
 	void destroyCurrentPanel();
+	void requestMicrophonePermissionOrFail(Fn<void()> onSuccess) override;
 
 	void refreshDhConfig();
 	void refreshServerConfig();
+	bytes::const_span updateDhConfig(const MTPmessages_DhConfig &data);
 
 	bool alreadyInCall();
 	void handleCallUpdate(const MTPPhoneCall &call);
 
+	const not_null<Main::Session*> _session;
+	MTP::Sender _api;
+
 	DhConfig _dhConfig;
 
-	TimeMs _lastServerConfigUpdateTime = 0;
+	crl::time _lastServerConfigUpdateTime = 0;
 	mtpRequestId _serverConfigRequestId = 0;
 
 	std::unique_ptr<Call> _currentCall;
@@ -91,7 +91,5 @@ private:
 	std::unique_ptr<Media::Audio::Track> _callBusyTrack;
 
 };
-
-Instance &Current();
 
 } // namespace Calls

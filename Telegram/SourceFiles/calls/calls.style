@@ -1,30 +1,26 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
-using "basic.style";
+using "ui/basic.style";
 
 using "ui/widgets/widgets.style";
 using "window/window.style";
 
+CallSignalBars {
+	width: pixels;
+	radius: pixels;
+	skip: pixels;
+	color: color;
+	inactiveOpacity: double;
+}
+
 callWidth: 300px;
 callHeight: 470px;
+callRadius: 6px;
 callShadow: Shadow {
 	left: icon {{ "call_shadow_left", windowShadowFg }};
 	topLeft: icon {{ "call_shadow_top_left", windowShadowFg }};
@@ -95,7 +91,7 @@ callMuteRight: 8px;
 
 callNameTop: 15px;
 callName: FlatLabel(defaultFlatLabel) {
-	width: 260px;
+	minWidth: 260px;
 	maxHeight: 30px;
 	textFg: callNameFg;
 	align: align(top);
@@ -107,7 +103,7 @@ callName: FlatLabel(defaultFlatLabel) {
 }
 callStatusTop: 46px;
 callStatus: FlatLabel(defaultFlatLabel) {
-	width: 260px;
+	minWidth: 260px;
 	maxHeight: 20px;
 	textFg: callStatusFg;
 	align: align(top);
@@ -197,7 +193,21 @@ callRatingComment: InputField(defaultInputField) {
 }
 callRatingCommentTop: 8px;
 
+callDebugPadding: margins(24px, 0px, 24px, 0px);
 callDebugLabel: FlatLabel(defaultFlatLabel) {
-	margin: margins(24px, 0px, 24px, 0px);
+	margin: callDebugPadding;
 }
 callPanelDuration: 150;
+
+callPanelSignalBars: CallSignalBars {
+	width: 3px;
+	radius: 1px;
+	skip: 1px;
+	color: callNameFg;
+	inactiveOpacity: 0.5;
+}
+callBarSignalBars: CallSignalBars(callPanelSignalBars) {
+	color: callBarFg;
+}
+callSignalMargin: 8px;
+callSignalPadding: 4px;

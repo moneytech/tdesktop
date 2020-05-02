@@ -1,29 +1,15 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "core/basic_types.h"
-#include "structs.h"
-#include "mtproto/core_types.h"
 #include "history/history_location_manager.h"
+
+class History;
 
 namespace InlineBots {
 
@@ -43,15 +29,27 @@ public:
 
 	virtual bool isValid() const = 0;
 
-	virtual void addToHistory(const Result *owner, History *history,
-		MTPDmessage::Flags flags, MsgId msgId, UserId fromId, MTPint mtpDate,
-		UserId viaBotId, MsgId replyToId, const MTPReplyMarkup &markup) const = 0;
+	virtual void addToHistory(
+		const Result *owner,
+		not_null<History*> history,
+		MTPDmessage::Flags flags,
+		MTPDmessage_ClientFlags clientFlags,
+		MsgId msgId,
+		UserId fromId,
+		MTPint mtpDate,
+		UserId viaBotId,
+		MsgId replyToId,
+		const QString &postAuthor,
+		const MTPReplyMarkup &markup) const = 0;
+	virtual QString getErrorOnSend(
+		const Result *owner,
+		not_null<History*> history) const = 0;
 
 	virtual bool hasLocationCoords() const {
 		return false;
 	}
-	virtual bool getLocationCoords(LocationCoords *outLocation) const {
-		return false;
+	virtual std::optional<Data::LocationPoint> getLocationPoint() const {
+		return std::nullopt;
 	}
 	virtual QString getLayoutTitle(const Result *owner) const;
 	virtual QString getLayoutDescription(const Result *owner) const;
@@ -64,24 +62,40 @@ public:
 class SendDataCommon : public SendData {
 public:
 	struct SentMTPMessageFields {
-		MTPString text = MTP_string("");
-		MTPVector<MTPMessageEntity> entities = MTPnullEntities;
+		MTPString text = MTP_string();
+		MTPVector<MTPMessageEntity> entities = MTP_vector<MTPMessageEntity>();
 		MTPMessageMedia media = MTP_messageMediaEmpty();
 	};
 	virtual SentMTPMessageFields getSentMessageFields() const = 0;
 
-	void addToHistory(const Result *owner, History *history,
-		MTPDmessage::Flags flags, MsgId msgId, UserId fromId, MTPint mtpDate,
-		UserId viaBotId, MsgId replyToId, const MTPReplyMarkup &markup) const override;
+	void addToHistory(
+		const Result *owner,
+		not_null<History*> history,
+		MTPDmessage::Flags flags,
+		MTPDmessage_ClientFlags clientFlags,
+		MsgId msgId,
+		UserId fromId,
+		MTPint mtpDate,
+		UserId viaBotId,
+		MsgId replyToId,
+		const QString &postAuthor,
+		const MTPReplyMarkup &markup) const override;
+
+	QString getErrorOnSend(
+		const Result *owner,
+		not_null<History*> history) const override;
 
 };
 
 // Plain text message.
 class SendText : public SendDataCommon {
 public:
-	SendText(const QString &message, const EntitiesInText &entities, bool/* noWebPage*/)
-		: _message(message)
-		, _entities(entities) {
+	SendText(
+		const QString &message,
+		const EntitiesInText &entities,
+		bool/* noWebPage*/)
+	: _message(message)
+	, _entities(entities) {
 	}
 
 	bool isValid() const override {
@@ -111,14 +125,12 @@ public:
 	bool hasLocationCoords() const override {
 		return true;
 	}
-	bool getLocationCoords(LocationCoords *outLocation) const override {
-		t_assert(outLocation != nullptr);
-		*outLocation = _location;
-		return true;
+	std::optional<Data::LocationPoint> getLocationPoint() const override {
+		return _location;
 	}
 
 private:
-	LocationCoords _location;
+	Data::LocationPoint _location;
 
 };
 
@@ -143,14 +155,12 @@ public:
 	bool hasLocationCoords() const override {
 		return true;
 	}
-	bool getLocationCoords(LocationCoords *outLocation) const override {
-		t_assert(outLocation != nullptr);
-		*outLocation = _location;
-		return true;
+	std::optional<Data::LocationPoint> getLocationPoint() const override {
+		return _location;
 	}
 
 private:
-	LocationCoords _location;
+	Data::LocationPoint _location;
 	QString _venueId, _provider, _title, _address;
 
 };
@@ -180,44 +190,80 @@ private:
 // Message with photo.
 class SendPhoto : public SendData {
 public:
-	SendPhoto(PhotoData *photo, const QString &caption)
-		: _photo(photo)
-		, _caption(caption) {
+	SendPhoto(
+		PhotoData *photo,
+		const QString &message,
+		const EntitiesInText &entities)
+	: _photo(photo)
+	, _message(message)
+	, _entities(entities) {
 	}
 
 	bool isValid() const override {
 		return _photo != nullptr;
 	}
 
-	void addToHistory(const Result *owner, History *history,
-		MTPDmessage::Flags flags, MsgId msgId, UserId fromId, MTPint mtpDate,
-		UserId viaBotId, MsgId replyToId, const MTPReplyMarkup &markup) const override;
+	void addToHistory(
+		const Result *owner,
+		not_null<History*> history,
+		MTPDmessage::Flags flags,
+		MTPDmessage_ClientFlags clientFlags,
+		MsgId msgId,
+		UserId fromId,
+		MTPint mtpDate,
+		UserId viaBotId,
+		MsgId replyToId,
+		const QString &postAuthor,
+		const MTPReplyMarkup &markup) const override;
+
+	QString getErrorOnSend(
+		const Result *owner,
+		not_null<History*> history) const override;
 
 private:
 	PhotoData *_photo;
-	QString _caption;
+	QString _message;
+	EntitiesInText _entities;
 
 };
 
 // Message with file.
 class SendFile : public SendData {
 public:
-	SendFile(DocumentData *document, const QString &caption)
-		: _document(document)
-		, _caption(caption) {
+	SendFile(
+		DocumentData *document,
+		const QString &message,
+		const EntitiesInText &entities)
+	: _document(document)
+	, _message(message)
+	, _entities(entities) {
 	}
 
 	bool isValid() const override {
 		return _document != nullptr;
 	}
 
-	void addToHistory(const Result *owner, History *history,
-		MTPDmessage::Flags flags, MsgId msgId, UserId fromId, MTPint mtpDate,
-		UserId viaBotId, MsgId replyToId, const MTPReplyMarkup &markup) const override;
+	void addToHistory(
+		const Result *owner,
+		not_null<History*> history,
+		MTPDmessage::Flags flags,
+		MTPDmessage_ClientFlags clientFlags,
+		MsgId msgId,
+		UserId fromId,
+		MTPint mtpDate,
+		UserId viaBotId,
+		MsgId replyToId,
+		const QString &postAuthor,
+		const MTPReplyMarkup &markup) const override;
+
+	QString getErrorOnSend(
+		const Result *owner,
+		not_null<History*> history) const override;
 
 private:
 	DocumentData *_document;
-	QString _caption;
+	QString _message;
+	EntitiesInText _entities;
 
 };
 
@@ -225,16 +271,29 @@ private:
 class SendGame : public SendData {
 public:
 	SendGame(GameData *game)
-		: _game(game) {
+	: _game(game) {
 	}
 
 	bool isValid() const override {
 		return _game != nullptr;
 	}
 
-	void addToHistory(const Result *owner, History *history,
-		MTPDmessage::Flags flags, MsgId msgId, UserId fromId, MTPint mtpDate,
-		UserId viaBotId, MsgId replyToId, const MTPReplyMarkup &markup) const override;
+	void addToHistory(
+		const Result *owner,
+		not_null<History*> history,
+		MTPDmessage::Flags flags,
+		MTPDmessage_ClientFlags clientFlags,
+		MsgId msgId,
+		UserId fromId,
+		MTPint mtpDate,
+		UserId viaBotId,
+		MsgId replyToId,
+		const QString &postAuthor,
+		const MTPReplyMarkup &markup) const override;
+
+	QString getErrorOnSend(
+		const Result *owner,
+		not_null<History*> history) const override;
 
 private:
 	GameData *_game;

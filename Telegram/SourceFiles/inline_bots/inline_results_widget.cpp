@@ -1,41 +1,42 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "inline_bots/inline_results_widget.h"
 
-#include "styles/style_chat_helpers.h"
+#include "data/data_photo.h"
+#include "data/data_document.h"
+#include "data/data_channel.h"
+#include "data/data_user.h"
+#include "data/data_session.h"
+#include "data/data_file_origin.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/shadow.h"
 #include "ui/effects/ripple_animation.h"
+#include "ui/image/image_prepare.h"
 #include "boxes/confirm_box.h"
 #include "inline_bots/inline_bot_result.h"
 #include "inline_bots/inline_bot_layout_item.h"
 #include "dialogs/dialogs_layout.h"
 #include "storage/localstorage.h"
-#include "lang.h"
+#include "lang/lang_keys.h"
 #include "mainwindow.h"
 #include "apiwrap.h"
 #include "mainwidget.h"
-#include "auth_session.h"
-#include "window/window_controller.h"
+#include "main/main_session.h"
+#include "window/window_session_controller.h"
 #include "ui/widgets/scroll_area.h"
+#include "ui/widgets/labels.h"
+#include "observer_peer.h"
+#include "history/view/history_view_cursor_state.h"
+#include "facades.h"
+#include "app.h"
+#include "styles/style_chat_helpers.h"
+
+#include <QtWidgets/QApplication>
 
 namespace InlineBots {
 namespace Layout {
@@ -46,20 +47,19 @@ constexpr auto kInlineBotRequestDelay = 400;
 
 } // namespace
 
-Inner::Inner(QWidget *parent, gsl::not_null<Window::Controller*> controller) : TWidget(parent)
-, _controller(controller) {
-	resize(st::emojiPanWidth - st::emojiScroll.width - st::buttonRadius, st::emojiPanMinHeight);
+Inner::Inner(
+	QWidget *parent,
+	not_null<Window::SessionController*> controller)
+: TWidget(parent)
+, _controller(controller)
+, _updateInlineItems([=] { updateInlineItems(); })
+, _previewTimer([=] { showPreview(); }) {
+	resize(st::emojiPanWidth - st::emojiScroll.width - st::buttonRadius, st::inlineResultsMinHeight);
 
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent);
 
-	_previewTimer.setSingleShot(true);
-	connect(&_previewTimer, SIGNAL(timeout()), this, SLOT(onPreview()));
-
-	_updateInlineItems.setSingleShot(true);
-	connect(&_updateInlineItems, SIGNAL(timeout()), this, SLOT(onUpdateInlineItems()));
-
-	subscribe(AuthSession::CurrentDownloaderTaskFinished(), [this] {
+	subscribe(Auth().downloaderTaskFinished(), [this] {
 		update();
 	});
 	subscribe(controller->gifPauseLevelChanged(), [this] {
@@ -67,17 +67,66 @@ Inner::Inner(QWidget *parent, gsl::not_null<Window::Controller*> controller) : T
 			update();
 		}
 	});
+	subscribe(Notify::PeerUpdated(), Notify::PeerUpdatedHandler(Notify::PeerUpdate::Flag::RightsChanged, [this](const Notify::PeerUpdate &update) {
+		if (update.peer == _inlineQueryPeer) {
+			auto isRestricted = (_restrictedLabel != nullptr);
+			if (isRestricted != isRestrictedView()) {
+				auto h = countHeight();
+				if (h != height()) resize(width(), h);
+			}
+		}
+	}));
 }
 
-void Inner::setVisibleTopBottom(int visibleTop, int visibleBottom) {
+void Inner::visibleTopBottomUpdated(
+		int visibleTop,
+		int visibleBottom) {
 	_visibleBottom = visibleBottom;
 	if (_visibleTop != visibleTop) {
 		_visibleTop = visibleTop;
-		_lastScrolled = getms();
+		_lastScrolled = crl::now();
 	}
 }
 
+void Inner::checkRestrictedPeer() {
+	if (_inlineQueryPeer) {
+		const auto error = Data::RestrictionError(
+			_inlineQueryPeer,
+			ChatRestriction::f_send_inline);
+		if (error) {
+			if (!_restrictedLabel) {
+				_restrictedLabel.create(this, *error, st::stickersRestrictedLabel);
+				_restrictedLabel->show();
+				_restrictedLabel->move(st::inlineResultsLeft - st::buttonRadius, st::stickerPanPadding);
+				_restrictedLabel->resizeToNaturalWidth(width() - (st::inlineResultsLeft - st::buttonRadius) * 2);
+				if (_switchPmButton) {
+					_switchPmButton->hide();
+				}
+				update();
+			}
+			return;
+		}
+	}
+	if (_restrictedLabel) {
+		_restrictedLabel.destroy();
+		if (_switchPmButton) {
+			_switchPmButton->show();
+		}
+		update();
+	}
+}
+
+bool Inner::isRestrictedView() {
+	checkRestrictedPeer();
+	return (_restrictedLabel != nullptr);
+}
+
 int Inner::countHeight() {
+	if (isRestrictedView()) {
+		return st::stickerPanPadding + _restrictedLabel->height() + st::stickerPanPadding;
+	} else if (_rows.isEmpty() && !_switchPmButton) {
+		return st::stickerPanPadding + st::normalFont->height + st::stickerPanPadding;
+	}
 	auto result = st::stickerPanPadding;
 	if (_switchPmButton) {
 		result += _switchPmButton->height() + st::inlineResultsSkip;
@@ -86,6 +135,21 @@ int Inner::countHeight() {
 		result += _rows[i].height;
 	}
 	return result + st::stickerPanPadding;
+}
+
+QString Inner::tooltipText() const {
+	if (const auto lnk = ClickHandler::getActive()) {
+		return lnk->tooltip();
+	}
+	return QString();
+}
+
+QPoint Inner::tooltipPos() const {
+	return _lastMousePos;
+}
+
+bool Inner::tooltipWindowActive() const {
+	return Ui::AppInFocus() && Ui::InFocusChain(window());
 }
 
 Inner::~Inner() = default;
@@ -102,14 +166,17 @@ void Inner::paintEvent(QPaintEvent *e) {
 }
 
 void Inner::paintInlineItems(Painter &p, const QRect &r) {
+	if (_restrictedLabel) {
+		return;
+	}
 	if (_rows.isEmpty() && !_switchPmButton) {
 		p.setFont(st::normalFont);
 		p.setPen(st::noContactsColor);
-		p.drawText(QRect(0, 0, width(), (height() / 3) * 2 + st::normalFont->height), lang(lng_inline_bot_no_results), style::al_center);
+		p.drawText(QRect(0, 0, width(), (height() / 3) * 2 + st::normalFont->height), tr::lng_inline_bot_no_results(tr::now), style::al_center);
 		return;
 	}
 	auto gifPaused = _controller->isGifPausedAtLeastFor(Window::GifPauseReason::InlineResults);
-	InlineBots::Layout::PaintContext context(getms(), false, gifPaused, false);
+	InlineBots::Layout::PaintContext context(crl::now(), false, gifPaused, false);
 
 	auto top = st::stickerPanPadding;
 	if (_switchPmButton) {
@@ -153,11 +220,11 @@ void Inner::mousePressEvent(QMouseEvent *e) {
 
 	_pressed = _selected;
 	ClickHandler::pressed();
-	_previewTimer.start(QApplication::startDragTime());
+	_previewTimer.callOnce(QApplication::startDragTime());
 }
 
 void Inner::mouseReleaseEvent(QMouseEvent *e) {
-	_previewTimer.stop();
+	_previewTimer.cancel();
 
 	auto pressed = std::exchange(_pressed, -1);
 	auto activated = ClickHandler::unpressed();
@@ -174,11 +241,11 @@ void Inner::mouseReleaseEvent(QMouseEvent *e) {
 		return;
 	}
 
-	if (dynamic_cast<InlineBots::Layout::SendClickHandler*>(activated.data())) {
+	if (dynamic_cast<InlineBots::Layout::SendClickHandler*>(activated.get())) {
 		int row = _selected / MatrixRowShift, column = _selected % MatrixRowShift;
 		selectInlineResult(row, column);
 	} else {
-		App::activateClickHandler(activated, e->button());
+		ActivateClickHandler(window(), activated, e->button());
 	}
 }
 
@@ -202,6 +269,7 @@ void Inner::mouseMoveEvent(QMouseEvent *e) {
 
 void Inner::leaveEventHook(QEvent *e) {
 	clearSelection();
+	Ui::Tooltip::Hide();
 }
 
 void Inner::leaveToChildEvent(QEvent *e, QWidget *child) {
@@ -216,7 +284,7 @@ void Inner::enterFromChildEvent(QEvent *e, QWidget *child) {
 void Inner::clearSelection() {
 	if (_selected >= 0) {
 		int srow = _selected / MatrixRowShift, scol = _selected % MatrixRowShift;
-		t_assert(srow >= 0 && srow < _rows.size() && scol >= 0 && scol < _rows.at(srow).items.size());
+		Assert(srow >= 0 && srow < _rows.size() && scol >= 0 && scol < _rows.at(srow).items.size());
 		ClickHandler::clearActive(_rows.at(srow).items.at(scol));
 		setCursor(style::cur_default);
 	}
@@ -226,20 +294,21 @@ void Inner::clearSelection() {
 
 void Inner::hideFinish(bool completely) {
 	if (completely) {
-		auto itemForget = [](auto &item) {
-			if (auto document = item->getDocument()) {
-				document->forget();
+		const auto unload = [](const auto &item) {
+			if (const auto document = item->getDocument()) {
+				document->unload();
 			}
-			if (auto photo = item->getPhoto()) {
-				photo->forget();
+			if (const auto photo = item->getPhoto()) {
+				photo->unload();
 			}
-			if (auto result = item->getResult()) {
-				result->forget();
+			if (const auto result = item->getResult()) {
+				result->unload();
 			}
+			item->unloadAnimation();
 		};
 		clearInlineRows(false);
-		for_const (auto &item, _inlineLayouts) {
-			itemForget(item.second);
+		for (const auto &[result, layout] : _inlineLayouts) {
+			unload(layout);
 		}
 	}
 }
@@ -278,7 +347,7 @@ bool Inner::inlineRowFinalize(Row &row, int32 &sumWidth, bool force) {
 }
 
 void Inner::inlineBotChanged() {
-	refreshInlineRows(nullptr, nullptr, true);
+	refreshInlineRows(nullptr, nullptr, nullptr, true);
 }
 
 void Inner::clearInlineRows(bool resultsDeleted) {
@@ -329,7 +398,7 @@ void Inner::deleteUnusedInlineLayouts() {
 
 Inner::Row &Inner::layoutInlineRow(Row &row, int32 sumWidth) {
 	auto count = int(row.items.size());
-	t_assert(count <= kInlineItemsMaxPerRow);
+	Assert(count <= kInlineItemsMaxPerRow);
 
 	// enumerate items in the order of growing maxWidth()
 	// for that sort item indices by maxWidth()
@@ -382,23 +451,27 @@ void Inner::refreshSwitchPmButton(const CacheEntry *entry) {
 		_switchPmStartToken.clear();
 	} else {
 		if (!_switchPmButton) {
-			_switchPmButton.create(this, QString(), st::switchPmButton);
+			_switchPmButton.create(this, nullptr, st::switchPmButton);
 			_switchPmButton->show();
 			_switchPmButton->setTextTransform(Ui::RoundButton::TextTransform::NoTransform);
-			connect(_switchPmButton, SIGNAL(clicked()), this, SLOT(onSwitchPm()));
+			_switchPmButton->addClickHandler([=] { onSwitchPm(); });
 		}
-		_switchPmButton->setText(entry->switchPmText); // doesn't perform text.toUpper()
+		_switchPmButton->setText(rpl::single(entry->switchPmText));
 		_switchPmStartToken = entry->switchPmStartToken;
-		auto buttonTop = st::stickerPanPadding;
+		const auto buttonTop = st::stickerPanPadding;
 		_switchPmButton->move(st::inlineResultsLeft - st::buttonRadius, buttonTop);
+		if (isRestrictedView()) {
+			_switchPmButton->hide();
+		}
 	}
 	update();
 }
 
-int Inner::refreshInlineRows(UserData *bot, const CacheEntry *entry, bool resultsDeleted) {
+int Inner::refreshInlineRows(PeerData *queryPeer, UserData *bot, const CacheEntry *entry, bool resultsDeleted) {
 	_inlineBot = bot;
+	_inlineQueryPeer = queryPeer;
 	refreshSwitchPmButton(entry);
-	auto clearResults = [this, entry]() {
+	auto clearResults = [&] {
 		if (!entry) {
 			return true;
 		}
@@ -419,7 +492,7 @@ int Inner::refreshInlineRows(UserData *bot, const CacheEntry *entry, bool result
 
 	clearSelection();
 
-	t_assert(_inlineBot != 0);
+	Assert(_inlineBot != 0);
 
 	auto count = int(entry->results.size());
 	auto from = validateExistingInlineRows(entry->results);
@@ -522,11 +595,11 @@ void Inner::inlineItemLayoutChanged(const ItemBase *layout) {
 }
 
 void Inner::inlineItemRepaint(const ItemBase *layout) {
-	auto ms = getms();
+	auto ms = crl::now();
 	if (_lastScrolled + 100 <= ms) {
 		update();
 	} else {
-		_updateInlineItems.start(_lastScrolled + 100 - ms);
+		_updateInlineItems.callOnce(_lastScrolled + 100 - ms);
 	}
 }
 
@@ -537,7 +610,7 @@ bool Inner::inlineItemVisible(const ItemBase *layout) {
 	}
 
 	int row = position / MatrixRowShift, col = position % MatrixRowShift;
-	t_assert((row < _rows.size()) && (col < _rows[row].items.size()));
+	Assert((row < _rows.size()) && (col < _rows[row].items.size()));
 
 	auto &inlineItems = _rows[row].items;
 	int top = st::stickerPanPadding;
@@ -546,6 +619,10 @@ bool Inner::inlineItemVisible(const ItemBase *layout) {
 	}
 
 	return (top < _visibleBottom) && (top + _rows[row].items[col]->height() > _visibleTop);
+}
+
+Data::FileOrigin Inner::inlineItemFileOrigin() {
+	return Data::FileOrigin();
 }
 
 void Inner::updateSelected() {
@@ -564,14 +641,14 @@ void Inner::updateSelected() {
 	int row = -1, col = -1, sel = -1;
 	ClickHandlerPtr lnk;
 	ClickHandlerHost *lnkhost = nullptr;
-	HistoryCursorState cursor = HistoryDefaultCursorState;
+	HistoryView::CursorState cursor = HistoryView::CursorState::None;
 	if (sy >= 0) {
 		row = 0;
 		for (int rows = _rows.size(); row < rows; ++row) {
-			if (sy < _rows.at(row).height) {
+			if (sy < _rows[row].height) {
 				break;
 			}
-			sy -= _rows.at(row).height;
+			sy -= _rows[row].height;
 		}
 	}
 	if (sx >= 0 && row >= 0 && row < _rows.size()) {
@@ -589,8 +666,12 @@ void Inner::updateSelected() {
 		}
 		if (col < inlineItems.size()) {
 			sel = row * MatrixRowShift + col;
-			inlineItems.at(col)->getState(lnk, cursor, sx, sy);
-			lnkhost = inlineItems.at(col);
+			auto result = inlineItems[col]->getState(
+				QPoint(sx, sy),
+				HistoryView::StateRequest());
+			lnk = result.link;
+			cursor = result.cursor;
+			lnkhost = inlineItems[col];
 		} else {
 			row = col = -1;
 		}
@@ -601,58 +682,68 @@ void Inner::updateSelected() {
 	int scol = (_selected >= 0) ? (_selected % MatrixRowShift) : -1;
 	if (_selected != sel) {
 		if (srow >= 0 && scol >= 0) {
-			t_assert(srow >= 0 && srow < _rows.size() && scol >= 0 && scol < _rows.at(srow).items.size());
+			Assert(srow >= 0 && srow < _rows.size() && scol >= 0 && scol < _rows.at(srow).items.size());
 			_rows[srow].items[scol]->update();
 		}
 		_selected = sel;
 		if (row >= 0 && col >= 0) {
-			t_assert(row >= 0 && row < _rows.size() && col >= 0 && col < _rows.at(row).items.size());
+			Assert(row >= 0 && row < _rows.size() && col >= 0 && col < _rows.at(row).items.size());
 			_rows[row].items[col]->update();
 		}
 		if (_previewShown && _selected >= 0 && _pressed != _selected) {
 			_pressed = _selected;
 			if (row >= 0 && col >= 0) {
 				auto layout = _rows.at(row).items.at(col);
-				if (auto previewDocument = layout->getPreviewDocument()) {
-					Ui::showMediaPreview(previewDocument);
-				} else if (auto previewPhoto = layout->getPreviewPhoto()) {
-					Ui::showMediaPreview(previewPhoto);
+				if (const auto w = App::wnd()) {
+					if (const auto previewDocument = layout->getPreviewDocument()) {
+						w->showMediaPreview(
+							Data::FileOrigin(),
+							previewDocument);
+					} else if (auto previewPhoto = layout->getPreviewPhoto()) {
+						w->showMediaPreview(Data::FileOrigin(), previewPhoto);
+					}
 				}
 			}
 		}
 	}
 	if (ClickHandler::setActive(lnk, lnkhost)) {
 		setCursor(lnk ? style::cur_pointer : style::cur_default);
+		Ui::Tooltip::Hide();
+	}
+	if (lnk) {
+		Ui::Tooltip::Show(1000, this);
 	}
 }
 
-void Inner::onPreview() {
+void Inner::showPreview() {
 	if (_pressed < 0) return;
 
 	int row = _pressed / MatrixRowShift, col = _pressed % MatrixRowShift;
 	if (row < _rows.size() && col < _rows.at(row).items.size()) {
 		auto layout = _rows.at(row).items.at(col);
-		if (auto previewDocument = layout->getPreviewDocument()) {
-			Ui::showMediaPreview(previewDocument);
-			_previewShown = true;
-		} else if (auto previewPhoto = layout->getPreviewPhoto()) {
-			Ui::showMediaPreview(previewPhoto);
-			_previewShown = true;
+		if (const auto w = App::wnd()) {
+			if (const auto previewDocument = layout->getPreviewDocument()) {
+				w->showMediaPreview(Data::FileOrigin(), previewDocument);
+				_previewShown = true;
+			} else if (const auto previewPhoto = layout->getPreviewPhoto()) {
+				w->showMediaPreview(Data::FileOrigin(), previewPhoto);
+				_previewShown = true;
+			}
 		}
 	}
 }
 
-void Inner::onUpdateInlineItems() {
-	auto ms = getms();
+void Inner::updateInlineItems() {
+	auto ms = crl::now();
 	if (_lastScrolled + 100 <= ms) {
 		update();
 	} else {
-		_updateInlineItems.start(_lastScrolled + 100 - ms);
+		_updateInlineItems.callOnce(_lastScrolled + 100 - ms);
 	}
 }
 
 void Inner::onSwitchPm() {
-	if (_inlineBot && _inlineBot->botInfo) {
+	if (_inlineBot && _inlineBot->isBot()) {
 		_inlineBot->botInfo->startToken = _switchPmStartToken;
 		Ui::showPeerHistory(_inlineBot, ShowAndStartBotMsgId);
 	}
@@ -660,8 +751,12 @@ void Inner::onSwitchPm() {
 
 } // namespace internal
 
-Widget::Widget(QWidget *parent, gsl::not_null<Window::Controller*> controller) : TWidget(parent)
+Widget::Widget(
+	QWidget *parent,
+	not_null<Window::SessionController*> controller)
+: RpWidget(parent)
 , _controller(controller)
+, _api(_controller->session().api().instance())
 , _contentMaxHeight(st::emojiPanMaxHeight)
 , _contentHeight(_contentMaxHeight)
 , _scroll(this, st::inlineBotsScroll) {
@@ -684,9 +779,12 @@ Widget::Widget(QWidget *parent, gsl::not_null<Window::Controller*> controller) :
 	_inlineRequestTimer.setSingleShot(true);
 	connect(&_inlineRequestTimer, SIGNAL(timeout()), this, SLOT(onInlineRequest()));
 
-	if (cPlatform() == dbipMac || cPlatform() == dbipMacOld) {
-		connect(App::wnd()->windowHandle(), SIGNAL(activeChanged()), this, SLOT(onWndActiveChanged()));
-	}
+	macWindowDeactivateEvents(
+	) | rpl::filter([=] {
+		return !isHidden();
+	}) | rpl::start_with_next([=] {
+		leaveEvent(nullptr);
+	}, lifetime());
 
 	// Inner widget has OpaquePaintEvent attribute so it doesn't repaint on scroll.
 	// But we should force it to repaint so that GIFs will continue to animate without update() calls.
@@ -708,7 +806,7 @@ void Widget::moveBottom(int bottom) {
 void Widget::updateContentHeight() {
 	auto addedHeight = innerPadding().top() + innerPadding().bottom();
 	auto wantedContentHeight = qRound(st::emojiPanHeightRatio * _bottom) - addedHeight;
-	auto contentHeight = snap(wantedContentHeight, st::emojiPanMinHeight, st::emojiPanMaxHeight);
+	auto contentHeight = snap(wantedContentHeight, st::inlineResultsMinHeight, st::inlineResultsMaxHeight);
 	accumulate_min(contentHeight, _bottom - addedHeight);
 	accumulate_min(contentHeight, _contentMaxHeight);
 	auto resultTop = _bottom - addedHeight - contentHeight;
@@ -737,21 +835,12 @@ void Widget::updateContentHeight() {
 	update();
 }
 
-void Widget::onWndActiveChanged() {
-	if (!App::wnd()->windowHandle()->isActive() && !isHidden()) {
-		leaveEvent(0);
-	}
-}
-
 void Widget::paintEvent(QPaintEvent *e) {
 	Painter p(this);
 
-	auto ms = getms();
+	auto opacityAnimating = _a_opacity.animating();
 
-	// This call can finish _a_show animation and destroy _showAnimation.
-	auto opacityAnimating = _a_opacity.animating(ms);
-
-	auto showAnimating = _a_show.animating(ms);
+	auto showAnimating = _a_show.animating();
 	if (_showAnimation && !showAnimating) {
 		_showAnimation.reset();
 		if (!opacityAnimating) {
@@ -760,12 +849,12 @@ void Widget::paintEvent(QPaintEvent *e) {
 	}
 
 	if (showAnimating) {
-		t_assert(_showAnimation != nullptr);
-		if (auto opacity = _a_opacity.current(_hiding ? 0. : 1.)) {
-			_showAnimation->paintFrame(p, 0, 0, width(), _a_show.current(1.), opacity);
+		Assert(_showAnimation != nullptr);
+		if (auto opacity = _a_opacity.value(_hiding ? 0. : 1.)) {
+			_showAnimation->paintFrame(p, 0, 0, width(), _a_show.value(1.), opacity);
 		}
 	} else if (opacityAnimating) {
-		p.setOpacity(_a_opacity.current(_hiding ? 0. : 1.));
+		p.setOpacity(_a_opacity.value(_hiding ? 0. : 1.));
 		p.drawPixmap(0, 0, _cache);
 	} else if (_hiding || isHidden()) {
 		hideFinished();
@@ -778,7 +867,7 @@ void Widget::paintEvent(QPaintEvent *e) {
 
 void Widget::paintContent(Painter &p) {
 	auto inner = innerRect();
-	App::roundRect(p, inner, st::emojiPanBg, ImageRoundRadius::Small, App::RectPart::TopFull | App::RectPart::BottomFull);
+	App::roundRect(p, inner, st::emojiPanBg, ImageRoundRadius::Small, RectPart::FullTop | RectPart::FullBottom);
 
 	auto horizontal = horizontalRect();
 	auto sidesTop = horizontal.y();
@@ -795,7 +884,7 @@ void Widget::hideFast() {
 	if (isHidden()) return;
 
 	_hiding = false;
-	_a_opacity.finish();
+	_a_opacity.stop();
 	hideFinished();
 }
 
@@ -817,7 +906,7 @@ void Widget::prepareCache() {
 	auto showAnimation = base::take(_a_show);
 	auto showAnimationData = base::take(_showAnimation);
 	showChildren();
-	_cache = myGrab(this);
+	_cache = Ui::GrabWidget(this);
 	_showAnimation = base::take(showAnimationData);
 	_a_show = base::take(showAnimation);
 	if (_a_show.animating()) {
@@ -845,8 +934,7 @@ void Widget::startShowAnimation() {
 		_showAnimation = std::make_unique<Ui::PanelAnimation>(st::emojiPanAnimation, Ui::PanelAnimation::Origin::BottomLeft);
 		auto inner = rect().marginsRemoved(st::emojiPanMargins);
 		_showAnimation->setFinalImage(std::move(image), QRect(inner.topLeft() * cIntRetinaFactor(), inner.size() * cIntRetinaFactor()));
-		auto corners = App::cornersMask(ImageRoundRadius::Small);
-		_showAnimation->setCornerMasks(QImage(*corners[0]), QImage(*corners[1]), QImage(*corners[2]), QImage(*corners[3]));
+		_showAnimation->setCornerMasks(Images::CornersMask(ImageRoundRadius::Small));
 		_showAnimation->start();
 	}
 	hideChildren();
@@ -854,7 +942,7 @@ void Widget::startShowAnimation() {
 }
 
 QImage Widget::grabForPanelAnimation() {
-	myEnsureResized(this);
+	Ui::SendPendingMoveResizeEvents(this);
 	auto result = QImage(size() * cIntRetinaFactor(), QImage::Format_ARGB32_Premultiplied);
 	result.setDevicePixelRatio(cRetinaFactor());
 	result.fill(Qt::transparent);
@@ -875,10 +963,11 @@ Widget::~Widget() = default;
 
 void Widget::hideFinished() {
 	hide();
-	_controller->disableGifPauseReason(Window::GifPauseReason::InlineResults);
+	_controller->disableGifPauseReason(
+		Window::GifPauseReason::InlineResults);
 
 	_inner->hideFinish(true);
-	_a_show.finish();
+	_a_show.stop();
 	_showAnimation.reset();
 	_cache = QPixmap();
 	_horizontal = false;
@@ -896,7 +985,8 @@ void Widget::showStarted() {
 		recountContentMaxHeight();
 		_inner->preloadImages();
 		show();
-		_controller->enableGifPauseReason(Window::GifPauseReason::InlineResults);
+		_controller->enableGifPauseReason(
+			Window::GifPauseReason::InlineResults);
 		startShowAnimation();
 	} else if (_hiding) {
 		startOpacityAnimation(false);
@@ -966,18 +1056,21 @@ void Widget::inlineResultsDone(const MTPmessages_BotResults &result) {
 	auto adding = (it != _inlineCache.cend());
 	if (result.type() == mtpc_messages_botResults) {
 		auto &d = result.c_messages_botResults();
-		auto &v = d.vresults.v;
-		auto queryId = d.vquery_id.v;
+		Auth().data().processUsers(d.vusers());
+
+		auto &v = d.vresults().v;
+		auto queryId = d.vquery_id().v;
 
 		if (it == _inlineCache.cend()) {
 			it = _inlineCache.emplace(_inlineQuery, std::make_unique<internal::CacheEntry>()).first;
 		}
 		auto entry = it->second.get();
-		entry->nextOffset = qs(d.vnext_offset);
-		if (d.has_switch_pm() && d.vswitch_pm.type() == mtpc_inlineBotSwitchPM) {
-			auto &switchPm = d.vswitch_pm.c_inlineBotSwitchPM();
-			entry->switchPmText = qs(switchPm.vtext);
-			entry->switchPmStartToken = qs(switchPm.vstart_param);
+		entry->nextOffset = qs(d.vnext_offset().value_or_empty());
+		if (const auto switchPm = d.vswitch_pm()) {
+			switchPm->match([&](const MTPDinlineBotSwitchPM &data) {
+				entry->switchPmText = qs(data.vtext());
+				entry->switchPmStartToken = qs(data.vstart_param());
+			});
 		}
 
 		if (auto count = v.size()) {
@@ -1011,13 +1104,7 @@ void Widget::queryInlineBot(UserData *bot, PeerData *peer, QString query) {
 		inlineBotChanged();
 		_inlineBot = bot;
 		force = true;
-		//if (_inlineBot->isBotInlineGeo()) {
-		//	Ui::show(Box<InformBox>(lang(lng_bot_inline_geo_unavailable)));
-		//}
 	}
-	//if (_inlineBot && _inlineBot->isBotInlineGeo()) {
-	//	return;
-	//}
 
 	if (_inlineQuery != query || force) {
 		if (_inlineRequestId) {
@@ -1044,12 +1131,21 @@ void Widget::onInlineRequest() {
 	auto it = _inlineCache.find(_inlineQuery);
 	if (it != _inlineCache.cend()) {
 		nextOffset = it->second->nextOffset;
-		if (nextOffset.isEmpty()) return;
+		if (nextOffset.isEmpty()) {
+			return;
+		}
 	}
 	Notify::inlineBotRequesting(true);
-	_inlineRequestId = request(MTPmessages_GetInlineBotResults(MTP_flags(0), _inlineBot->inputUser, _inlineQueryPeer->input, MTPInputGeoPoint(), MTP_string(_inlineQuery), MTP_string(nextOffset))).done([this](const MTPmessages_BotResults &result, mtpRequestId requestId) {
+	_inlineRequestId = _api.request(MTPmessages_GetInlineBotResults(
+		MTP_flags(0),
+		_inlineBot->inputUser,
+		_inlineQueryPeer->input,
+		MTPInputGeoPoint(),
+		MTP_string(_inlineQuery),
+		MTP_string(nextOffset)
+	)).done([=](const MTPmessages_BotResults &result) {
 		inlineResultsDone(result);
-	}).fail([this](const RPCError &error) {
+	}).fail([=](const RPCError &error) {
 		// show error?
 		Notify::inlineBotRequesting(false);
 		_inlineRequestId = 0;
@@ -1071,7 +1167,7 @@ bool Widget::refreshInlineRows(int *added) {
 		_inlineNextOffset = it->second->nextOffset;
 	}
 	if (!entry) prepareCache();
-	auto result = _inner->refreshInlineRows(_inlineBot, entry, false);
+	auto result = _inner->refreshInlineRows(_inlineQueryPeer, _inlineBot, entry, false);
 	if (added) *added = result;
 	return (entry != nullptr);
 }

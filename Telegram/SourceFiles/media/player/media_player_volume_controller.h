@@ -1,24 +1,17 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
+
+#include "ui/effects/animations.h"
+#include "ui/rp_widget.h"
+#include "base/object_ptr.h"
+
+#include <QtCore/QTimer>
 
 namespace Ui {
 class IconButton;
@@ -38,14 +31,14 @@ protected:
 	void resizeEvent(QResizeEvent *e) override;
 
 private:
-	void setVolume(float64 volume, bool animated = true);
+	void setVolume(float64 volume);
 	void applyVolumeChange(float64 volume);
 
 	object_ptr<Ui::MediaSlider> _slider;
 
 };
 
-class VolumeWidget : public TWidget {
+class VolumeWidget : public Ui::RpWidget {
 	Q_OBJECT
 
 public:
@@ -66,7 +59,6 @@ protected:
 private slots:
 	void onShowStart();
 	void onHideStart();
-	void onWindowActiveChanged();
 
 private:
 	void otherEnter();
@@ -79,7 +71,7 @@ private:
 	bool _hiding = false;
 
 	QPixmap _cache;
-	Animation _a_appearance;
+	Ui::Animations::Simple _a_appearance;
 
 	QTimer _hideTimer, _showTimer;
 
@@ -87,5 +79,5 @@ private:
 
 };
 
-} // namespace Clip
+} // namespace Player
 } // namespace Media

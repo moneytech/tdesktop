@@ -1,33 +1,33 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/mac/specific_mac_p.h"
 
 #include "mainwindow.h"
 #include "mainwidget.h"
-#include "messenger.h"
+#include "core/sandbox.h"
+#include "core/application.h"
+#include "core/crash_reports.h"
 #include "storage/localstorage.h"
+#include "media/audio/media_audio.h"
 #include "media/player/media_player_instance.h"
-#include "media/media_audio.h"
-#include "platform/mac/mac_utilities.h"
-#include "styles/style_window.h"
-#include "lang.h"
+#include "platform/mac/mac_touchbar.h"
+#include "base/platform/mac/base_utilities_mac.h"
+#include "base/platform/base_platform_info.h"
+#include "lang/lang_keys.h"
 #include "base/timer.h"
+#include "facades.h"
+#include "styles/style_window.h"
 
+#include <QtGui/QWindow>
+#include <QtWidgets/QApplication>
+#if __has_include(<QtCore/QOperatingSystemVersion>)
+#include <QtCore/QOperatingSystemVersion>
+#endif // __has_include(<QtCore/QOperatingSystemVersion>)
 #include <Cocoa/Cocoa.h>
 #include <CoreFoundation/CFURL.h>
 #include <IOKit/IOKitLib.h>
@@ -40,8 +40,9 @@ constexpr auto kIgnoreActivationTimeoutMs = 500;
 
 } // namespace
 
+NSImage *qt_mac_create_nsimage(const QPixmap &pm);
+
 using Platform::Q2NSString;
-using Platform::NSlang;
 using Platform::NS2QString;
 
 @interface qVisualize : NSObject {
@@ -94,6 +95,7 @@ using Platform::NS2QString;
 - (BOOL) applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag;
 - (void) applicationDidFinishLaunching:(NSNotification *)aNotification;
 - (void) applicationDidBecomeActive:(NSNotification *)aNotification;
+- (void) applicationDidResignActive:(NSNotification *)aNotification;
 - (void) receiveWakeNote:(NSNotification*)note;
 
 - (void) setWatchingMediaKeys:(bool)watching;
@@ -127,7 +129,12 @@ ApplicationDelegate *_sharedDelegate = nil;
 	});
 #ifndef OS_MAC_STORE
 	if ([SPMediaKeyTap usesGlobalMediaKeyTap]) {
-		_keyTap = [[SPMediaKeyTap alloc] initWithDelegate:self];
+		if (!Platform::IsMac10_14OrGreater()) {
+			_keyTap = [[SPMediaKeyTap alloc] initWithDelegate:self];
+		} else {
+			// In macOS Mojave it requires accessibility features.
+			LOG(("Media key monitoring disabled starting with Mojave."));
+		}
 	} else {
 		LOG(("Media key monitoring disabled"));
 	}
@@ -135,21 +142,22 @@ ApplicationDelegate *_sharedDelegate = nil;
 }
 
 - (void) applicationDidBecomeActive:(NSNotification *)aNotification {
-	if (auto messenger = Messenger::InstancePointer()) {
-		if (!_ignoreActivation) {
-			messenger->handleAppActivated();
-			if (auto window = App::wnd()) {
-				if (window->isHidden()) {
-					window->showFromTray();
-				}
+	if (Core::IsAppLaunched() && !_ignoreActivation) {
+		Core::App().handleAppActivated();
+		if (auto window = App::wnd()) {
+			if (window->isHidden()) {
+				window->showFromTray();
 			}
 		}
 	}
 }
 
+- (void) applicationDidResignActive:(NSNotification *)aNotification {
+}
+
 - (void) receiveWakeNote:(NSNotification*)aNotification {
-	if (auto messenger = Messenger::InstancePointer()) {
-		messenger->checkLocalTime();
+	if (Core::IsAppLaunched()) {
+		Core::App().checkLocalTime();
 	}
 
 	LOG(("Audio Info: -receiveWakeNote: received, scheduling detach from audio device"));
@@ -176,9 +184,11 @@ ApplicationDelegate *_sharedDelegate = nil;
 }
 
 - (void) mediaKeyTap:(SPMediaKeyTap*)keyTap receivedMediaKeyEvent:(NSEvent*)e {
-	if (e && [e type] == NSSystemDefined && [e subtype] == SPSystemDefinedEventMediaKeys) {
-		objc_handleMediaKeyEvent(e);
-	}
+	Core::Sandbox::Instance().customEnterFromEventLoop([&] {
+		if (e && [e type] == NSSystemDefined && [e subtype] == SPSystemDefinedEventMediaKeys) {
+			objc_handleMediaKeyEvent(e);
+		}
+	});
 }
 
 - (void) ignoreApplicationActivationRightNow {
@@ -196,44 +206,15 @@ void SetWatchingMediaKeys(bool watching) {
 	}
 }
 
-void InitOnTopPanel(QWidget *panel) {
-	Expects(!panel->windowHandle());
-
-	// Force creating windowHandle() without creating the platform window yet.
-	panel->setAttribute(Qt::WA_NativeWindow, true);
-	panel->windowHandle()->setProperty("_td_macNonactivatingPanelMask", QVariant(true));
-	panel->setAttribute(Qt::WA_NativeWindow, false);
-
-	panel->createWinId();
-
-	auto platformWindow = [reinterpret_cast<NSView*>(panel->winId()) window];
-	t_assert([platformWindow isKindOfClass:[NSPanel class]]);
-
-	auto platformPanel = static_cast<NSPanel*>(platformWindow);
-	[platformPanel setLevel:NSPopUpMenuWindowLevel];
-	[platformPanel setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorStationary|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorIgnoresCycle];
-	[platformPanel setFloatingPanel:YES];
-	[platformPanel setHidesOnDeactivate:NO];
-
-	objc_ignoreApplicationActivationRightNow();
-}
-
-void DeInitOnTopPanel(QWidget *panel) {
-	auto platformWindow = [reinterpret_cast<NSView*>(panel->winId()) window];
-	t_assert([platformWindow isKindOfClass:[NSPanel class]]);
-
-	auto platformPanel = static_cast<NSPanel*>(platformWindow);
-	auto newBehavior = ([platformPanel collectionBehavior] & (~NSWindowCollectionBehaviorCanJoinAllSpaces)) | NSWindowCollectionBehaviorMoveToActiveSpace;
-	[platformPanel setCollectionBehavior:newBehavior];
-}
-
-void ReInitOnTopPanel(QWidget *panel) {
-	auto platformWindow = [reinterpret_cast<NSView*>(panel->winId()) window];
-	t_assert([platformWindow isKindOfClass:[NSPanel class]]);
-
-	auto platformPanel = static_cast<NSPanel*>(platformWindow);
-	auto newBehavior = ([platformPanel collectionBehavior] & (~NSWindowCollectionBehaviorMoveToActiveSpace)) | NSWindowCollectionBehaviorCanJoinAllSpaces;
-	[platformPanel setCollectionBehavior:newBehavior];
+void SetApplicationIcon(const QIcon &icon) {
+	NSImage *image = nil;
+	if (!icon.isNull()) {
+		auto pixmap = icon.pixmap(1024, 1024);
+		pixmap.setDevicePixelRatio(cRetinaFactor());
+		image = static_cast<NSImage*>(qt_mac_create_nsimage(pixmap));
+	}
+	[[NSApplication sharedApplication] setApplicationIconImage:image];
+	[image release];
 }
 
 } // namespace Platform
@@ -249,20 +230,6 @@ bool objc_darkMode() {
 
 	}
 	return result;
-}
-
-void objc_showOverAll(WId winId, bool canFocus) {
-	NSWindow *wnd = [reinterpret_cast<NSView *>(winId) window];
-	[wnd setLevel:NSPopUpMenuWindowLevel];
-	if (!canFocus) {
-		[wnd setStyleMask:NSUtilityWindowMask | NSNonactivatingPanelMask];
-		[wnd setCollectionBehavior:NSWindowCollectionBehaviorMoveToActiveSpace|NSWindowCollectionBehaviorStationary|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorIgnoresCycle];
-	}
-}
-
-void objc_bringToBack(WId winId) {
-	NSWindow *wnd = [reinterpret_cast<NSView *>(winId) window];
-	[wnd setLevel:NSModalPanelWindowLevel];
 }
 
 bool objc_handleMediaKeyEvent(void *ev) {
@@ -318,65 +285,18 @@ void objc_outputDebugString(const QString &str) {
 	}
 }
 
-bool objc_idleSupported() {
-	auto idleTime = 0LL;
-	return objc_idleTime(idleTime);
-}
-
-bool objc_idleTime(TimeMs &idleTime) { // taken from https://github.com/trueinteractions/tint/issues/53
-	CFMutableDictionaryRef properties = 0;
-	CFTypeRef obj;
-	mach_port_t masterPort;
-	io_iterator_t iter;
-	io_registry_entry_t curObj;
-
-	IOMasterPort(MACH_PORT_NULL, &masterPort);
-
-	/* Get IOHIDSystem */
-	IOServiceGetMatchingServices(masterPort, IOServiceMatching("IOHIDSystem"), &iter);
-	if (iter == 0) {
-		return false;
-	} else {
-		curObj = IOIteratorNext(iter);
-	}
-	if (IORegistryEntryCreateCFProperties(curObj, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS && properties != NULL) {
-		obj = CFDictionaryGetValue(properties, CFSTR("HIDIdleTime"));
-		CFRetain(obj);
-	} else {
-		return false;
-	}
-
-	uint64 err = ~0L, result = err;
-	if (obj) {
-		CFTypeID type = CFGetTypeID(obj);
-
-		if (type == CFDataGetTypeID()) {
-			CFDataGetBytes((CFDataRef) obj, CFRangeMake(0, sizeof(result)), (UInt8*)&result);
-		} else if (type == CFNumberGetTypeID()) {
-			CFNumberGetValue((CFNumberRef)obj, kCFNumberSInt64Type, &result);
-		} else {
-			// error
-		}
-
-		CFRelease(obj);
-
-		if (result != err) {
-			result /= 1000000; // return as ms
-		}
-	} else {
-		// error
-	}
-
-	CFRelease((CFTypeRef)properties);
-	IOObjectRelease(curObj);
-	IOObjectRelease(iter);
-	if (result == err) return false;
-
-	idleTime = static_cast<TimeMs>(result);
-	return true;
-}
-
 void objc_start() {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 9, 0)
+	// Patch: Fix macOS regression. On 10.14.4, it crashes on GPU switches.
+	// See https://bugreports.qt.io/browse/QTCREATORBUG-22215
+	const auto version = QOperatingSystemVersion::current();
+	if (version.majorVersion() == 10
+		&& version.minorVersion() == 14
+		&& version.microVersion() == 4) {
+		qputenv("QT_MAC_PRO_WEBENGINE_WORKAROUND", "1");
+	}
+#endif // Qt 5.9.0
+
 	_sharedDelegate = [[ApplicationDelegate alloc] init];
 	[[NSApplication sharedApplication] setDelegate:_sharedDelegate];
 	[[[NSWorkspace sharedWorkspace] notificationCenter] addObserver: _sharedDelegate
@@ -401,78 +321,6 @@ void objc_finish() {
 		[_downloadPathUrl stopAccessingSecurityScopedResource];
 		_downloadPathUrl = nil;
 	}
-}
-
-void objc_registerCustomScheme() {
-#ifndef TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME
-	OSStatus result = LSSetDefaultHandlerForURLScheme(CFSTR("tg"), (CFStringRef)[[NSBundle mainBundle] bundleIdentifier]);
-	DEBUG_LOG(("App Info: set default handler for 'tg' scheme result: %1").arg(result));
-#endif // !TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME
-}
-
-BOOL _execUpdater(BOOL update = YES, const QString &crashreport = QString()) {
-	@autoreleasepool {
-
-	NSString *path = @"", *args = @"";
-	@try {
-		path = [[NSBundle mainBundle] bundlePath];
-		if (!path) {
-			LOG(("Could not get bundle path!!"));
-			return NO;
-		}
-		path = [path stringByAppendingString:@"/Contents/Frameworks/Updater"];
-
-		NSMutableArray *args = [[NSMutableArray alloc] initWithObjects:@"-workpath", Q2NSString(cWorkingDir()), @"-procid", nil];
-		[args addObject:[NSString stringWithFormat:@"%d", [[NSProcessInfo processInfo] processIdentifier]]];
-		if (cRestartingToSettings()) [args addObject:@"-tosettings"];
-		if (!update) [args addObject:@"-noupdate"];
-		if (cLaunchMode() == LaunchModeAutoStart) [args addObject:@"-autostart"];
-		if (cDebug()) [args addObject:@"-debug"];
-		if (cStartInTray()) [args addObject:@"-startintray"];
-		if (cTestMode()) [args addObject:@"-testmode"];
-		if (cDataFile() != qsl("data")) {
-			[args addObject:@"-key"];
-			[args addObject:Q2NSString(cDataFile())];
-		}
-		if (!crashreport.isEmpty()) {
-			[args addObject:@"-crashreport"];
-			[args addObject:Q2NSString(crashreport)];
-		}
-
-		DEBUG_LOG(("Application Info: executing %1 %2").arg(NS2QString(path)).arg(NS2QString([args componentsJoinedByString:@" "])));
-		Logs::closeMain();
-		SignalHandlers::finish();
-		if (![NSTask launchedTaskWithLaunchPath:path arguments:args]) {
-			DEBUG_LOG(("Task not launched while executing %1 %2").arg(NS2QString(path)).arg(NS2QString([args componentsJoinedByString:@" "])));
-			return NO;
-		}
-	}
-	@catch (NSException *exception) {
-		LOG(("Exception caught while executing %1 %2").arg(NS2QString(path)).arg(NS2QString(args)));
-		return NO;
-	}
-	@finally {
-	}
-
-	}
-	return YES;
-}
-
-bool objc_execUpdater() {
-	return !!_execUpdater();
-}
-
-void objc_execTelegram(const QString &crashreport) {
-#ifndef OS_MAC_STORE
-	_execUpdater(NO, crashreport);
-#else // OS_MAC_STORE
-	@autoreleasepool {
-
-	NSDictionary *conf = [NSDictionary dictionaryWithObject:[NSArray array] forKey:NSWorkspaceLaunchConfigurationArguments];
-	[[NSWorkspace sharedWorkspace] launchApplicationAtURL:[NSURL fileURLWithPath:Q2NSString(cExeDir() + cExeName())] options:NSWorkspaceLaunchAsync | NSWorkspaceLaunchNewInstance configuration:conf error:0];
-
-	}
-#endif // OS_MAC_STORE
 }
 
 void objc_activateProgram(WId winId) {
@@ -529,29 +377,9 @@ QString objc_documentsPath() {
 QString objc_appDataPath() {
 	NSURL *url = [[NSFileManager defaultManager] URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:nil];
 	if (url) {
-		return QString::fromUtf8([[url path] fileSystemRepresentation]) + '/' + str_const_toString(AppName) + '/';
+		return QString::fromUtf8([[url path] fileSystemRepresentation]) + '/' + AppName.utf16() + '/';
 	}
 	return QString();
-}
-
-QString objc_downloadPath() {
-	NSURL *url = [[NSFileManager defaultManager] URLForDirectory:NSDownloadsDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:nil];
-	if (url) {
-		return QString::fromUtf8([[url path] fileSystemRepresentation]) + '/' + str_const_toString(AppName) + '/';
-	}
-	return QString();
-}
-
-QString objc_currentCountry() {
-	NSLocale *currentLocale = [NSLocale currentLocale];  // get the current locale.
-	NSString *countryCode = [currentLocale objectForKey:NSLocaleCountryCode];
-	return countryCode ? NS2QString(countryCode) : QString();
-}
-
-QString objc_currentLang() {
-	NSLocale *currentLocale = [NSLocale currentLocale];  // get the current locale.
-	NSString *currentLang = [currentLocale objectForKey:NSLocaleLanguageCode];
-	return currentLang ? NS2QString(currentLang) : QString();
 }
 
 QByteArray objc_downloadPathBookmark(const QString &path) {
@@ -593,7 +421,7 @@ void objc_downloadPathEnableAccess(const QByteArray &bookmark) {
 		if (_downloadPathUrl) {
 			[_downloadPathUrl stopAccessingSecurityScopedResource];
 		}
-		_downloadPathUrl = url;
+		_downloadPathUrl = [url retain];
 
 		Global::SetDownloadPath(NS2QString([_downloadPathUrl path]) + '/');
 		if (isStale) {

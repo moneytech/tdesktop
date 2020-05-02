@@ -1,26 +1,18 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include <rpl/producer.h>
+#include <rpl/filter.h>
+#include <rpl/then.h>
+#include <rpl/range.h>
 #include "base/observer.h"
+#include "base/flags.h"
 
 namespace Notify {
 
@@ -33,57 +25,62 @@ struct PeerUpdate {
 	}
 	PeerData *peer;
 
-	enum class Flag {
+	enum class Flag : uint32 {
+		None                      = 0,
+
 		// Common flags
-		NameChanged            = 0x00000001U,
-		UsernameChanged        = 0x00000002U,
-		PhotoChanged           = 0x00000004U,
-		AboutChanged           = 0x00000008U,
-		NotificationsEnabled   = 0x00000010U,
-		SharedMediaChanged     = 0x00000020U,
-		MigrationChanged       = 0x00000040U,
-		PinnedChanged          = 0x00000080U,
+		NameChanged               = (1 << 0),
+		UsernameChanged           = (1 << 1),
+		PhotoChanged              = (1 << 2),
+		AboutChanged              = (1 << 3),
+		NotificationsEnabled      = (1 << 4),
+		MigrationChanged          = (1 << 6),
+		ChatPinnedChanged         = (1 << 7),
+		UnavailableReasonChanged  = (1 << 8),
+		UnreadViewChanged         = (1 << 9),
+		PinnedMessageChanged      = (1 << 10),
+		TopPromotedChanged        = (1 << 11),
+		FolderChanged             = (1 << 12),
 
 		// For chats and channels
-		InviteLinkChanged      = 0x00000100U,
-		MembersChanged         = 0x00000200U,
-		AdminsChanged          = 0x00000400U,
-		BlockedUsersChanged    = 0x00000800U,
+		InviteLinkChanged         = (1 << 13),
+		MembersChanged            = (1 << 14),
+		AdminsChanged             = (1 << 15),
+		BannedUsersChanged        = (1 << 16),
+		UnreadMentionsChanged     = (1 << 17),
+		RightsChanged             = (1 << 18),
 
 		// For users
-		UserCanShareContact    = 0x00010000U,
-		UserIsContact          = 0x00020000U,
-		UserPhoneChanged       = 0x00040000U,
-		UserIsBlocked          = 0x00080000U,
-		BotCommandsChanged     = 0x00100000U,
-		UserOnlineChanged      = 0x00200000U,
-		BotCanAddToGroups      = 0x00400000U,
-		UserCommonChatsChanged = 0x00800000U,
-		UserHasCalls           = 0x01000000U,
-
-		// For chats
-		ChatCanEdit            = 0x00010000U,
+		UserCanShareContact       = (1 << 19),
+		UserIsContact             = (1 << 20),
+		UserPhoneChanged          = (1 << 21),
+		UserIsBlocked             = (1 << 22),
+		BotCommandsChanged        = (1 << 23),
+		UserOnlineChanged         = (1 << 24),
+		BotCanAddToGroups         = (1 << 25),
+		UserCommonChatsChanged    = (1 << 26),
+		UserHasCalls              = (1 << 27),
+		UserOccupiedChanged       = (1 << 28),
+		UserSupportInfoChanged    = (1 << 29),
 
 		// For channels
-		ChannelAmIn            = 0x00010000U,
-		ChannelAmEditor        = 0x00020000U,
-		ChannelCanEditPhoto    = 0x00040000U,
-		ChannelCanAddMembers   = 0x00080000U,
-		ChannelCanViewAdmins   = 0x00100000U,
-		ChannelCanViewMembers  = 0x00200000U,
+		ChannelAmIn               = (1 << 19),
+		ChannelStickersChanged    = (1 << 20),
+		ChannelPromotedChanged    = (1 << 21),
+		ChannelLinkedChat         = (1 << 22),
+		ChannelLocation           = (1 << 23),
+		ChannelSlowmode           = (1 << 24),
+		ChannelLocalMessages      = (1 << 25),
 	};
-	Q_DECLARE_FLAGS(Flags, Flag);
+	using Flags = base::flags<Flag>;
+	friend inline constexpr auto is_flag_type(Flag) { return true; }
+
 	Flags flags = 0;
 
 	// NameChanged data
-	PeerData::Names oldNames;
-	PeerData::NameFirstChars oldNameFirstChars;
-
-	// SharedMediaChanged data
-	int32 mediaTypesMask = 0;
+	base::flat_set<QChar> oldNameFirstLetters;
 
 };
-Q_DECLARE_OPERATORS_FOR_FLAGS(PeerUpdate::Flags);
 
 void peerUpdatedDelayed(const PeerUpdate &update);
 inline void peerUpdatedDelayed(PeerData *peer, PeerUpdate::Flags events) {
@@ -92,13 +89,6 @@ inline void peerUpdatedDelayed(PeerData *peer, PeerUpdate::Flags events) {
 	peerUpdatedDelayed(update);
 }
 void peerUpdatedSendDelayed();
-
-inline void mediaOverviewUpdated(PeerData *peer, MediaOverviewType type) {
-	PeerUpdate update(peer);
-	update.flags |= PeerUpdate::Flag::SharedMediaChanged;
-	update.mediaTypesMask |= (1 << type);
-	peerUpdatedDelayed(update);
-}
 
 class PeerUpdatedHandler {
 public:
@@ -113,9 +103,20 @@ public:
 
 private:
 	PeerUpdate::Flags _events;
-	base::lambda<void(const PeerUpdate&)> _handler;
+	Fn<void(const PeerUpdate&)> _handler;
 
 };
 base::Observable<PeerUpdate, PeerUpdatedHandler> &PeerUpdated();
+
+rpl::producer<PeerUpdate> PeerUpdateViewer(
+	PeerUpdate::Flags flags);
+
+rpl::producer<PeerUpdate> PeerUpdateViewer(
+	not_null<PeerData*> peer,
+	PeerUpdate::Flags flags);
+
+rpl::producer<PeerUpdate> PeerUpdateValue(
+	not_null<PeerData*> peer,
+	PeerUpdate::Flags flags);
 
 } // namespace Notify

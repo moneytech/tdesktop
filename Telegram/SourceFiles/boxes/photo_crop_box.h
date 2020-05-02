@@ -1,46 +1,21 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "boxes/abstract_box.h"
 
-class PhotoCropBox : public BoxContent {
-	Q_OBJECT
-
+class PhotoCropBox : public Ui::BoxContent {
 public:
-	PhotoCropBox(QWidget*, const QImage &img, const PeerId &peer);
-	PhotoCropBox(QWidget*, const QImage &img, PeerData *peer);
+	PhotoCropBox(QWidget*, const QImage &img, const QString &title);
 
 	int32 mouseState(QPoint p);
 
-	void closeHook() override {
-		emit closed();
-	}
-
-signals:
-	void ready(const QImage &tosend);
-	void closed();
-
-private slots:
-	void onReady(const QImage &tosend);
+	rpl::producer<QImage> ready() const;
 
 protected:
 	void prepare() override;
@@ -52,7 +27,6 @@ protected:
 	void mouseMoveEvent(QMouseEvent *e) override;
 
 private:
-	void init(const QImage &img, PeerData *peer);
 	void sendPhoto();
 
 	QString _title;
@@ -63,6 +37,6 @@ private:
 	QImage _img;
 	QPixmap _thumb;
 	QImage _mask, _fade;
-	PeerId _peerId;
+	rpl::event_stream<QImage> _readyImages;
 
 };

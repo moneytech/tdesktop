@@ -1,41 +1,34 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "ui/twidget.h"
+#include "ui/rp_widget.h"
 #include "ui/abstract_button.h"
+#include "ui/widgets/tooltip.h"
+#include "ui/effects/animations.h"
 #include "ui/effects/panel_animation.h"
+#include "base/timer.h"
 #include "mtproto/sender.h"
 #include "inline_bots/inline_bot_layout_item.h"
+
+#include <QtCore/QTimer>
 
 namespace Ui {
 class ScrollArea;
 class IconButton;
 class LinkButton;
 class RoundButton;
+class FlatLabel;
 class RippleAnimation;
 } // namesapce Ui
 
 namespace Window {
-class Controller;
+class SessionController;
 } // namespace Window
 
 namespace InlineBots {
@@ -58,37 +51,50 @@ struct CacheEntry {
 	Results results;
 };
 
-class Inner : public TWidget, public Context, private base::Subscriber {
+class Inner
+	: public TWidget
+	, public Ui::AbstractTooltipShower
+	, public Context
+	, private base::Subscriber {
 	Q_OBJECT
 
 public:
-	Inner(QWidget *parent, gsl::not_null<Window::Controller*> controller);
+	Inner(QWidget *parent, not_null<Window::SessionController*> controller);
 
 	void hideFinish(bool completely);
 
 	void clearSelection();
 
-	int refreshInlineRows(UserData *bot, const CacheEntry *results, bool resultsDeleted);
+	int refreshInlineRows(PeerData *queryPeer, UserData *bot, const CacheEntry *results, bool resultsDeleted);
 	void inlineBotChanged();
 	void hideInlineRowsPanel();
 	void clearInlineRowsPanel();
 
-	void setVisibleTopBottom(int visibleTop, int visibleBottom) override;
 	void preloadImages();
 
 	void inlineItemLayoutChanged(const ItemBase *layout) override;
 	void inlineItemRepaint(const ItemBase *layout) override;
 	bool inlineItemVisible(const ItemBase *layout) override;
+	Data::FileOrigin inlineItemFileOrigin() override;
 
 	int countHeight();
 
-	void setResultSelectedCallback(base::lambda<void(Result *result, UserData *bot)> callback) {
+	void setResultSelectedCallback(Fn<void(Result *result, UserData *bot)> callback) {
 		_resultSelectedCallback = std::move(callback);
 	}
+
+	// Ui::AbstractTooltipShower interface.
+	QString tooltipText() const override;
+	QPoint tooltipPos() const override;
+	bool tooltipWindowActive() const override;
 
 	~Inner();
 
 protected:
+	void visibleTopBottomUpdated(
+		int visibleTop,
+		int visibleBottom) override;
+
 	void mousePressEvent(QMouseEvent *e) override;
 	void mouseReleaseEvent(QMouseEvent *e) override;
 	void mouseMoveEvent(QMouseEvent *e) override;
@@ -98,8 +104,6 @@ protected:
 	void enterFromChildEvent(QEvent *e, QWidget *child) override;
 
 private slots:
-	void onPreview();
-	void onUpdateInlineItems();
 	void onSwitchPm();
 
 signals:
@@ -109,33 +113,22 @@ private:
 	static constexpr bool kRefreshIconsScrollAnimation = true;
 	static constexpr bool kRefreshIconsNoAnimation = false;
 
+	struct Row {
+		int height = 0;
+		QVector<ItemBase*> items;
+	};
+
 	void updateSelected();
+	void checkRestrictedPeer();
+	bool isRestrictedView();
 
 	void paintInlineItems(Painter &p, const QRect &r);
 
 	void refreshSwitchPmButton(const CacheEntry *entry);
 
-	gsl::not_null<Window::Controller*> _controller;
-
-	int _visibleTop = 0;
-	int _visibleBottom = 0;
-
-	UserData *_inlineBot;
-	TimeMs _lastScrolled = 0;
-	QTimer _updateInlineItems;
-	bool _inlineWithThumb = false;
-
-	object_ptr<Ui::RoundButton> _switchPmButton = { nullptr };
-	QString _switchPmStartToken;
-
-	struct Row {
-		int height = 0;
-		QVector<ItemBase*> items;
-	};
-	QVector<Row> _rows;
+	void showPreview();
+	void updateInlineItems();
 	void clearInlineRows(bool resultsDeleted);
-
-	std::map<Result*, std::unique_ptr<ItemBase>> _inlineLayouts;
 	ItemBase *layoutPrepareInlineResult(Result *result, int32 position);
 
 	bool inlineRowsAddItem(Result *result, Row &row, int32 &sumWidth);
@@ -147,24 +140,44 @@ private:
 	int validateExistingInlineRows(const Results &results);
 	void selectInlineResult(int row, int column);
 
+	not_null<Window::SessionController*> _controller;
+
+	int _visibleTop = 0;
+	int _visibleBottom = 0;
+
+	UserData *_inlineBot = nullptr;
+	PeerData *_inlineQueryPeer = nullptr;
+	crl::time _lastScrolled = 0;
+	base::Timer _updateInlineItems;
+	bool _inlineWithThumb = false;
+
+	object_ptr<Ui::RoundButton> _switchPmButton = { nullptr };
+	QString _switchPmStartToken;
+
+	object_ptr<Ui::FlatLabel> _restrictedLabel = { nullptr };
+
+	QVector<Row> _rows;
+
+	std::map<Result*, std::unique_ptr<ItemBase>> _inlineLayouts;
+
 	int _selected = -1;
 	int _pressed = -1;
 	QPoint _lastMousePos;
 
-	QTimer _previewTimer;
+	base::Timer _previewTimer;
 	bool _previewShown = false;
 
-	base::lambda<void(Result *result, UserData *bot)> _resultSelectedCallback;
+	Fn<void(Result *result, UserData *bot)> _resultSelectedCallback;
 
 };
 
 } // namespace internal
 
-class Widget : public TWidget, private MTP::Sender {
+class Widget : public Ui::RpWidget {
 	Q_OBJECT
 
 public:
-	Widget(QWidget *parent, gsl::not_null<Window::Controller*> controller);
+	Widget(QWidget *parent, not_null<Window::SessionController*> controller);
 
 	void moveBottom(int bottom);
 
@@ -181,7 +194,7 @@ public:
 	void showAnimated();
 	void hideAnimated();
 
-	void setResultSelectedCallback(base::lambda<void(Result *result, UserData *bot)> callback) {
+	void setResultSelectedCallback(Fn<void(Result *result, UserData *bot)> callback) {
 		_inner->setResultSelectedCallback(std::move(callback));
 	}
 
@@ -191,8 +204,6 @@ protected:
 	void paintEvent(QPaintEvent *e) override;
 
 private slots:
-	void onWndActiveChanged();
-
 	void onScroll();
 
 	void onInlineRequest();
@@ -234,7 +245,8 @@ private:
 	bool refreshInlineRows(int *added = nullptr);
 	void inlineResultsDone(const MTPmessages_BotResults &result);
 
-	gsl::not_null<Window::Controller*> _controller;
+	not_null<Window::SessionController*> _controller;
+	MTP::Sender _api;
 
 	int _contentMaxHeight = 0;
 	int _contentHeight = 0;
@@ -245,11 +257,11 @@ private:
 	int _bottom = 0;
 
 	std::unique_ptr<Ui::PanelAnimation> _showAnimation;
-	Animation _a_show;
+	Ui::Animations::Simple _a_show;
 
 	bool _hiding = false;
 	QPixmap _cache;
-	Animation _a_opacity;
+	Ui::Animations::Simple _a_opacity;
 	bool _inPanelGrab = false;
 
 	object_ptr<Ui::ScrollArea> _scroll;
