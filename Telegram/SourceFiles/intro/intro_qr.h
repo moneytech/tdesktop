@@ -9,7 +9,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "ui/countryinput.h"
 #include "intro/intro_step.h"
-#include "mtproto/sender.h"
 #include "base/timer.h"
 
 namespace Ui {
@@ -48,18 +47,19 @@ private:
 	void checkForTokenUpdate(const MTPUpdates &updates);
 	void checkForTokenUpdate(const MTPUpdate &update);
 	void handleTokenResult(const MTPauth_LoginToken &result);
-	void showTokenError(const RPCError &error);
+	void showTokenError(const MTP::Error &error);
 	void importTo(MTP::DcId dcId, const QByteArray &token);
 	void showToken(const QByteArray &token);
 	void done(const MTPauth_Authorization &authorization);
 
-	MTP::Sender _api;
 	rpl::event_stream<QByteArray> _qrCodes;
 	base::Timer _refreshTimer;
 	mtpRequestId _requestId = 0;
 	bool _forceRefresh = false;
 
 };
+
+[[nodiscard]] QImage TelegramLogoImage();
 
 } // namespace details
 } // namespace Intro

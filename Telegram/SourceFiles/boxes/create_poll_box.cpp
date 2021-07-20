@@ -20,13 +20,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/checkbox.h"
 #include "ui/toast/toast.h"
 #include "main/main_session.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 #include "chat_helpers/emoji_suggestions_widget.h"
 #include "chat_helpers/message_field.h"
+#include "chat_helpers/send_context_menu.h"
 #include "history/view/history_view_schedule_box.h"
 #include "settings/settings_common.h"
 #include "base/unique_qptr.h"
 #include "base/event_filter.h"
 #include "base/call_delayed.h"
+#include "base/openssl_help.h"
+#include "window/window_session_controller.h"
 #include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 #include "styles/style_settings.h"
@@ -83,7 +88,7 @@ private:
 		void show(anim::type animated);
 		void destroy(FnMut<void()> done);
 
-		[[nodisacrd]] bool hasShadow() const;
+		[[nodiscard]] bool hasShadow() const;
 		void createShadow();
 		void destroyShadow();
 
@@ -159,7 +164,7 @@ void InitField(
 		not_null<Main::Session*> session) {
 	field->setInstantReplaces(Ui::InstantReplaces::Default());
 	field->setInstantReplacesEnabled(
-		session->settings().replaceEmojiValue());
+		Core::App().settings().replaceEmojiValue());
 	auto options = Ui::Emoji::SuggestionsController::Options();
 	options.suggestExactFirstWord = false;
 	Ui::Emoji::SuggestionsController::Init(
@@ -431,7 +436,6 @@ void Options::Option::updateFieldGeometry() {
 	const auto skip = st::defaultRadio.diameter
 		+ st::defaultCheckbox.textPosition.x();
 	const auto left = anim::interpolate(0, skip, shown);
-	const auto width = _content->width() - left;
 	_field->resizeToWidth(_content->width() - left);
 	_field->moveToLeft(left, 0);
 }
@@ -531,8 +535,8 @@ std::vector<PollAnswer> Options::toPollAnswers() const {
 	};
 	ranges::copy(
 		_list
-		| ranges::view::filter(&Option::isGood)
-		| ranges::view::transform(makeAnswer),
+		| ranges::views::filter(&Option::isGood)
+		| ranges::views::transform(makeAnswer),
 		ranges::back_inserter(result));
 	return result;
 }
@@ -588,7 +592,7 @@ void Options::removeEmptyTail() {
 		_list,
 		&Option::hasFocus);
 	const auto end = _list.end();
-	const auto reversed = ranges::view::reverse(_list);
+	const auto reversed = ranges::views::reverse(_list);
 	const auto emptyItem = ranges::find_if(
 		reversed,
 		ranges::not_fn(&Option::isEmpty)).base();
@@ -721,9 +725,8 @@ void Options::removeDestroyed(not_null<Option*> option) {
 void Options::validateState() {
 	checkLastOption();
 	_hasOptions = (ranges::count_if(_list, &Option::isGood) > 1);
-	_isValid = _hasOptions
-		&& (ranges::find_if(_list, &Option::isTooLong) == end(_list));
-	_hasCorrect = ranges::find_if(_list, &Option::isCorrect) != end(_list);
+	_isValid = _hasOptions && ranges::none_of(_list, &Option::isTooLong);
+	_hasCorrect = ranges::any_of(_list, &Option::isCorrect);
 
 	const auto lastEmpty = !_list.empty() && _list.back()->isEmpty();
 	_usedCount = _list.size() - (lastEmpty ? 1 : 0);
@@ -748,14 +751,16 @@ void Options::checkLastOption() {
 
 CreatePollBox::CreatePollBox(
 	QWidget*,
-	not_null<Main::Session*> session,
+	not_null<Window::SessionController*> controller,
 	PollData::Flags chosen,
 	PollData::Flags disabled,
-	Api::SendType sendType)
-: _session(session)
+	Api::SendType sendType,
+	SendMenu::Type sendMenuType)
+: _controller(controller)
 , _chosen(chosen)
 , _disabled(disabled)
-, _sendType(sendType) {
+, _sendType(sendType)
+, _sendMenuType(sendMenuType) {
 }
 
 rpl::producer<CreatePollBox::Result> CreatePollBox::submitRequests() const {
@@ -774,6 +779,7 @@ not_null<Ui::InputField*> CreatePollBox::setupQuestion(
 		not_null<Ui::VerticalLayout*> container) {
 	using namespace Settings;
 
+	const auto session = &_controller->session();
 	AddSubsectionTitle(container, tr::lng_polls_create_question());
 	const auto question = container->add(
 		object_ptr<Ui::InputField>(
@@ -782,7 +788,7 @@ not_null<Ui::InputField*> CreatePollBox::setupQuestion(
 			Ui::InputField::Mode::MultiLine,
 			tr::lng_polls_create_question_placeholder()),
 		st::createPollFieldPadding);
-	InitField(getDelegate()->outerContainer(), question, _session);
+	InitField(getDelegate()->outerContainer(), question, session);
 	question->setMaxLength(kQuestionLimit + kErrorLimit);
 	question->setSubmitSettings(Ui::InputField::SubmitSettings::Both);
 	question->customTab(true);
@@ -824,6 +830,7 @@ not_null<Ui::InputField*> CreatePollBox::setupSolution(
 	)->setDuration(0)->toggleOn(std::move(shown));
 	const auto inner = outer->entity();
 
+	const auto session = &_controller->session();
 	AddSkip(inner);
 	AddSubsectionTitle(inner, tr::lng_polls_solution_title());
 	const auto solution = inner->add(
@@ -833,14 +840,14 @@ not_null<Ui::InputField*> CreatePollBox::setupSolution(
 			Ui::InputField::Mode::MultiLine,
 			tr::lng_polls_solution_placeholder()),
 		st::createPollFieldPadding);
-	InitField(getDelegate()->outerContainer(), solution, _session);
+	InitField(getDelegate()->outerContainer(), solution, session);
 	solution->setMaxLength(kSolutionLimit + kErrorLimit);
 	solution->setInstantReplaces(Ui::InstantReplaces::Default());
 	solution->setInstantReplacesEnabled(
-		_session->settings().replaceEmojiValue());
+		Core::App().settings().replaceEmojiValue());
 	solution->setMarkdownReplacesEnabled(rpl::single(true));
 	solution->setEditLinkCallback(
-		DefaultEditLinkCallback(_session, solution));
+		DefaultEditLinkCallback(_controller, solution));
 	solution->customTab(true);
 
 	const auto warning = CreateWarningLabel(
@@ -878,7 +885,7 @@ not_null<Ui::InputField*> CreatePollBox::setupSolution(
 object_ptr<Ui::RpWidget> CreatePollBox::setupContent() {
 	using namespace Settings;
 
-	const auto id = rand_value<uint64>();
+	const auto id = openssl::RandomValue<uint64>();
 	const auto error = lifetime().make_state<Errors>(Error::Question);
 
 	auto result = object_ptr<Ui::VerticalLayout>(this);
@@ -896,7 +903,7 @@ object_ptr<Ui::RpWidget> CreatePollBox::setupContent() {
 	const auto options = lifetime().make_state<Options>(
 		getDelegate()->outerContainer(),
 		container,
-		_session,
+		&_controller->session(),
 		(_chosen & PollData::Flag::Quiz));
 	auto limit = options->usedCount() | rpl::after_next([=](int count) {
 		setCloseByEscape(!count);
@@ -1011,7 +1018,7 @@ object_ptr<Ui::RpWidget> CreatePollBox::setupContent() {
 
 	const auto collectResult = [=] {
 		using Flag = PollData::Flag;
-		auto result = PollData(&_session->data(), id);
+		auto result = PollData(&_controller->session().data(), id);
 		result.question = question->getLastText().trimmed();
 		result.answers = options->toPollAnswers();
 		const auto solutionWithTags = quiz->checked()
@@ -1054,19 +1061,19 @@ object_ptr<Ui::RpWidget> CreatePollBox::setupContent() {
 			*error &= ~Error::Solution;
 		}
 	};
-	const auto showError = [=](const QString &text) {
-		Ui::Toast::Show(text);
+	const auto showError = [](tr::phrase<> text) {
+		Ui::Toast::Show(text(tr::now));
 	};
 	const auto send = [=](Api::SendOptions sendOptions) {
 		collectError();
 		if (*error & Error::Question) {
-			showError(tr::lng_polls_choose_question(tr::now));
+			showError(tr::lng_polls_choose_question);
 			question->setFocus();
 		} else if (*error & Error::Options) {
-			showError(tr::lng_polls_choose_answers(tr::now));
+			showError(tr::lng_polls_choose_answers);
 			options->focusFirst();
 		} else if (*error & Error::Correct) {
-			showError(tr::lng_polls_choose_correct(tr::now));
+			showError(tr::lng_polls_choose_correct);
 		} else if (*error & Error::Solution) {
 			solution->showError();
 		} else if (!*error) {
@@ -1074,15 +1081,13 @@ object_ptr<Ui::RpWidget> CreatePollBox::setupContent() {
 		}
 	};
 	const auto sendSilent = [=] {
-		auto options = Api::SendOptions();
-		options.silent = true;
-		send(options);
+		send({ .silent = true });
 	};
 	const auto sendScheduled = [=] {
-		Ui::show(
+		_controller->show(
 			HistoryView::PrepareScheduleBox(
 				this,
-				SendMenuType::Scheduled,
+				SendMenu::Type::Scheduled,
 				send),
 			Ui::LayerOption::KeepOther);
 	};
@@ -1097,20 +1102,24 @@ object_ptr<Ui::RpWidget> CreatePollBox::setupContent() {
 		FocusAtEnd(question);
 	}, lifetime());
 
+	const auto isNormal = (_sendType == Api::SendType::Normal);
+
 	const auto submit = addButton(
-		tr::lng_polls_create_button(),
-		[=] { send({}); });
-	if (_sendType == Api::SendType::Normal) {
-		const auto sendMenuType = [=] {
-			collectError();
-			return *error ? SendMenuType::Disabled : SendMenuType::Scheduled;
-		};
-		SetupSendMenuAndShortcuts(
-			submit.data(),
-			sendMenuType,
-			sendSilent,
-			sendScheduled);
-	}
+		isNormal
+			? tr::lng_polls_create_button()
+			: tr::lng_schedule_button(),
+		[=] { isNormal ? send({}) : sendScheduled(); });
+	const auto sendMenuType = [=] {
+		collectError();
+		return (*error)
+			? SendMenu::Type::Disabled
+			: _sendMenuType;
+	};
+	SendMenu::SetupMenuAndShortcuts(
+		submit.data(),
+		sendMenuType,
+		sendSilent,
+		sendScheduled);
 	addButton(tr::lng_cancel(), [=] { closeBox(); });
 
 	return result;

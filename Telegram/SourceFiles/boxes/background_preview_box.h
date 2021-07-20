@@ -9,15 +9,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "boxes/abstract_box.h"
 #include "base/binary_guard.h"
-#include "window/themes/window_theme.h"
 #include "history/admin_log/history_admin_log_item.h"
 #include "history/view/history_view_element.h"
 #include "ui/effects/animations.h"
 #include "ui/effects/radial_animation.h"
+#include "data/data_wall_paper.h"
 
-namespace Main {
-class Session;
-} // namespace Main
+namespace Data {
+class DocumentMedia;
+} // namespace Data
+
+namespace Window {
+class SessionController;
+} // namespace Window
 
 namespace Ui {
 class Checkbox;
@@ -25,16 +29,15 @@ class Checkbox;
 
 class BackgroundPreviewBox
 	: public Ui::BoxContent
-	, private HistoryView::SimpleElementDelegate
-	, private base::Subscriber {
+	, private HistoryView::SimpleElementDelegate {
 public:
 	BackgroundPreviewBox(
 		QWidget*,
-		not_null<Main::Session*> session,
+		not_null<Window::SessionController*> controller,
 		const Data::WallPaper &paper);
 
 	static bool Start(
-		not_null<Main::Session*> session,
+		not_null<Window::SessionController*> controller,
 		const QString &slug,
 		const QMap<QString, QString> &params);
 
@@ -67,10 +70,11 @@ private:
 	void startFadeInFrom(QPixmap previous);
 	void checkBlurAnimationStart();
 
-	const not_null<Main::Session*> _session;
+	const not_null<Window::SessionController*> _controller;
 	AdminLog::OwnedItem _text1;
 	AdminLog::OwnedItem _text2;
 	Data::WallPaper _paper;
+	std::shared_ptr<Data::DocumentMedia> _media;
 	QImage _full;
 	QPixmap _scaled, _blurred, _fadeOutThumbnail;
 	Ui::Animations::Simple _fadeIn;

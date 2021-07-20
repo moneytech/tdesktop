@@ -10,7 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/details/mtproto_received_ids_manager.h"
 #include "mtproto/details/mtproto_serialized_request.h"
 #include "mtproto/mtproto_auth_key.h"
-#include "mtproto/dc_options.h"
+#include "mtproto/mtproto_dc_options.h"
 #include "mtproto/connection_abstract.h"
 #include "mtproto/facade.h"
 #include "base/openssl_help.h"
@@ -120,7 +120,17 @@ private:
 		bool needAnyResponse);
 	mtpRequestId wasSent(mtpMsgId msgId) const;
 
-	[[nodiscard]] HandleResult handleOneReceived(const mtpPrime *from, const mtpPrime *end, uint64 msgId, int32 serverTime, uint64 serverSalt, bool badTime);
+	struct OuterInfo {
+		mtpMsgId outerMsgId = 0;
+		uint64 serverSalt = 0;
+		int32 serverTime = 0;
+		bool badTime = false;
+	};
+	[[nodiscard]] HandleResult handleOneReceived(
+		const mtpPrime *from,
+		const mtpPrime *end,
+		uint64 msgId,
+		OuterInfo info);
 	[[nodiscard]] HandleResult handleBindResponse(
 		mtpMsgId requestMsgId,
 		const mtpBuffer &response);
@@ -137,15 +147,18 @@ private:
 		const bytes::vector &protocolSecret);
 
 	// if badTime received - search for ids in sessionData->haveSent and sessionData->wereAcked and sync time/salt, return true if found
-	bool requestsFixTimeSalt(const QVector<MTPlong> &ids, int32 serverTime, uint64 serverSalt);
+	bool requestsFixTimeSalt(const QVector<MTPlong> &ids, const OuterInfo &info);
+
+	// if we had a confirmed fast request use its unixtime as a correct one.
+	void correctUnixtimeByFastRequest(
+		const QVector<MTPlong> &ids,
+		TimeId serverTime);
+	void correctUnixtimeWithBadLocal(TimeId serverTime);
 
 	// remove msgs with such ids from sessionData->haveSent, add to sessionData->wereAcked
 	void requestsAcked(const QVector<MTPlong> &ids, bool byResponse = false);
 
-	void resend(
-		mtpMsgId msgId,
-		crl::time msCanWait = 0,
-		bool forceContainer = false);
+	void resend(mtpMsgId msgId, crl::time msCanWait = 0);
 	void resendAll();
 	void clearSpecialMsgId(mtpMsgId msgId);
 
@@ -202,6 +215,7 @@ private:
 	mtpMsgId _pingMsgId = 0;
 	base::Timer _pingSender;
 	base::Timer _checkSentRequestsTimer;
+	base::Timer _clearOldContainersTimer;
 
 	std::shared_ptr<SessionData> _sessionData;
 	std::unique_ptr<SessionOptions> _options;

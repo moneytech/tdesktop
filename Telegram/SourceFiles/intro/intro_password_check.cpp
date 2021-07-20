@@ -29,7 +29,6 @@ PasswordCheckWidget::PasswordCheckWidget(
 	not_null<Main::Account*> account,
 	not_null<Data*> data)
 : Step(parent, account, data)
-, _api(account->mtp())
 , _request(getData()->pwdRequest)
 , _hasRecovery(getData()->hasRecovery)
 , _notEmptyPassport(getData()->pwdNotEmptyPassport)
@@ -41,7 +40,10 @@ PasswordCheckWidget::PasswordCheckWidget(
 , _toPassword(this, tr::lng_signin_try_password(tr::now)) {
 	Expects(!!_request);
 
-	subscribe(Lang::Current().updated(), [=] { refreshLang(); });
+	Lang::Updated(
+	) | rpl::start_with_next([=] {
+		refreshLang();
+	}, lifetime());
 
 	_toRecover->addClickHandler([=] { toRecover(); });
 	_toPassword->addClickHandler([=] { toPassword(); });
@@ -115,7 +117,7 @@ void PasswordCheckWidget::activate() {
 }
 
 void PasswordCheckWidget::cancelled() {
-	_api.request(base::take(_sentRequest)).cancel();
+	api().request(base::take(_sentRequest)).cancel();
 }
 
 void PasswordCheckWidget::pwdSubmitDone(bool recover, const MTPauth_Authorization &result) {
@@ -131,8 +133,8 @@ void PasswordCheckWidget::pwdSubmitDone(bool recover, const MTPauth_Authorizatio
 	finish(d.vuser());
 }
 
-void PasswordCheckWidget::pwdSubmitFail(const RPCError &error) {
-	if (MTP::isFloodError(error)) {
+void PasswordCheckWidget::pwdSubmitFail(const MTP::Error &error) {
+	if (MTP::IsFloodError(error)) {
 		_sentRequest = 0;
 		showError(tr::lng_flood_error());
 		_pwdField->showError();
@@ -182,22 +184,24 @@ void PasswordCheckWidget::checkPasswordHash() {
 }
 
 void PasswordCheckWidget::requestPasswordData() {
-	_api.request(base::take(_sentRequest)).cancel();
-	_sentRequest = _api.request(
+	api().request(base::take(_sentRequest)).cancel();
+	_sentRequest = api().request(
 		MTPaccount_GetPassword()
 	).done([=](const MTPaccount_Password &result) {
 		_sentRequest = 0;
 		result.match([&](const MTPDaccount_password &data) {
-			_request = Core::ParseCloudPasswordCheckRequest(data);
+			auto request = Core::ParseCloudPasswordCheckRequest(data);
+			if (request && request.id) {
+				_request = std::move(request);
+			} else {
+				// Maybe the password was removed? Just submit it once again.
+			}
 			passwordChecked();
 		});
 	}).send();
 }
 
 void PasswordCheckWidget::passwordChecked() {
-	if (!_request || !_request.id) {
-		return serverError();
-	}
 	const auto check = Core::ComputeCloudPasswordCheck(
 		_request,
 		_passwordHash);
@@ -205,21 +209,21 @@ void PasswordCheckWidget::passwordChecked() {
 		return serverError();
 	}
 	_request.id = 0;
-	_sentRequest = _api.request(
+	_sentRequest = api().request(
 		MTPauth_CheckPassword(check.result)
 	).done([=](const MTPauth_Authorization &result) {
 		pwdSubmitDone(false, result);
-	}).handleFloodErrors().fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		pwdSubmitFail(error);
-	}).send();
+	}).handleFloodErrors().send();
 }
 
 void PasswordCheckWidget::serverError() {
 	showError(rpl::single(Lang::Hard::ServerError()));
 }
 
-void PasswordCheckWidget::codeSubmitFail(const RPCError &error) {
-	if (MTP::isFloodError(error)) {
+void PasswordCheckWidget::codeSubmitFail(const MTP::Error &error) {
+	if (MTP::IsFloodError(error)) {
 		showError(tr::lng_flood_error());
 		_codeField->showError();
 		return;
@@ -254,7 +258,7 @@ void PasswordCheckWidget::recoverStarted(const MTPauth_PasswordRecovery &result)
 	updateDescriptionText();
 }
 
-void PasswordCheckWidget::recoverStartFail(const RPCError &error) {
+void PasswordCheckWidget::recoverStartFail(const MTP::Error &error) {
 	_pwdField->show();
 	_pwdHint->show();
 	_codeField->hide();
@@ -267,7 +271,7 @@ void PasswordCheckWidget::recoverStartFail(const RPCError &error) {
 void PasswordCheckWidget::toRecover() {
 	if (_hasRecovery) {
 		if (_sentRequest) {
-			_api.request(base::take(_sentRequest)).cancel();
+			api().request(base::take(_sentRequest)).cancel();
 		}
 		hideError();
 		_toRecover->hide();
@@ -279,11 +283,11 @@ void PasswordCheckWidget::toRecover() {
 		_codeField->setFocus();
 		updateDescriptionText();
 		if (_emailPattern.isEmpty()) {
-			_api.request(
+			api().request(
 				MTPauth_RequestPasswordRecovery()
 			).done([=](const MTPauth_PasswordRecovery &result) {
 				recoverStarted(result);
-			}).fail([=](const RPCError &error) {
+			}).fail([=](const MTP::Error &error) {
 				recoverStartFail(error);
 			}).send();
 		}
@@ -302,7 +306,7 @@ void PasswordCheckWidget::toPassword() {
 
 void PasswordCheckWidget::showReset() {
 	if (_sentRequest) {
-		_api.request(base::take(_sentRequest)).cancel();
+		api().request(base::take(_sentRequest)).cancel();
 	}
 	_toRecover->show();
 	_toPassword->hide();
@@ -335,24 +339,23 @@ void PasswordCheckWidget::submit() {
 			return;
 		}
 		const auto send = crl::guard(this, [=] {
-			_sentRequest = _api.request(
-				MTPauth_RecoverPassword(MTP_string(code))
-			).done([=](const MTPauth_Authorization &result) {
+			_sentRequest = api().request(MTPauth_RecoverPassword(
+				MTP_flags(0),
+				MTP_string(code),
+				MTPaccount_PasswordInputSettings()
+			)).done([=](const MTPauth_Authorization &result) {
 				pwdSubmitDone(true, result);
-			}).handleFloodErrors().fail([=](const RPCError &error) {
+			}).fail([=](const MTP::Error &error) {
 				codeSubmitFail(error);
-			}).send();
+			}).handleFloodErrors().send();
 		});
 
 		if (_notEmptyPassport) {
-			const auto box = std::make_shared<QPointer<Ui::BoxContent>>();
-			const auto confirmed = [=] {
+			const auto confirmed = [=](Fn<void()> &&close) {
 				send();
-				if (*box) {
-					(*box)->closeBox();
-				}
+				close();
 			};
-			*box = Ui::show(Box<ConfirmBox>(
+			Ui::show(Box<ConfirmBox>(
 				tr::lng_cloud_password_passport_losing(tr::now),
 				tr::lng_continue(tr::now),
 				confirmed));

@@ -9,7 +9,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <rpl/producer.h>
 #include <rpl/map.h>
-#include "observer_peer.h"
 
 struct ChannelLocation;
 
@@ -38,7 +37,6 @@ rpl::producer<not_null<PeerData*>> MigratedOrMeValue(
 rpl::producer<TextWithEntities> NameValue(not_null<PeerData*> peer);
 rpl::producer<TextWithEntities> PhoneValue(not_null<UserData*> user);
 rpl::producer<TextWithEntities> PhoneOrHiddenValue(not_null<UserData*> user);
-rpl::producer<TextWithEntities> BioValue(not_null<UserData*> user);
 rpl::producer<TextWithEntities> UsernameValue(not_null<UserData*> user);
 rpl::producer<TextWithEntities> AboutValue(not_null<PeerData*> peer);
 rpl::producer<QString> LinkValue(not_null<PeerData*> peer);
@@ -61,10 +59,14 @@ rpl::producer<int> SharedMediaCountValue(
 	Storage::SharedMediaType type);
 rpl::producer<int> CommonGroupsCountValue(not_null<UserData*> user);
 rpl::producer<bool> CanAddMemberValue(not_null<PeerData*> peer);
-rpl::producer<bool> VerifiedValue(not_null<PeerData*> peer);
-rpl::producer<bool> ScamValue(not_null<PeerData*> peer);
 
-//rpl::producer<int> FeedChannelsCountValue(not_null<Data::Feed*> feed); // #feed
+enum class Badge {
+	None,
+	Verified,
+	Scam,
+	Fake,
+};
+rpl::producer<Badge> BadgeValue(not_null<PeerData*> peer);
 
 } // namespace Profile
 } // namespace Info

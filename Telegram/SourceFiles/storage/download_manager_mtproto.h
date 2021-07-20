@@ -12,7 +12,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/weak_ptr.h"
 
 class ApiWrap;
-class RPCError;
+
+namespace MTP {
+class Error;
+} // namespace MTP
 
 namespace Storage {
 
@@ -38,8 +41,11 @@ public:
 	void enqueue(not_null<Task*> task, int priority);
 	void remove(not_null<Task*> task);
 
-	[[nodiscard]] base::Observable<void> &taskFinished() {
-		return _taskFinishedObservable;
+	void notifyTaskFinished() {
+		_taskFinished.fire({});
+	}
+	[[nodiscard]] rpl::producer<> taskFinished() const {
+		return _taskFinished.events();
 	}
 
 	int changeRequestedAmount(MTP::DcId dcId, int index, int delta);
@@ -48,6 +54,7 @@ public:
 		int index,
 		int amountAtRequestStart,
 		crl::time timeAtRequestStart);
+	void checkSendNextAfterSuccess(MTP::DcId dcId);
 	[[nodiscard]] int chooseSessionIndex(MTP::DcId dcId) const;
 
 private:
@@ -101,7 +108,7 @@ private:
 
 	const not_null<ApiWrap*> _api;
 
-	base::Observable<void> _taskFinishedObservable;
+	rpl::event_stream<> _taskFinished;
 
 	base::flat_map<MTP::DcId, DcBalanceData> _balanceData;
 	base::Timer _resetGenerationTimer;
@@ -117,7 +124,7 @@ private:
 class DownloadMtprotoTask : public base::has_weak_ptr {
 public:
 	struct Location {
-		base::variant<
+		std::variant<
 			StorageFileLocation,
 			WebFileLocation,
 			GeoPointLocation> data;
@@ -215,12 +222,12 @@ private:
 
 	void partLoaded(int offset, const QByteArray &bytes);
 
-	bool partFailed(const RPCError &error, mtpRequestId requestId);
+	bool partFailed(const MTP::Error &error, mtpRequestId requestId);
 	bool normalPartFailed(
 		QByteArray fileReference,
-		const RPCError &error,
+		const MTP::Error &error,
 		mtpRequestId requestId);
-	bool cdnPartFailed(const RPCError &error, mtpRequestId requestId);
+	bool cdnPartFailed(const MTP::Error &error, mtpRequestId requestId);
 
 	[[nodiscard]] mtpRequestId sendRequest(const RequestData &requestData);
 	void placeSentRequest(

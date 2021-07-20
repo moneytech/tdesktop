@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_scheduled_messages.h"
 
+#include "base/unixtime.h"
 #include "data/data_peer.h"
 #include "data/data_session.h"
 #include "api/api_hash.h"
@@ -26,44 +27,54 @@ constexpr auto kRequestTimeLimit = 60 * crl::time(1000);
 	return (received > 0) && (received + kRequestTimeLimit > crl::now());
 }
 
+[[nodiscard]] bool HasScheduledDate(not_null<HistoryItem*> item) {
+	return (item->date() != ScheduledMessages::kScheduledUntilOnlineTimestamp)
+		&& (item->date() > base::unixtime::now());
+}
+
 MTPMessage PrepareMessage(const MTPMessage &message, MsgId id) {
-	return message.match([&](const MTPDmessageEmpty &) {
-		return MTP_messageEmpty(MTP_int(id));
+	return message.match([&](const MTPDmessageEmpty &data) {
+		return MTP_messageEmpty(
+			data.vflags(),
+			MTP_int(id),
+			data.vpeer_id() ? *data.vpeer_id() : MTPPeer());
 	}, [&](const MTPDmessageService &data) {
 		return MTP_messageService(
 			MTP_flags(data.vflags().v
 				| MTPDmessageService::Flag(
 					MTPDmessage::Flag::f_from_scheduled)),
 			MTP_int(id),
-			MTP_int(data.vfrom_id().value_or_empty()),
-			data.vto_id(),
-			MTP_int(data.vreply_to_msg_id().value_or_empty()),
+			data.vfrom_id() ? *data.vfrom_id() : MTPPeer(),
+			data.vpeer_id(),
+			data.vreply_to() ? *data.vreply_to() : MTPMessageReplyHeader(),
 			data.vdate(),
-			data.vaction());
+			data.vaction(),
+			MTP_int(data.vttl_period().value_or_empty()));
 	}, [&](const MTPDmessage &data) {
-		const auto fwdFrom = data.vfwd_from();
-		const auto media = data.vmedia();
-		const auto markup = data.vreply_markup();
-		const auto entities = data.ventities();
 		return MTP_message(
 			MTP_flags(data.vflags().v | MTPDmessage::Flag::f_from_scheduled),
 			MTP_int(id),
-			MTP_int(data.vfrom_id().value_or_empty()),
-			data.vto_id(),
-			fwdFrom ? *fwdFrom : MTPMessageFwdHeader(),
+			data.vfrom_id() ? *data.vfrom_id() : MTPPeer(),
+			data.vpeer_id(),
+			data.vfwd_from() ? *data.vfwd_from() : MTPMessageFwdHeader(),
 			MTP_int(data.vvia_bot_id().value_or_empty()),
-			MTP_int(data.vreply_to_msg_id().value_or_empty()),
+			data.vreply_to() ? *data.vreply_to() : MTPMessageReplyHeader(),
 			data.vdate(),
 			data.vmessage(),
-			media ? *media : MTPMessageMedia(),
-			markup ? *markup : MTPReplyMarkup(),
-			entities ? *entities : MTPVector<MTPMessageEntity>(),
+			data.vmedia() ? *data.vmedia() : MTPMessageMedia(),
+			data.vreply_markup() ? *data.vreply_markup() : MTPReplyMarkup(),
+			(data.ventities()
+				? *data.ventities()
+				: MTPVector<MTPMessageEntity>()),
 			MTP_int(data.vviews().value_or_empty()),
+			MTP_int(data.vforwards().value_or_empty()),
+			data.vreplies() ? *data.vreplies() : MTPMessageReplies(),
 			MTP_int(data.vedit_date().value_or_empty()),
 			MTP_bytes(data.vpost_author().value_or_empty()),
 			MTP_long(data.vgrouped_id().value_or_empty()),
 			//MTPMessageReactions(),
-			MTPVector<MTPRestrictionReason>());
+			MTPVector<MTPRestrictionReason>(),
+			MTP_int(data.vttl_period().value_or_empty()));
 	});
 }
 
@@ -133,6 +144,10 @@ HistoryItem *ScheduledMessages::lookupItem(PeerId peer, MsgId msg) const {
 	return (*j).get();
 }
 
+HistoryItem *ScheduledMessages::lookupItem(FullMsgId itemId) const {
+	return lookupItem(peerFromChannel(itemId.channel), itemId.msg);
+}
+
 int ScheduledMessages::count(not_null<History*> history) const {
 	const auto i = _data.find(history);
 	return (i != end(_data)) ? i->second.items.size() : 0;
@@ -143,7 +158,11 @@ void ScheduledMessages::sendNowSimpleMessage(
 		not_null<HistoryItem*> local) {
 	Expects(local->isSending());
 	Expects(local->isScheduled());
-	Expects(local->date() == kScheduledUntilOnlineTimestamp);
+	if (HasScheduledDate(local)) {
+		LOG(("Error: trying to put to history a new local message, "
+			"that has scheduled date."));
+		return;
+	}
 
 	// When the user sends a text message scheduled until online
 	// while the recipient is already online, the server sends
@@ -152,36 +171,48 @@ void ScheduledMessages::sendNowSimpleMessage(
 	// we know for sure that a message can't have fields such as the author,
 	// views count, etc.
 
-	const auto &history = local->history();
+	const auto history = local->history();
+	auto action = Api::SendAction(history);
+	action.replyTo = local->replyToId();
+	const auto replyHeader = NewMessageReplyHeader(action);
 	auto flags = NewMessageFlags(history->peer)
 		| MTPDmessage::Flag::f_entities
 		| MTPDmessage::Flag::f_from_id
 		| (local->replyToId()
-			? MTPDmessage::Flag::f_reply_to_msg_id
+			? MTPDmessage::Flag::f_reply_to
+			: MTPDmessage::Flag(0))
+		| (update.vttl_period()
+			? MTPDmessage::Flag::f_ttl_period
 			: MTPDmessage::Flag(0));
 	auto clientFlags = NewMessageClientFlags()
 		| MTPDmessage_ClientFlag::f_local_history_entry;
-
+	const auto views = 1;
+	const auto forwards = 0;
 	history->addNewMessage(
 		MTP_message(
 			MTP_flags(flags),
 			update.vid(),
-			MTP_int(_session->userId()),
+			peerToMTP(_session->userPeerId()),
 			peerToMTP(history->peer->id),
 			MTPMessageFwdHeader(),
 			MTPint(),
-			MTP_int(local->replyToId()),
+			replyHeader,
 			update.vdate(),
 			MTP_string(local->originalText().text),
 			MTP_messageMediaEmpty(),
 			MTPReplyMarkup(),
-			Api::EntitiesToMTP(local->originalText().entities),
-			MTP_int(1),
-			MTPint(),
+			Api::EntitiesToMTP(
+				&history->session(),
+				local->originalText().entities),
+			MTP_int(views),
+			MTP_int(forwards),
+			MTPMessageReplies(),
+			MTPint(), // edit_date
 			MTP_string(),
 			MTPlong(),
 			//MTPMessageReactions(),
-			MTPVector<MTPRestrictionReason>()),
+			MTPVector<MTPRestrictionReason>(),
+			MTP_int(update.vttl_period().value_or_empty())),
 		clientFlags,
 		NewMessageType::Unread);
 
@@ -206,14 +237,12 @@ void ScheduledMessages::apply(const MTPDupdateNewScheduledMessage &update) {
 
 void ScheduledMessages::checkEntitiesAndUpdate(const MTPDmessage &data) {
 	// When the user sends a message with a media scheduled until online
-	// while the recipient is already online, the server sends
-	// updateNewMessage to the client and the client calls this method.
+	// while the recipient is already online, or scheduled message
+	// is already due and is sent immediately, the server sends
+	// updateNewMessage or updateNewChannelMessage to the client
+	// and the client calls this method.
 
-	const auto peer = peerFromMTP(data.vto_id());
-	if (!peerIsUser(peer)) {
-		return;
-	}
-
+	const auto peer = peerFromMTP(data.vpeer_id());
 	const auto history = _session->data().historyLoaded(peer);
 	if (!history) {
 		return;
@@ -231,16 +260,18 @@ void ScheduledMessages::checkEntitiesAndUpdate(const MTPDmessage &data) {
 	}
 
 	const auto existing = j->second;
-	Assert(existing->date() == kScheduledUntilOnlineTimestamp);
-	existing->updateSentContent({
-		qs(data.vmessage()),
-		Api::EntitiesFromMTP(data.ventities().value_or_empty())
-	}, data.vmedia());
-	existing->updateReplyMarkup(data.vreply_markup());
-	existing->updateForwardedInfo(data.vfwd_from());
-	_session->data().requestItemTextRefresh(existing);
+	if (!HasScheduledDate(existing)) {
+		// Destroy a local message, that should be in history.
+		existing->updateSentContent({
+			qs(data.vmessage()),
+			Api::EntitiesFromMTP(_session, data.ventities().value_or_empty())
+		}, data.vmedia());
+		existing->updateReplyMarkup(data.vreply_markup());
+		existing->updateForwardedInfo(data.vfwd_from());
+		_session->data().requestItemTextRefresh(existing);
 
-	existing->destroy();
+		existing->destroy();
+	}
 }
 
 void ScheduledMessages::apply(
@@ -314,9 +345,7 @@ rpl::producer<> ScheduledMessages::updates(not_null<History*> history) {
 	return _updates.events(
 	) | rpl::filter([=](not_null<History*> value) {
 		return (value == history);
-	}) | rpl::map([] {
-		return rpl::empty_value();
-	});
+	}) | rpl::to_empty;
 }
 
 Data::MessagesSlice ScheduledMessages::list(not_null<History*> history) {
@@ -333,9 +362,9 @@ Data::MessagesSlice ScheduledMessages::list(not_null<History*> history) {
 	const auto &list = i->second.items;
 	result.skippedAfter = result.skippedBefore = 0;
 	result.fullCount = int(list.size());
-	result.ids = ranges::view::all(
+	result.ids = ranges::views::all(
 		list
-	) | ranges::view::transform(
+	) | ranges::views::transform(
 		&HistoryItem::fullId
 	) | ranges::to_vector;
 	return result;
@@ -354,7 +383,7 @@ void ScheduledMessages::request(not_null<History*> history) {
 			MTP_int(hash))
 	).done([=](const MTPmessages_Messages &result) {
 		parse(history, result);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_requests.remove(history);
 	}).send();
 }
@@ -408,12 +437,21 @@ HistoryItem *ScheduledMessages::append(
 	if (i != end(list.itemById)) {
 		const auto existing = i->second;
 		message.match([&](const MTPDmessage &data) {
+			// Scheduled messages never have an edit date,
+			// so if we receive a flag about it,
+			// probably this message was edited.
+			if (data.is_edit_hide()) {
+				existing->applyEdition(data);
+			}
 			existing->updateSentContent({
 				qs(data.vmessage()),
-				Api::EntitiesFromMTP(data.ventities().value_or_empty())
+				Api::EntitiesFromMTP(
+					_session,
+					data.ventities().value_or_empty())
 			}, data.vmedia());
 			existing->updateReplyMarkup(data.vreply_markup());
 			existing->updateForwardedInfo(data.vfwd_from());
+			existing->updateDate(data.vdate().v);
 			history->owner().requestItemTextRefresh(existing);
 		}, [&](const auto &data) {});
 		return existing;
@@ -496,11 +534,11 @@ int32 ScheduledMessages::countListHash(const List &list) const {
 	using namespace Api;
 
 	auto hash = HashInit();
-	auto &&serverside = ranges::view::all(
+	auto &&serverside = ranges::views::all(
 		list.items
-	) | ranges::view::filter([](const OwnedItem &item) {
+	) | ranges::views::filter([](const OwnedItem &item) {
 		return !item->isSending() && !item->hasFailed();
-	}) | ranges::view::reverse;
+	}) | ranges::views::reverse;
 	for (const auto &item : serverside) {
 		const auto j = list.idByItem.find(item.get());
 		HashUpdate(hash, j->second);

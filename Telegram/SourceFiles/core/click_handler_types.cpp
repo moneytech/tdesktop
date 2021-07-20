@@ -14,24 +14,25 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_session.h"
 #include "boxes/confirm_box.h"
 #include "base/qthelp_regex.h"
-#include "storage/localstorage.h"
+#include "storage/storage_account.h"
 #include "history/view/history_view_element.h"
 #include "history/history_item.h"
 #include "data/data_user.h"
 #include "data/data_session.h"
+#include "window/window_session_controller.h"
 #include "facades.h"
 #include "app.h"
 
 #include <QtGui/QGuiApplication>
 
-namespace {
-
 bool UrlRequiresConfirmation(const QUrl &url) {
 	using namespace qthelp;
-	return !regex_match(qsl("(^|\\.)(telegram\\.org|telegra\\.ph|telesco\\.pe)$"), url.host(), RegExOption::CaseInsensitive);
-}
 
-} // namespace
+	return !regex_match(
+		"(^|\\.)(telegram\\.(org|me|dog)|t\\.me|telegra\\.ph|telesco\\.pe)$",
+		url.host(),
+		RegExOption::CaseInsensitive);
+}
 
 void HiddenUrlClickHandler::Open(QString url, QVariant context) {
 	url = Core::TryConvertUrlToLocal(url);
@@ -47,7 +48,7 @@ void HiddenUrlClickHandler::Open(QString url, QVariant context) {
 		open();
 	} else {
 		const auto parsedUrl = QUrl::fromUserInput(url);
-		if (UrlRequiresConfirmation(url)
+		if (UrlRequiresConfirmation(parsedUrl)
 			&& QGuiApplication::keyboardModifiers() != Qt::ControlModifier) {
 			Core::App().hideMediaView();
 			const auto displayed = parsedUrl.isValid()
@@ -83,12 +84,14 @@ void BotGameUrlClickHandler::onClick(ClickContext context) const {
 	};
 	if (url.startsWith(qstr("tg://"), Qt::CaseInsensitive)) {
 		open();
-	} else if (!_bot || _bot->isVerified() || Local::isBotTrusted(_bot)) {
+	} else if (!_bot
+		|| _bot->isVerified()
+		|| _bot->session().local().isBotTrustedOpenGame(_bot->id)) {
 		open();
 	} else {
 		const auto callback = [=, bot = _bot] {
 			Ui::hideLayer();
-			Local::makeBotTrusted(bot);
+			bot->session().local().markBotTrustedOpenGame(bot->id);
 			open();
 		};
 		Ui::show(Box<ConfirmBox>(
@@ -109,7 +112,13 @@ QString MentionClickHandler::copyToClipboardContextItemText() const {
 void MentionClickHandler::onClick(ClickContext context) const {
 	const auto button = context.button;
 	if (button == Qt::LeftButton || button == Qt::MiddleButton) {
-		App::main()->openPeerByName(_tag.mid(1), ShowAtProfileMsgId);
+		if (const auto m = App::main()) { // multi good
+			using Info = Window::SessionNavigation::PeerByLinkInfo;
+			m->controller()->showPeerByLink(Info{
+				.usernameOrId = _tag.mid(1),
+				.messageId = ShowAtProfileMsgId
+			});
+		}
 	}
 }
 
@@ -120,19 +129,21 @@ auto MentionClickHandler::getTextEntity() const -> TextEntity {
 void MentionNameClickHandler::onClick(ClickContext context) const {
 	const auto button = context.button;
 	if (button == Qt::LeftButton || button == Qt::MiddleButton) {
-		if (auto user = Auth().data().userLoaded(_userId)) {
+		if (auto user = _session->data().userLoaded(_userId)) {
 			Ui::showPeerProfile(user);
 		}
 	}
 }
 
 auto MentionNameClickHandler::getTextEntity() const -> TextEntity {
-	auto data = QString::number(_userId) + '.' + QString::number(_accessHash);
+	const auto data = QString::number(_userId.bare)
+		+ '.'
+		+ QString::number(_accessHash);
 	return { EntityType::MentionName, data };
 }
 
 QString MentionNameClickHandler::tooltip() const {
-	if (const auto user = Auth().data().userLoaded(_userId)) {
+	if (const auto user = _session->data().userLoaded(_userId)) {
 		const auto name = user->name;
 		if (name != _text) {
 			return name;
@@ -171,20 +182,14 @@ auto CashtagClickHandler::getTextEntity() const -> TextEntity {
 	return { EntityType::Cashtag };
 }
 
-PeerData *BotCommandClickHandler::_peer = nullptr;
-UserData *BotCommandClickHandler::_bot = nullptr;
 void BotCommandClickHandler::onClick(ClickContext context) const {
 	const auto button = context.button;
 	if (button == Qt::LeftButton || button == Qt::MiddleButton) {
-		if (auto peer = peerForCommand()) {
-			if (auto bot = peer->isUser() ? peer->asUser() : botForCommand()) {
-				Ui::showPeerHistory(peer, ShowAtTheEndMsgId);
-				App::sendBotCommand(peer, bot, _cmd);
-				return;
-			}
-		}
-
-		if (auto peer = Ui::getPeerForMouseAction()) { // old way
+		const auto my = context.other.value<ClickHandlerContext>();
+		if (const auto delegate = my.elementDelegate ? my.elementDelegate() : nullptr) {
+			delegate->elementSendBotCommand(_cmd, my.itemId);
+			return;
+		} else if (auto peer = Ui::getPeerForMouseAction()) { // old way
 			auto bot = peer->isUser() ? peer->asUser() : nullptr;
 			if (!bot) {
 				if (const auto view = App::hoveredLinkItem()) {

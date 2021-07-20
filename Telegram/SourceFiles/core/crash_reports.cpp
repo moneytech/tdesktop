@@ -16,8 +16,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <mutex>
 
 #ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
-
-// see https://blog.inventic.eu/2012/08/qt-and-google-breakpad/
 #ifdef Q_OS_WIN
 
 #pragma warning(push)
@@ -25,11 +23,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "client/windows/handler/exception_handler.h"
 #pragma warning(pop)
 
-#elif defined Q_OS_MAC // Q_OS_WIN
+#elif defined Q_OS_UNIX // Q_OS_WIN
 
 #include <execinfo.h>
-#include <signal.h>
 #include <sys/syscall.h>
+
+#ifdef Q_OS_MAC
+
 #include <dlfcn.h>
 #include <unistd.h>
 
@@ -39,16 +39,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "client/crashpad_client.h"
 #endif // else for MAC_USE_BREAKPAD
 
-#elif defined Q_OS_LINUX64 || defined Q_OS_LINUX32 // Q_OS_MAC
-
-#include <execinfo.h>
-#include <signal.h>
-#include <sys/syscall.h>
+#else // Q_OS_MAC
 
 #include "client/linux/handler/exception_handler.h"
 
-#endif // Q_OS_LINUX64 || Q_OS_LINUX32
+#endif // Q_OS_MAC
 
+#endif // Q_OS_WIN
 #endif // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 
 namespace CrashReports {
@@ -65,8 +62,6 @@ AnnotationRefs ProcessAnnotationRefs;
 QString ReportPath;
 FILE *ReportFile = nullptr;
 int ReportFileNo = 0;
-char LaunchedDateTimeStr[32] = { 0 };
-char LaunchedBinaryName[256] = { 0 };
 
 void SafeWriteChar(char ch) {
 	fwrite(&ch, 1, 1, ReportFile);
@@ -133,71 +128,45 @@ void InstallQtMessageHandler() {
 	});
 }
 
-Qt::HANDLE ReportingThreadId = nullptr;
-bool ReportingHeaderWritten = false;
-QMutex ReportingMutex;
+std::atomic<Qt::HANDLE> ReportingThreadId/* = nullptr*/;
+bool ReportingHeaderWritten/* = false*/;
+const char *BreakpadDumpPath/* = nullptr*/;
+const wchar_t *BreakpadDumpPathW/* = nullptr*/;
 
-const char *BreakpadDumpPath = nullptr;
-const wchar_t *BreakpadDumpPathW = nullptr;
-
-#if defined Q_OS_MAC || defined Q_OS_LINUX32 || defined Q_OS_LINUX64
-struct sigaction SIG_def[32];
-
-void SignalHandler(int signum, siginfo_t *info, void *ucontext) {
-	if (signum > 0) {
-		sigaction(signum, &SIG_def[signum], 0);
+void WriteReportHeader() {
+	if (ReportingHeaderWritten) {
+		return;
 	}
-
-#else // Q_OS_MAC || Q_OS_LINUX32 || Q_OS_LINUX64
-void SignalHandler(int signum) {
-#endif // else for Q_OS_MAC || Q_OS_LINUX || Q_OS_LINUX64
-
-	const char* name = 0;
-	switch (signum) {
-	case SIGABRT: name = "SIGABRT"; break;
-	case SIGSEGV: name = "SIGSEGV"; break;
-	case SIGILL: name = "SIGILL"; break;
-	case SIGFPE: name = "SIGFPE"; break;
-#ifndef Q_OS_WIN
-	case SIGBUS: name = "SIGBUS"; break;
-	case SIGSYS: name = "SIGSYS"; break;
-#endif // !Q_OS_WIN
-	}
-
-	Qt::HANDLE thread = QThread::currentThreadId();
-	if (thread == ReportingThreadId) return;
-
-	QMutexLocker lock(&ReportingMutex);
-	ReportingThreadId = thread;
-
-	if (!ReportingHeaderWritten) {
-		ReportingHeaderWritten = true;
-		auto dec2hex = [](int value) -> char {
-			if (value >= 0 && value < 10) {
-				return '0' + value;
-			} else if (value >= 10 && value < 16) {
-				return 'a' + (value - 10);
-			}
-			return '#';
-		};
-
-		for (const auto &i : ProcessAnnotationRefs) {
-			QByteArray utf8 = i.second->toUtf8();
-			std::string wrapped;
-			wrapped.reserve(4 * utf8.size());
-			for (auto ch : utf8) {
-				auto uch = static_cast<uchar>(ch);
-				wrapped.append("\\x", 2).append(1, dec2hex(uch >> 4)).append(1, dec2hex(uch & 0x0F));
-			}
-			ProcessAnnotations[i.first] = wrapped;
+	ReportingHeaderWritten = true;
+	const auto dec2hex = [](int value) -> char {
+		if (value >= 0 && value < 10) {
+			return '0' + value;
+		} else if (value >= 10 && value < 16) {
+			return 'a' + (value - 10);
 		}
-
-		for (const auto &i : ProcessAnnotations) {
-			dump() << i.first.c_str() << ": " << i.second.c_str() << "\n";
+		return '#';
+	};
+	for (const auto &i : ProcessAnnotationRefs) {
+		QByteArray utf8 = i.second->toUtf8();
+		std::string wrapped;
+		wrapped.reserve(4 * utf8.size());
+		for (auto ch : utf8) {
+			auto uch = static_cast<uchar>(ch);
+			wrapped.append("\\x", 2).append(1, dec2hex(uch >> 4)).append(1, dec2hex(uch & 0x0F));
 		}
-		psWriteDump();
-		dump() << "\n";
+		ProcessAnnotations[i.first] = wrapped;
 	}
+	for (const auto &i : ProcessAnnotations) {
+		dump() << i.first.c_str() << ": " << i.second.c_str() << "\n";
+	}
+	Platform::WriteCrashDumpDetails();
+	dump() << "\n";
+}
+
+void WriteReportInfo(int signum, const char *name) {
+	WriteReportHeader();
+
+	const auto thread = ReportingThreadId.load();
 	if (name) {
 		dump() << "Caught signal " << signum << " (" << name << ") in thread " << uint64(thread) << "\n";
 	} else if (signum == -1) {
@@ -211,78 +180,74 @@ void SignalHandler(int signum) {
 		dump() << "Caught signal " << signum << " in thread " << uint64(thread) << "\n";
 	}
 
-	// see https://github.com/benbjohnson/bandicoot
-#if defined Q_OS_MAC || defined Q_OS_LINUX32 || defined Q_OS_LINUX64
-	ucontext_t *uc = (ucontext_t*)ucontext;
-
-	void *caller = 0;
-	if (uc) {
-#if defined(__APPLE__) && !defined(MAC_OS_X_VERSION_10_6)
-		/* OSX < 10.6 */
-#if defined(__x86_64__)
-		caller = (void*)uc->uc_mcontext->__ss.__rip;
-#elif defined(__i386__)
-		caller = (void*)uc->uc_mcontext->__ss.__eip;
-#else
-		caller = (void*)uc->uc_mcontext->__ss.__srr0;
-#endif
-#elif defined(__APPLE__) && defined(MAC_OS_X_VERSION_10_6)
-		/* OSX >= 10.6 */
-#if defined(_STRUCT_X86_THREAD_STATE64) && !defined(__i386__)
-		caller = (void*)uc->uc_mcontext->__ss.__rip;
-#else
-		caller = (void*)uc->uc_mcontext->__ss.__eip;
-#endif
-#elif defined(__linux__)
-		/* Linux */
-#if defined(__i386__)
-		caller = (void*)uc->uc_mcontext.gregs[14]; /* Linux 32 */
-#elif defined(__X86_64__) || defined(__x86_64__)
-		caller = (void*)uc->uc_mcontext.gregs[16]; /* Linux 64 */
-#elif defined(__ia64__) /* Linux IA64 */
-		caller = (void*)uc->uc_mcontext.sc_ip;
-#endif
-
-#endif
-	}
-
-	void *addresses[132] = { 0 };
-	size_t size = backtrace(addresses, 128);
-
-	/* overwrite sigaction with caller's address */
-	if (caller) {
-		for (int i = size; i > 1; --i) {
-			addresses[i + 3] = addresses[i];
-		}
-		addresses[2] = (void*)0x1;
-		addresses[3] = caller;
-		addresses[4] = (void*)0x1;
-	}
-
-#ifdef Q_OS_MAC
-	dump() << "\nBase image addresses:\n";
-	for (size_t i = 0; i < size; ++i) {
-		Dl_info info;
-		dump() << i << " ";
-		if (dladdr(addresses[i], &info)) {
-			dump() << uint64(info.dli_fbase) << " (" << info.dli_fname << ")\n";
-		} else {
-			dump() << "_unknown_module_\n";
-		}
-	}
-#endif // Q_OS_MAC
-
-	dump() << "\nBacktrace:\n";
-
-	backtrace_symbols_fd(addresses, size, ReportFileNo);
-
-#else // Q_OS_MAC || Q_OS_LINUX32 || Q_OS_LINUX64
 	dump() << "\nBacktrace omitted.\n";
-#endif // else for Q_OS_MAC || Q_OS_LINUX32 || Q_OS_LINUX64
-
 	dump() << "\n";
+}
 
-	ReportingThreadId = nullptr;
+const int HandledSignals[] = {
+	SIGSEGV,
+	SIGABRT,
+	SIGFPE,
+	SIGILL,
+#ifdef Q_OS_UNIX
+	SIGBUS,
+	SIGTRAP,
+#endif // Q_OS_UNIX
+};
+
+#ifdef Q_OS_UNIX
+struct sigaction OldSigActions[32]/* = { 0 }*/;
+
+void RestoreSignalHandlers() {
+	for (const auto signum : HandledSignals) {
+		sigaction(signum, &OldSigActions[signum], nullptr);
+	}
+}
+
+void InvokeOldSignalHandler(int signum, siginfo_t *info, void *ucontext) {
+	if (signum < 0 || signum > 31) {
+		return;
+	} else if (OldSigActions[signum].sa_flags & SA_SIGINFO) {
+		if (OldSigActions[signum].sa_sigaction) {
+			OldSigActions[signum].sa_sigaction(signum, info, ucontext);
+		}
+	} else {
+		if (OldSigActions[signum].sa_handler) {
+			OldSigActions[signum].sa_handler(signum);
+		}
+	}
+}
+
+void SignalHandler(int signum, siginfo_t *info, void *ucontext) {
+	RestoreSignalHandlers();
+
+#else // Q_OS_UNIX
+void SignalHandler(int signum) {
+#endif // else for Q_OS_UNIX
+
+	const char* name = 0;
+	switch (signum) {
+	case SIGABRT: name = "SIGABRT"; break;
+	case SIGSEGV: name = "SIGSEGV"; break;
+	case SIGILL: name = "SIGILL"; break;
+	case SIGFPE: name = "SIGFPE"; break;
+#ifndef Q_OS_WIN
+	case SIGBUS: name = "SIGBUS"; break;
+	case SIGSYS: name = "SIGSYS"; break;
+#endif // !Q_OS_WIN
+	}
+
+	auto expected = Qt::HANDLE(nullptr);
+	const auto thread = QThread::currentThreadId();
+
+	if (ReportingThreadId.compare_exchange_strong(expected, thread)) {
+		WriteReportInfo(signum, name);
+		ReportingThreadId = nullptr;
+	}
+
+#ifdef Q_OS_UNIX
+	InvokeOldSignalHandler(signum, info, ucontext);
+#endif // Q_OS_UNIX
 }
 
 bool SetSignalHandlers = true;
@@ -294,9 +259,9 @@ google_breakpad::ExceptionHandler* BreakpadExceptionHandler = 0;
 bool DumpCallback(const wchar_t* _dump_dir, const wchar_t* _minidump_id, void* context, EXCEPTION_POINTERS* exinfo, MDRawAssertionInfo* assertion, bool success)
 #elif defined Q_OS_MAC // Q_OS_WIN
 bool DumpCallback(const char* _dump_dir, const char* _minidump_id, void *context, bool success)
-#elif defined Q_OS_LINUX64 || defined Q_OS_LINUX32 // Q_OS_MAC
+#elif defined Q_OS_UNIX // Q_OS_MAC
 bool DumpCallback(const google_breakpad::MinidumpDescriptor &md, void *context, bool success)
-#endif // Q_OS_LINUX64 || Q_OS_LINUX32
+#endif // Q_OS_UNIX
 {
 	if (CrashLogged) return success;
 	CrashLogged = true;
@@ -323,9 +288,13 @@ bool DumpCallback(const google_breakpad::MinidumpDescriptor &md, void *context, 
 
 QString PlatformString() {
 	if (Platform::IsWindowsStoreBuild()) {
-		return qsl("WinStore");
-	} else if (Platform::IsWindows()) {
-		return qsl("Windows");
+		return Platform::IsWindows64Bit()
+			? qsl("WinStore64Bit")
+			: qsl("WinStore32Bit");
+	} else if (Platform::IsWindows32Bit()) {
+		return qsl("Windows32Bit");
+	} else if (Platform::IsWindows64Bit()) {
+		return qsl("Windows64Bit");
 	} else if (Platform::IsMacStoreBuild()) {
 		return qsl("MacAppStore");
 	} else if (Platform::IsOSXBuild()) {
@@ -392,7 +361,7 @@ void StartCatching(not_null<Core::Launcher*> launcher) {
 		crashpad_client.UseHandler();
 	}
 #endif // else for MAC_USE_BREAKPAD
-#elif defined Q_OS_LINUX64 || defined Q_OS_LINUX32
+#elif defined Q_OS_UNIX
 	BreakpadExceptionHandler = new google_breakpad::ExceptionHandler(
 		google_breakpad::MinidumpDescriptor(QFile::encodeName(dumpspath).toStdString()),
 		/*FilterCallback*/ 0,
@@ -401,7 +370,7 @@ void StartCatching(not_null<Core::Launcher*> launcher) {
 		true,
 		-1
 	);
-#endif // Q_OS_LINUX64 || Q_OS_LINUX32
+#endif // Q_OS_UNIX
 #endif // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 }
 
@@ -473,17 +442,13 @@ Status Restart() {
 			sigemptyset(&sigact.sa_mask);
 			sigact.sa_flags = SA_NODEFER | SA_RESETHAND | SA_SIGINFO;
 
-			sigaction(SIGABRT, &sigact, &SIG_def[SIGABRT]);
-			sigaction(SIGSEGV, &sigact, &SIG_def[SIGSEGV]);
-			sigaction(SIGILL, &sigact, &SIG_def[SIGILL]);
-			sigaction(SIGFPE, &sigact, &SIG_def[SIGFPE]);
-			sigaction(SIGBUS, &sigact, &SIG_def[SIGBUS]);
-			sigaction(SIGSYS, &sigact, &SIG_def[SIGSYS]);
+			for (const auto signum : HandledSignals) {
+				sigaction(signum, &sigact, &OldSigActions[signum]);
+			}
 #else // !Q_OS_WIN
-			signal(SIGABRT, SignalHandler);
-			signal(SIGSEGV, SignalHandler);
-			signal(SIGILL, SignalHandler);
-			signal(SIGFPE, SignalHandler);
+			for (const auto signum : HandledSignals) {
+				signal(signum, SignalHandler);
+			}
 #endif // else for !Q_OS_WIN
 		}
 

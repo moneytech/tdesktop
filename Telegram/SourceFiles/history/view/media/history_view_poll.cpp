@@ -13,8 +13,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_element.h"
 #include "history/view/history_view_cursor_state.h"
 #include "calls/calls_instance.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
 #include "ui/text/text_utilities.h"
+#include "ui/text/format_values.h"
 #include "ui/effects/animations.h"
 #include "ui/effects/radial_animation.h"
 #include "ui/effects/ripple_animation.h"
@@ -26,10 +27,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "base/unixtime.h"
 #include "base/timer.h"
-#include "layout.h"
 #include "main/main_session.h"
+#include "layout.h" // FullSelection
 #include "apiwrap.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 #include "styles/style_widgets.h"
 #include "styles/style_window.h"
 
@@ -104,10 +105,10 @@ void CountNicePercent(
 	PercentCounterItem ItemsStorage[PollData::kMaxOptions];
 	const auto items = gsl::make_span(ItemsStorage).subspan(0, count);
 	auto left = 100;
-	auto &&zipped = ranges::view::zip(
+	auto &&zipped = ranges::views::zip(
 		votes,
 		items,
-		ranges::view::ints(0, int(items.size())));
+		ranges::views::ints(0, int(items.size())));
 	for (auto &&[votes, item, index] : zipped) {
 		item.index = index;
 		item.percent = (votes * 100) / total;
@@ -247,9 +248,9 @@ QSize Poll::countOptimalSize() {
 			+ st::historyPollAnswerPadding.right());
 	}
 
-	const auto answersHeight = ranges::accumulate(ranges::view::all(
+	const auto answersHeight = ranges::accumulate(ranges::views::all(
 		_answers
-	) | ranges::view::transform([](const Answer &answer) {
+	) | ranges::views::transform([](const Answer &answer) {
 		return st::historyPollAnswerPadding.top()
 			+ answer.text.minHeight()
 			+ st::historyPollAnswerPadding.bottom();
@@ -306,9 +307,6 @@ int Poll::countAnswerTop(
 	}
 	tshift += _question.countHeight(innerWidth) + st::historyPollSubtitleSkip;
 	tshift += st::msgDateFont->height + st::historyPollAnswersSkip;
-	auto &&answers = ranges::view::zip(
-		_answers,
-		ranges::view::ints(0, int(_answers.size())));
 	const auto i = ranges::find(
 		_answers,
 		&answer,
@@ -337,16 +335,14 @@ int Poll::countAnswerHeight(
 }
 
 QSize Poll::countCurrentSize(int newWidth) {
-	const auto paddings = st::msgPadding.left() + st::msgPadding.right();
-
 	accumulate_min(newWidth, maxWidth());
 	const auto innerWidth = newWidth
 		- st::msgPadding.left()
 		- st::msgPadding.right();
 
-	const auto answersHeight = ranges::accumulate(ranges::view::all(
+	const auto answersHeight = ranges::accumulate(ranges::views::all(
 		_answers
-	) | ranges::view::transform([&](const Answer &answer) {
+	) | ranges::views::transform([&](const Answer &answer) {
 		return countAnswerHeight(answer, innerWidth);
 	}), 0);
 
@@ -476,12 +472,36 @@ void Poll::solutionToggled(
 }
 
 void Poll::updateRecentVoters() {
-	auto &&sliced = ranges::view::all(
+	auto &&sliced = ranges::views::all(
 		_poll->recentVoters
-	) | ranges::view::take(kShowRecentVotersCount);
-	const auto changed = !ranges::equal(_recentVoters, sliced);
+	) | ranges::views::take(kShowRecentVotersCount);
+	const auto changed = !ranges::equal(
+		_recentVoters,
+		sliced,
+		ranges::equal_to(),
+		&RecentVoter::user);
 	if (changed) {
-		_recentVoters = sliced | ranges::to_vector;
+		auto updated = ranges::views::all(
+			sliced
+		) | ranges::views::transform([](not_null<UserData*> user) {
+			return RecentVoter{ user };
+		}) | ranges::to_vector;
+		const auto has = hasHeavyPart();
+		if (has) {
+			for (auto &voter : updated) {
+				const auto i = ranges::find(
+					_recentVoters,
+					voter.user,
+					&RecentVoter::user);
+				if (i != end(_recentVoters)) {
+					voter.userpic = std::move(i->userpic);
+				}
+			}
+		}
+		_recentVoters = std::move(updated);
+		if (has && !hasHeavyPart()) {
+			_parent->checkHeavyPart();
+		}
 	}
 }
 
@@ -493,15 +513,15 @@ void Poll::updateAnswers() {
 		&Answer::option,
 		&PollAnswer::option);
 	if (!changed) {
-		auto &&answers = ranges::view::zip(_answers, _poll->answers);
+		auto &&answers = ranges::views::zip(_answers, _poll->answers);
 		for (auto &&[answer, original] : answers) {
 			answer.fillData(_poll, original);
 		}
 		return;
 	}
-	_answers = ranges::view::all(
+	_answers = ranges::views::all(
 		_poll->answers
-	) | ranges::view::transform([&](const PollAnswer &answer) {
+	) | ranges::views::transform([&](const PollAnswer &answer) {
 		auto result = Answer();
 		result.option = answer.option;
 		result.fillData(_poll, answer);
@@ -558,9 +578,9 @@ void Poll::toggleMultiOption(const QByteArray &option) {
 }
 
 void Poll::sendMultiOptions() {
-	auto chosen = _answers | ranges::view::filter(
+	auto chosen = _answers | ranges::views::filter(
 		&Answer::selected
-	) | ranges::view::transform(
+	) | ranges::views::transform(
 		&Answer::option
 	) | ranges::to_vector;
 	if (!chosen.empty()) {
@@ -672,9 +692,9 @@ void Poll::updateAnswerVotes() {
 	int VotesStorage[kMaxCount] = { 0 };
 
 	ranges::copy(
-		ranges::view::all(
+		ranges::views::all(
 			_poll->answers
-		) | ranges::view::transform(&PollAnswer::votes),
+		) | ranges::views::transform(&PollAnswer::votes),
 		ranges::begin(VotesStorage));
 
 	CountNicePercent(
@@ -682,7 +702,7 @@ void Poll::updateAnswerVotes() {
 		totalVotes,
 		gsl::make_span(PercentsStorage).subspan(0, count));
 
-	auto &&answers = ranges::view::zip(
+	auto &&answers = ranges::views::zip(
 		_answers,
 		_poll->answers,
 		PercentsStorage);
@@ -697,7 +717,7 @@ void Poll::updateAnswerVotes() {
 
 void Poll::draw(Painter &p, const QRect &r, TextSelection selection, crl::time ms) const {
 	if (width() < st::msgPadding.left() + st::msgPadding.right() + 1) return;
-	auto paintx = 0, painty = 0, paintw = width(), painth = height();
+	auto paintw = width();
 
 	checkSendingAnimation();
 	_poll->checkResultsReload(_parent->data(), ms);
@@ -731,16 +751,18 @@ void Poll::draw(Painter &p, const QRect &r, TextSelection selection, crl::time m
 		resetAnswersAnimation();
 	}
 
-	auto &&answers = ranges::view::zip(
+	auto &&answers = ranges::views::zip(
 		_answers,
-		ranges::view::ints(0, int(_answers.size())));
+		ranges::views::ints(0, int(_answers.size())));
 	for (const auto &[answer, index] : answers) {
 		const auto animation = _answersAnimation
 			? &_answersAnimation->data[index]
 			: nullptr;
 		if (animation) {
 			animation->percent.update(progress, anim::linear);
-			animation->filling.update(progress, anim::linear);
+			animation->filling.update(
+				progress,
+				showVotes() ? anim::easeOutCirc : anim::linear);
 			animation->opacity.update(progress, anim::linear);
 		}
 		const auto height = paintAnswer(
@@ -858,13 +880,22 @@ void Poll::paintRecentVoters(
 		? (outbg ? st::msgOutBgSelected : st::msgInBgSelected)
 		: (outbg ? st::msgOutBg : st::msgInBg))->p;
 	pen.setWidth(st::lineWidth);
-	for (const auto &recent : _recentVoters) {
-		recent->paintUserpic(p, x, y, size);
+
+	auto created = false;
+	for (auto &recent : _recentVoters) {
+		const auto was = (recent.userpic != nullptr);
+		recent.user->paintUserpic(p, recent.userpic, x, y, size);
+		if (!was && recent.userpic) {
+			created = true;
+		}
 		p.setPen(pen);
 		p.setBrush(Qt::NoBrush);
 		PainterHighQualityEnabler hq(p);
 		p.drawEllipse(x, y, size, size);
 		x -= st::historyPollRecentVoterSkip;
+	}
+	if (created) {
+		history()->owner().registerHeavyViewPart(_parent);
 	}
 }
 
@@ -898,7 +929,7 @@ void Poll::paintCloseByTimer(
 	} else {
 		_close->radial.stop();
 	}
-	const auto time = formatDurationText(int(std::ceil(left / 1000.)));
+	const auto time = Ui::FormatDurationText(int(std::ceil(left / 1000.)));
 	const auto outbg = _parent->hasOutLayout();
 	const auto selected = (selection == FullSelection);
 	const auto &icon = selected
@@ -1137,7 +1168,6 @@ void Poll::paintPercent(
 		int outerWidth,
 		TextSelection selection) const {
 	const auto outbg = _parent->hasOutLayout();
-	const auto selected = (selection == FullSelection);
 	const auto aleft = left + st::historyPollAnswerPadding.left();
 
 	top += st::historyPollAnswerPadding.top();
@@ -1256,7 +1286,7 @@ void Poll::startAnswersAnimation() const {
 	}
 
 	const auto show = showVotes();
-	auto &&both = ranges::view::zip(_answers, _answersAnimation->data);
+	auto &&both = ranges::views::zip(_answers, _answersAnimation->data);
 	for (auto &&[answer, data] : both) {
 		data.percent.start(show ? float64(answer.votesPercent) : 0.);
 		data.filling.start(show ? answer.filling : 0.);
@@ -1293,9 +1323,6 @@ TextState Poll::textState(QPoint point, StateRequest request) const {
 		return result;
 	}
 	tshift += st::msgDateFont->height + st::historyPollAnswersSkip;
-	const auto awidth = paintw
-		- st::historyPollAnswerPadding.left()
-		- st::historyPollAnswerPadding.right();
 	for (const auto &answer : _answers) {
 		const auto height = countAnswerHeight(answer, paintw);
 		if (point.y() >= tshift && point.y() < tshift + height) {
@@ -1348,7 +1375,6 @@ auto Poll::bubbleRoll() const -> BubbleRoll {
 	if (!_wrongAnswerAnimated) {
 		return BubbleRoll();
 	}
-	const auto rotateFull = value * kRotateSegments;
 	const auto progress = [](float64 full) {
 		const auto lower = std::floor(full);
 		const auto shift = (full - lower);
@@ -1399,6 +1425,21 @@ void Poll::clickHandlerPressedChanged(
 	} else if (handler == _sendVotesLink || handler == _showResultsLink) {
 		toggleLinkRipple(pressed);
 	}
+}
+
+void Poll::unloadHeavyPart() {
+	for (auto &recent : _recentVoters) {
+		recent.userpic = nullptr;
+	}
+}
+
+bool Poll::hasHeavyPart() const {
+	for (auto &recent : _recentVoters) {
+		if (recent.userpic) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void Poll::toggleRipple(Answer &answer, bool pressed) {
@@ -1470,7 +1511,7 @@ void Poll::toggleLinkRipple(bool pressed) {
 					radius);
 				p.fillRect(0, 0, linkWidth, radius * 2, Qt::white);
 			};
-			auto mask = isBubbleBottom()
+			auto mask = isRoundedInBubbleBottom()
 				? Ui::RippleAnimation::maskByDrawer(
 					QSize(linkWidth, linkHeight),
 					false,
@@ -1491,6 +1532,10 @@ void Poll::toggleLinkRipple(bool pressed) {
 
 Poll::~Poll() {
 	history()->owner().unregisterPollView(_poll, _parent);
+	if (hasHeavyPart()) {
+		unloadHeavyPart();
+		_parent->checkHeavyPart();
+	}
 }
 
 } // namespace HistoryView

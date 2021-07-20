@@ -11,18 +11,22 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_channel.h"
 #include "data/data_chat.h"
 #include "ui/wrap/vertical_layout.h"
+#include "ui/layers/generic_box.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/checkbox.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/continuous_sliders.h"
 #include "ui/widgets/box_content_divider.h"
+#include "ui/text/text_utilities.h"
 #include "ui/toast/toast.h"
 #include "info/profile/info_profile_icon.h"
 #include "info/profile/info_profile_values.h"
 #include "boxes/peers/edit_participants_box.h"
 #include "boxes/peers/edit_peer_info_box.h"
 #include "window/window_session_controller.h"
+#include "main/main_session.h"
 #include "mainwindow.h"
+#include "apiwrap.h"
 #include "app.h"
 #include "styles/style_layers.h"
 #include "styles/style_boxes.h"
@@ -31,6 +35,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 namespace {
 
 constexpr auto kSlowmodeValues = 7;
+constexpr auto kSuggestGigagroupThreshold = 199000;
 
 int SlowmodeDelayByIndex(int index) {
 	Expects(index >= 0 && index < kSlowmodeValues);
@@ -128,23 +133,26 @@ std::vector<std::pair<ChatAdminRights, QString>> AdminRightLabels(
 
 	if (isGroup) {
 		return {
-			{ Flag::f_change_info, tr::lng_rights_group_info(tr::now) },
-			{ Flag::f_delete_messages, tr::lng_rights_group_delete(tr::now) },
-			{ Flag::f_ban_users, tr::lng_rights_group_ban(tr::now) },
-			{ Flag::f_invite_users, anyoneCanAddMembers
+			{ Flag::ChangeInfo, tr::lng_rights_group_info(tr::now) },
+			{ Flag::DeleteMessages, tr::lng_rights_group_delete(tr::now) },
+			{ Flag::BanUsers, tr::lng_rights_group_ban(tr::now) },
+			{ Flag::InviteUsers, anyoneCanAddMembers
 				? tr::lng_rights_group_invite_link(tr::now)
 				: tr::lng_rights_group_invite(tr::now) },
-			{ Flag::f_pin_messages, tr::lng_rights_group_pin(tr::now) },
-			{ Flag::f_add_admins, tr::lng_rights_add_admins(tr::now) },
+			{ Flag::PinMessages, tr::lng_rights_group_pin(tr::now) },
+			{ Flag::ManageCall, tr::lng_rights_group_manage_calls(tr::now) },
+			{ Flag::Anonymous, tr::lng_rights_group_anonymous(tr::now) },
+			{ Flag::AddAdmins, tr::lng_rights_add_admins(tr::now) },
 		};
 	} else {
 		return {
-			{ Flag::f_change_info, tr::lng_rights_channel_info(tr::now) },
-			{ Flag::f_post_messages, tr::lng_rights_channel_post(tr::now) },
-			{ Flag::f_edit_messages, tr::lng_rights_channel_edit(tr::now) },
-			{ Flag::f_delete_messages, tr::lng_rights_channel_delete(tr::now) },
-			{ Flag::f_invite_users, tr::lng_rights_group_invite(tr::now) },
-			{ Flag::f_add_admins, tr::lng_rights_add_admins(tr::now) }
+			{ Flag::ChangeInfo, tr::lng_rights_channel_info(tr::now) },
+			{ Flag::PostMessages, tr::lng_rights_channel_post(tr::now) },
+			{ Flag::EditMessages, tr::lng_rights_channel_edit(tr::now) },
+			{ Flag::DeleteMessages, tr::lng_rights_channel_delete(tr::now) },
+			{ Flag::InviteUsers, tr::lng_rights_group_invite(tr::now) },
+			{ Flag::ManageCall, tr::lng_rights_group_manage_calls(tr::now) },
+			{ Flag::AddAdmins, tr::lng_rights_add_admins(tr::now) }
 		};
 	}
 }
@@ -155,31 +163,31 @@ auto Dependencies(ChatRestrictions)
 
 	return {
 		// stickers <-> gifs
-		{ Flag::f_send_gifs, Flag::f_send_stickers },
-		{ Flag::f_send_stickers, Flag::f_send_gifs },
+		{ Flag::SendGifs, Flag::SendStickers },
+		{ Flag::SendStickers, Flag::SendGifs },
 
 		// stickers <-> games
-		{ Flag::f_send_games, Flag::f_send_stickers },
-		{ Flag::f_send_stickers, Flag::f_send_games },
+		{ Flag::SendGames, Flag::SendStickers },
+		{ Flag::SendStickers, Flag::SendGames },
 
 		// stickers <-> inline
-		{ Flag::f_send_inline, Flag::f_send_stickers },
-		{ Flag::f_send_stickers, Flag::f_send_inline },
+		{ Flag::SendInline, Flag::SendStickers },
+		{ Flag::SendStickers, Flag::SendInline },
 
-		// stickers -> send_media
-		{ Flag::f_send_stickers, Flag::f_send_messages },
+		// stickers -> send_messages
+		{ Flag::SendStickers, Flag::SendMessages },
 
-		// embed_links -> send_media
-		{ Flag::f_embed_links, Flag::f_send_messages },
+		// embed_links -> send_messages
+		{ Flag::EmbedLinks, Flag::SendMessages },
 
 		// send_media -> send_messages
-		{ Flag::f_send_media, Flag::f_send_messages },
+		{ Flag::SendMedia, Flag::SendMessages },
 
 		// send_polls -> send_messages
-		{ Flag::f_send_polls, Flag::f_send_messages },
+		{ Flag::SendPolls, Flag::SendMessages },
 
 		// send_messages -> view_messages
-		{ Flag::f_send_messages, Flag::f_view_messages },
+		{ Flag::SendMessages, Flag::ViewMessages },
 	};
 }
 
@@ -188,18 +196,18 @@ ChatRestrictions NegateRestrictions(ChatRestrictions value) {
 
 	return (~value) & (Flag(0)
 		// view_messages is always allowed, so it is never in restrictions.
-		//| Flag::f_view_messages
-		| Flag::f_change_info
-		| Flag::f_embed_links
-		| Flag::f_invite_users
-		| Flag::f_pin_messages
-		| Flag::f_send_games
-		| Flag::f_send_gifs
-		| Flag::f_send_inline
-		| Flag::f_send_media
-		| Flag::f_send_messages
-		| Flag::f_send_polls
-		| Flag::f_send_stickers);
+		//| Flag::ViewMessages
+		| Flag::ChangeInfo
+		| Flag::EmbedLinks
+		| Flag::InviteUsers
+		| Flag::PinMessages
+		| Flag::SendGames
+		| Flag::SendGifs
+		| Flag::SendInline
+		| Flag::SendMedia
+		| Flag::SendMessages
+		| Flag::SendPolls
+		| Flag::SendStickers);
 }
 
 auto Dependencies(ChatAdminRights)
@@ -228,15 +236,15 @@ ChatRestrictions DisabledByAdminRights(not_null<PeerData*> peer) {
 		Unexpected("User in DisabledByAdminRights.");
 	}();
 	return Flag(0)
-		| ((adminRights & Admin::f_pin_messages)
+		| ((adminRights & Admin::PinMessages)
 			? Flag(0)
-			: Flag::f_pin_messages)
-		| ((adminRights & Admin::f_invite_users)
+			: Flag::PinMessages)
+		| ((adminRights & Admin::InviteUsers)
 			? Flag(0)
-			: Flag::f_invite_users)
-		| ((adminRights & Admin::f_change_info)
+			: Flag::InviteUsers)
+		| ((adminRights & Admin::ChangeInfo)
 			? Flag(0)
-			: Flag::f_change_info);
+			: Flag::ChangeInfo);
 }
 
 } // namespace
@@ -254,21 +262,21 @@ ChatAdminRights DisabledByDefaultRestrictions(not_null<PeerData*> peer) {
 		Unexpected("User in DisabledByDefaultRestrictions.");
 	}());
 	return Flag(0)
-		| ((restrictions & Restriction::f_pin_messages)
+		| ((restrictions & Restriction::PinMessages)
 			? Flag(0)
-			: Flag::f_pin_messages)
+			: Flag::PinMessages)
 		//
 		// We allow to edit 'invite_users' admin right no matter what
 		// is chosen in default permissions for 'invite_users', because
 		// if everyone can 'invite_users' it handles invite link for admins.
 		//
-		//| ((restrictions & Restriction::f_invite_users)
+		//| ((restrictions & Restriction::InviteUsers)
 		//	? Flag(0)
-		//	: Flag::f_invite_users)
+		//	: Flag::InviteUsers)
 		//
-		| ((restrictions & Restriction::f_change_info)
+		| ((restrictions & Restriction::ChangeInfo)
 			? Flag(0)
-			: Flag::f_change_info);
+			: Flag::ChangeInfo);
 }
 
 ChatRestrictions FixDependentRestrictions(ChatRestrictions restrictions) {
@@ -276,15 +284,15 @@ ChatRestrictions FixDependentRestrictions(ChatRestrictions restrictions) {
 
 	// Fix iOS bug of saving send_inline like embed_links.
 	// We copy send_stickers to send_inline.
-	if (restrictions & ChatRestriction::f_send_stickers) {
-		restrictions |= ChatRestriction::f_send_inline;
+	if (restrictions & ChatRestriction::SendStickers) {
+		restrictions |= ChatRestriction::SendInline;
 	} else {
-		restrictions &= ~ChatRestriction::f_send_inline;
+		restrictions &= ~ChatRestriction::SendInline;
 	}
 
 	// Apply the strictest.
 	const auto fixOne = [&] {
-		for (const auto [first, second] : dependencies) {
+		for (const auto &[first, second] : dependencies) {
 			if ((restrictions & second) && !(restrictions & first)) {
 				restrictions |= first;
 				return true;
@@ -297,18 +305,84 @@ ChatRestrictions FixDependentRestrictions(ChatRestrictions restrictions) {
 	return restrictions;
 }
 
-ChatAdminRights FullAdminRights(bool isGroup) {
+ChatAdminRights AdminRightsForOwnershipTransfer(bool isGroup) {
 	auto result = ChatAdminRights();
 	for (const auto &[flag, label] : AdminRightLabels(isGroup, true)) {
-		result |= flag;
+		if (!(flag & ChatAdminRight::Anonymous)) {
+			result |= flag;
+		}
 	}
 	return result;
 }
 
+Fn<void()> AboutGigagroupCallback(not_null<ChannelData*> channel) {
+	const auto converting = std::make_shared<bool>();
+	const auto convertSure = [=] {
+		if (*converting) {
+			return;
+		}
+		*converting = true;
+		channel->session().api().request(MTPchannels_ConvertToGigagroup(
+			channel->inputChannel
+		)).done([=](const MTPUpdates &result) {
+			channel->session().api().applyUpdates(result);
+			Ui::hideSettingsAndLayer();
+			Ui::Toast::Show(tr::lng_gigagroup_done(tr::now));
+		}).fail([=](const MTP::Error &error) {
+			*converting = false;
+		}).send();
+	};
+	const auto convertWarn = [=] {
+		if (*converting) {
+			return;
+		}
+		Ui::show(Box([=](not_null<Ui::GenericBox*> box) {
+			box->setTitle(tr::lng_gigagroup_warning_title());
+			box->addRow(
+				object_ptr<Ui::FlatLabel>(
+					box,
+					tr::lng_gigagroup_warning(
+					) | Ui::Text::ToRichLangValue(),
+					st::infoAboutGigagroup));
+			box->addButton(tr::lng_gigagroup_convert_sure(), convertSure);
+			box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+		}), Ui::LayerOption::KeepOther);
+	};
+	return [=] {
+		if (*converting) {
+			return;
+		}
+		Ui::show(Box([=](not_null<Ui::GenericBox*> box) {
+			box->setTitle(tr::lng_gigagroup_convert_title());
+			const auto addFeature = [&](rpl::producer<QString> text) {
+				using namespace rpl::mappers;
+				const auto prefix = QString::fromUtf8("\xE2\x80\xA2 ");
+				box->addRow(
+					object_ptr<Ui::FlatLabel>(
+						box,
+						std::move(text) | rpl::map(prefix + _1),
+						st::infoAboutGigagroup),
+					style::margins(
+						st::boxRowPadding.left(),
+						st::boxLittleSkip,
+						st::boxRowPadding.right(),
+						st::boxLittleSkip));
+			};
+			addFeature(tr::lng_gigagroup_convert_feature1());
+			addFeature(tr::lng_gigagroup_convert_feature2());
+			addFeature(tr::lng_gigagroup_convert_feature3());
+			box->addButton(tr::lng_gigagroup_convert_sure(), convertWarn);
+			box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+		}), Ui::LayerOption::KeepOther);
+	};
+}
+
 EditPeerPermissionsBox::EditPeerPermissionsBox(
 	QWidget*,
+	not_null<Window::SessionNavigation*> navigation,
 	not_null<PeerData*> peer)
-: _peer(peer->migrateToOrMe()) {
+: _navigation(navigation)
+, _peer(peer->migrateToOrMe()) {
 }
 
 auto EditPeerPermissionsBox::saveEvents() const -> rpl::producer<Result> {
@@ -333,7 +407,7 @@ void EditPeerPermissionsBox::prepare() {
 		} else if (const auto channel = _peer->asChannel()) {
 			return channel->defaultRestrictions()
 				| (channel->isPublic()
-					? (Flag::f_change_info | Flag::f_pin_messages)
+					? (Flag::ChangeInfo | Flag::PinMessages)
 					: Flags(0))
 				| disabledByAdminRights;
 		}
@@ -347,7 +421,7 @@ void EditPeerPermissionsBox::prepare() {
 		if (const auto channel = _peer->asChannel()) {
 			if (channel->isPublic()) {
 				result.emplace(
-					Flag::f_change_info | Flag::f_pin_messages,
+					Flag::ChangeInfo | Flag::PinMessages,
 					tr::lng_rights_permission_unavailable(tr::now));
 			}
 		}
@@ -363,6 +437,14 @@ void EditPeerPermissionsBox::prepare() {
 	inner->add(std::move(checkboxes));
 
 	const auto getSlowmodeSeconds = addSlowmodeSlider(inner);
+
+	if (const auto channel = _peer->asChannel()) {
+		if (channel->amCreator()
+			&& channel->membersCount() >= kSuggestGigagroupThreshold) {
+			addSuggestGigagroup(inner);
+		}
+	}
+
 	addBannedButtons(inner);
 
 	_value = [=, rights = getRestrictions]() -> Result {
@@ -451,7 +533,7 @@ Fn<int()> EditPeerPermissionsBox::addSlowmodeSlider(
 		return has ? aboutInterval : about;
 	});
 
-	const auto about = container->add(
+	container->add(
 		object_ptr<Ui::DividerLabel>(
 			container,
 			object_ptr<Ui::FlatLabel>(
@@ -514,6 +596,32 @@ void EditPeerPermissionsBox::addSlowmodeLabels(
 	}
 }
 
+void EditPeerPermissionsBox::addSuggestGigagroup(
+		not_null<Ui::VerticalLayout*> container) {
+	container->add(
+		object_ptr<Ui::FlatLabel>(
+			container,
+			tr::lng_rights_gigagroup_title(),
+			st::rightsHeaderLabel),
+		st::rightsHeaderMargin);
+	container->add(EditPeerInfoBox::CreateButton(
+		container,
+		tr::lng_rights_gigagroup_convert(),
+		rpl::single(QString()),
+		AboutGigagroupCallback(_peer->asChannel()),
+		st::peerPermissionsButton));
+
+	container->add(
+		object_ptr<Ui::DividerLabel>(
+			container,
+			object_ptr<Ui::FlatLabel>(
+				container,
+				tr::lng_rights_gigagroup_about(),
+				st::boxDividerLabel),
+			st::proxyAboutPadding),
+		style::margins(0, st::infoProfileSkip, 0, st::infoProfileSkip));
+}
+
 void EditPeerPermissionsBox::addBannedButtons(
 		not_null<Ui::VerticalLayout*> container) {
 	if (const auto chat = _peer->asChat()) {
@@ -522,8 +630,6 @@ void EditPeerPermissionsBox::addBannedButtons(
 		}
 	}
 	const auto channel = _peer->asChannel();
-
-	const auto navigation = App::wnd()->sessionController();
 	container->add(EditPeerInfoBox::CreateButton(
 		container,
 		tr::lng_manage_peer_exceptions(),
@@ -532,7 +638,7 @@ void EditPeerPermissionsBox::addBannedButtons(
 			: rpl::single(0)) | ToPositiveNumberString(),
 		[=] {
 			ParticipantsBoxController::Start(
-				navigation,
+				_navigation,
 				_peer,
 				ParticipantsBoxController::Role::Restricted);
 		},
@@ -545,7 +651,7 @@ void EditPeerPermissionsBox::addBannedButtons(
 			| ToPositiveNumberString(),
 			[=] {
 				ParticipantsBoxController::Start(
-					navigation,
+					_navigation,
 					_peer,
 					ParticipantsBoxController::Role::Kicked);
 			},
@@ -647,11 +753,11 @@ EditFlagsControl<Flags> CreateEditFlags(
 	};
 }
 
-EditFlagsControl<MTPDchatBannedRights::Flags> CreateEditRestrictions(
+EditFlagsControl<ChatRestrictions> CreateEditRestrictions(
 		QWidget *parent,
 		rpl::producer<QString> header,
-		MTPDchatBannedRights::Flags restrictions,
-		std::map<MTPDchatBannedRights::Flags, QString> disabledMessages) {
+		ChatRestrictions restrictions,
+		std::map<ChatRestrictions, QString> disabledMessages) {
 	auto result = CreateEditFlags(
 		parent,
 		header,
@@ -668,11 +774,11 @@ EditFlagsControl<MTPDchatBannedRights::Flags> CreateEditRestrictions(
 	return result;
 }
 
-EditFlagsControl<MTPDchatAdminRights::Flags> CreateEditAdminRights(
+EditFlagsControl<ChatAdminRights> CreateEditAdminRights(
 		QWidget *parent,
-	rpl::producer<QString> header,
-		MTPDchatAdminRights::Flags rights,
-		std::map<MTPDchatAdminRights::Flags, QString> disabledMessages,
+		rpl::producer<QString> header,
+		ChatAdminRights rights,
+		std::map<ChatAdminRights, QString> disabledMessages,
 		bool isGroup,
 		bool anyoneCanAddMembers) {
 	return CreateEditFlags(

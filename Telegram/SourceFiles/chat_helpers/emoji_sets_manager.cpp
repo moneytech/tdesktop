@@ -15,10 +15,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/effects/animations.h"
 #include "ui/effects/radial_animation.h"
 #include "ui/emoji_config.h"
+#include "ui/ui_utility.h"
 #include "core/application.h"
 #include "main/main_account.h"
 #include "mainwidget.h"
-#include "app.h"
 #include "storage/storage_cloud_blob.h"
 #include "styles/style_layers.h"
 #include "styles/style_boxes.h"
@@ -40,18 +40,18 @@ inline auto PreviewPath(int i) {
 
 const auto kSets = {
 	Set{ {0,   0,         0, "Mac"},       PreviewPath(0) },
-	Set{ {1, 246, 7'336'383, "Android"},   PreviewPath(1) },
-	Set{ {2, 206, 5'038'738, "Twemoji"},   PreviewPath(2) },
-	Set{ {3, 238, 6'992'260, "JoyPixels"}, PreviewPath(3) },
+	Set{ {1, 713, 7'313'166, "Android"},   PreviewPath(1) },
+	Set{ {2, 714, 4'690'333, "Twemoji"},   PreviewPath(2) },
+	Set{ {3, 716, 5'968'021, "JoyPixels"}, PreviewPath(3) },
 };
 
 using Loading = MTP::DedicatedLoader::Progress;
 using SetState = BlobState;
 
-class Loader : public BlobLoader {
+class Loader final : public BlobLoader {
 public:
 	Loader(
-		QObject *parent,
+		not_null<Main::Session*> session,
 		int id,
 		MTP::DedicatedLoader::Location location,
 		const QString &folder,
@@ -60,20 +60,25 @@ public:
 	void destroy() override;
 	void unpack(const QString &path) override;
 
+private:
+	void fail() override;
+
 };
 
 class Inner : public Ui::RpWidget {
 public:
-	Inner(QWidget *parent);
+	Inner(QWidget *parent, not_null<Main::Session*> session);
 
 private:
 	void setupContent();
+
+	const not_null<Main::Session*> _session;
 
 };
 
 class Row : public Ui::RippleButton {
 public:
-	Row(QWidget *widget, const Set &set);
+	Row(QWidget *widget, not_null<Main::Session*> session, const Set &set);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -95,6 +100,7 @@ private:
 	void radialAnimationCallback(crl::time now);
 	void updateLoadingToFinished();
 
+	const not_null<Main::Session*> _session;
 	int _id = 0;
 	bool _switching = false;
 	rpl::variable<SetState> _state;
@@ -155,12 +161,14 @@ bool UnpackSet(const QString &path, const QString &folder) {
 	return UnpackBlob(path, folder, GoodSetPartName);
 }
 
+
 Loader::Loader(
-	QObject *parent,
+	not_null<Main::Session*> session,
 	int id,
 	MTP::DedicatedLoader::Location location,
 	const QString &folder,
-	int size) : BlobLoader(parent, id, location, folder, size) {
+	int size)
+: BlobLoader(nullptr, session, id, location, folder, size) {
 }
 
 void Loader::unpack(const QString &path) {
@@ -190,7 +198,14 @@ void Loader::destroy() {
 	SetGlobalLoader(nullptr);
 }
 
-Inner::Inner(QWidget *parent) : RpWidget(parent) {
+void Loader::fail() {
+	ClearNeedSwitchToId();
+	BlobLoader::fail();
+}
+
+Inner::Inner(QWidget *parent, not_null<Main::Session*> session)
+: RpWidget(parent)
+, _session(session) {
 	setupContent();
 }
 
@@ -198,15 +213,16 @@ void Inner::setupContent() {
 	const auto content = Ui::CreateChild<Ui::VerticalLayout>(this);
 
 	for (const auto &set : kSets) {
-		content->add(object_ptr<Row>(content, set));
+		content->add(object_ptr<Row>(content, _session, set));
 	}
 
 	content->resizeToWidth(st::boxWidth);
 	Ui::ResizeFitChild(this, content);
 }
 
-Row::Row(QWidget *widget, const Set &set)
-: RippleButton(widget, st::contactsRipple)
+Row::Row(QWidget *widget, not_null<Main::Session*> session, const Set &set)
+: RippleButton(widget, st::defaultRippleAnimation)
+, _session(session)
 , _id(set.id)
 , _state(Available{ set.size }) {
 	setupContent(set);
@@ -230,7 +246,7 @@ void Row::paintPreview(Painter &p) const {
 	const auto y = st::manageEmojiPreviewPadding.top();
 	const auto width = st::manageEmojiPreviewWidth;
 	const auto height = st::manageEmojiPreviewWidth;
-	auto &&preview = ranges::view::zip(_preview, ranges::view::ints(0, int(_preview.size())));
+	auto &&preview = ranges::views::zip(_preview, ranges::views::ints(0, int(_preview.size())));
 	for (const auto &[pixmap, index] : preview) {
 		const auto row = (index / 2);
 		const auto column = (index % 2);
@@ -247,8 +263,8 @@ void Row::paintRadio(Painter &p) {
 	const auto loading = _loading
 		? _loading->computeState()
 		: Ui::RadialState{ 0., 0, FullArcLength };
-	const auto isToggledSet = _state.current().is<Active>();
-	const auto isActiveSet = isToggledSet || _state.current().is<Loading>();
+	const auto isToggledSet = v::is<Active>(_state.current());
+	const auto isActiveSet = isToggledSet || v::is<Loading>(_state.current());
 	const auto toggled = _toggled.value(isToggledSet ? 1. : 0.);
 	const auto active = _active.value(isActiveSet ? 1. : 0.);
 	const auto _st = &st::defaultRadio;
@@ -329,7 +345,7 @@ void Row::onStateChanged(State was, StateChangeSource source) {
 }
 
 void Row::updateStatusColorOverride() {
-	const auto isToggledSet = _state.current().is<Active>();
+	const auto isToggledSet = v::is<Active>(_state.current());
 	const auto toggled = _toggled.value(isToggledSet ? 1. : 0.);
 	const auto over = showOver();
 	if (toggled == 0. && !over) {
@@ -357,7 +373,8 @@ void Row::setupContent(const Set &set) {
 			});
 	}) | rpl::flatten_latest(
 	) | rpl::filter([=](const SetState &state) {
-		return !_state.current().is<Failed>() || !state.is<Available>();
+		return !v::is<Failed>(_state.current())
+			|| !v::is<Available>(state);
 	});
 
 	setupLabels(set);
@@ -374,9 +391,10 @@ void Row::setupHandler() {
 	clicks(
 	) | rpl::filter([=] {
 		const auto &state = _state.current();
-		return !_switching && (state.is<Ready>() || state.is<Available>());
+		return !_switching && (v::is<Ready>(state)
+			|| v::is<Available>(state));
 	}) | rpl::start_with_next([=] {
-		if (_state.current().is<Available>()) {
+		if (v::is<Available>(_state.current())) {
 			load();
 			return;
 		}
@@ -393,7 +411,7 @@ void Row::setupHandler() {
 
 	_state.value(
 	) | rpl::map([=](const SetState &state) {
-		return state.is<Ready>() || state.is<Available>();
+		return v::is<Ready>(state) || v::is<Available>(state);
 	}) | rpl::start_with_next([=](bool active) {
 		setDisabled(!active);
 		setPointerCursor(active);
@@ -401,12 +419,7 @@ void Row::setupHandler() {
 }
 
 void Row::load() {
-	SetGlobalLoader(base::make_unique_q<Loader>(
-		App::main(),
-		_id,
-		GetDownloadLocation(_id),
-		internal::SetDataPath(_id),
-		GetDownloadSize(_id)));
+	LoadAndSwitchTo(_session, _id);
 }
 
 void Row::setupLabels(const Set &set) {
@@ -441,9 +454,9 @@ void Row::setupPreview(const Set &set) {
 	const auto size = st::manageEmojiPreview * cIntRetinaFactor();
 	const auto original = QImage(set.previewPath);
 	const auto full = original.height();
-	auto &&preview = ranges::view::zip(_preview, ranges::view::ints(0, int(_preview.size())));
+	auto &&preview = ranges::views::zip(_preview, ranges::views::ints(0, int(_preview.size())));
 	for (auto &&[pixmap, index] : preview) {
-		pixmap = App::pixmapFromImageInPlace(original.copy(
+		pixmap = Ui::PixmapFromImage(original.copy(
 			{ full * index, 0, full, full }
 		).scaledToWidth(size, Qt::SmoothTransformation));
 		pixmap.setDevicePixelRatio(cRetinaFactor());
@@ -452,7 +465,7 @@ void Row::setupPreview(const Set &set) {
 
 void Row::updateLoadingToFinished() {
 	_loading->update(
-		_state.current().is<Failed>() ? 0. : 1.,
+		v::is<Failed>(_state.current()) ? 0. : 1.,
 		true,
 		crl::now());
 }
@@ -460,7 +473,7 @@ void Row::updateLoadingToFinished() {
 void Row::radialAnimationCallback(crl::time now) {
 	const auto updated = [&] {
 		const auto state = _state.current();
-		if (const auto loading = base::get_if<Loading>(&state)) {
+		if (const auto loading = std::get_if<Loading>(&state)) {
 			return _loading->update(CountProgress(loading), false, now);
 		} else {
 			updateLoadingToFinished();
@@ -482,7 +495,7 @@ void Row::setupAnimation() {
 
 	_state.value(
 	) | rpl::map(
-		_1 == Active()
+		_1 == SetState{ Active() }
 	) | rpl::distinct_until_changed(
 	) | rpl::start_with_next([=](bool toggled) {
 		_toggled.start(
@@ -494,7 +507,7 @@ void Row::setupAnimation() {
 
 	_state.value(
 	) | rpl::map([](const SetState &state) {
-		return state.is<Loading>() || state.is<Active>();
+		return v::is<Loading>(state) || v::is<Active>(state);
 	}) | rpl::distinct_until_changed(
 	) | rpl::start_with_next([=](bool active) {
 		_active.start(
@@ -506,7 +519,7 @@ void Row::setupAnimation() {
 
 	_state.value(
 	) | rpl::map([](const SetState &state) {
-		return base::get_if<Loading>(&state);
+		return std::get_if<Loading>(&state);
 	}) | rpl::distinct_until_changed(
 	) | rpl::start_with_next([=](const Loading *loading) {
 		if (loading && !_loading) {
@@ -525,17 +538,31 @@ void Row::setupAnimation() {
 
 } // namespace
 
-ManageSetsBox::ManageSetsBox(QWidget*) {
+ManageSetsBox::ManageSetsBox(QWidget*, not_null<Main::Session*> session)
+: _session(session) {
 }
 
 void ManageSetsBox::prepare() {
-	const auto inner = setInnerWidget(object_ptr<Inner>(this));
+	const auto inner = setInnerWidget(object_ptr<Inner>(this, _session));
 
 	setTitle(tr::lng_emoji_manage_sets());
 
 	addButton(tr::lng_close(), [=] { closeBox(); });
 
 	setDimensionsToContent(st::boxWidth, inner);
+}
+
+void LoadAndSwitchTo(not_null<Main::Session*> session, int id) {
+	if (!ranges::contains(kSets, id, &Set::id)) {
+		ClearNeedSwitchToId();
+		return;
+	}
+	SetGlobalLoader(base::make_unique_q<Loader>(
+		session,
+		id,
+		GetDownloadLocation(id),
+		internal::SetDataPath(id),
+		GetDownloadSize(id)));
 }
 
 } // namespace Emoji

@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "mtproto/mtproto_concurrent_sender.h"
+#include "data/data_peer_id.h"
 
 namespace Export {
 namespace Data {
@@ -35,9 +36,9 @@ struct Settings;
 
 class ApiWrap {
 public:
-	explicit ApiWrap(Fn<void(FnMut<void()>)> runner);
+	ApiWrap(QPointer<MTP::Instance> weak, Fn<void(FnMut<void()>)> runner);
 
-	rpl::producer<RPCError> errors() const;
+	rpl::producer<MTP::Error> errors() const;
 	rpl::producer<Output::Result> ioErrors() const;
 
 	struct StartInfo {
@@ -60,6 +61,7 @@ public:
 		FnMut<void(Data::File&&)> done);
 
 	struct DownloadProgress {
+		uint64 randomId = 0;
 		QString path;
 		int itemIndex = 0;
 		int ready = 0;
@@ -83,6 +85,7 @@ public:
 		FnMut<void()> done);
 
 	void finishExport(FnMut<void()> done);
+	void skipFile(uint64 randomId);
 	void cancelExportFast();
 
 	~ApiWrap();
@@ -126,6 +129,8 @@ private:
 	void appendDialogsSlice(Data::DialogsInfo &&info);
 	void finishDialogsList();
 	void requestSinglePeerDialog();
+	mtpRequestId requestSinglePeerMigrated(const Data::DialogInfo &info);
+	void appendSinglePeerDialogs(Data::DialogsInfo &&info);
 
 	void requestLeftChannelsIfNeeded();
 	void requestLeftChannelsList(
@@ -201,12 +206,13 @@ private:
 		const Data::FileLocation &location,
 		int offset);
 
-	void error(RPCError &&error);
+	void error(const MTP::Error &error);
 	void error(const QString &text);
 	void ioError(const Output::Result &result);
 
 	MTP::ConcurrentSender _mtp;
 	std::optional<uint64> _takeoutId;
+	std::optional<UserId> _selfId;
 	Output::Stats *_stats = nullptr;
 
 	std::unique_ptr<Settings> _settings;
@@ -223,7 +229,7 @@ private:
 	std::unique_ptr<ChatProcess> _chatProcess;
 	QVector<MTPMessageRange> _splits;
 
-	rpl::event_stream<RPCError> _errors;
+	rpl::event_stream<MTP::Error> _errors;
 	rpl::event_stream<Output::Result> _ioErrors;
 
 };

@@ -20,7 +20,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "base/unixtime.h"
 #include "base/call_delayed.h"
+#include "base/qt_adapters.h"
 #include "main/main_session.h"
+#include "main/main_session_settings.h"
 #include "apiwrap.h"
 #include "styles/style_chat_helpers.h"
 #include "styles/style_window.h"
@@ -295,16 +297,14 @@ AdminLog::OwnedItem GenerateContactItem(
 	using Flag = MTPDmessage::Flag;
 	const auto id = ServerMaxMsgId + (ServerMaxMsgId / 2) + 1;
 	const auto flags = Flag::f_from_id | Flag::f_media | Flag::f_out;
-	const auto replyTo = 0;
-	const auto viaBotId = 0;
 	const auto message = MTP_message(
 		MTP_flags(flags),
 		MTP_int(id),
-		MTP_int(history->session().userId()),
+		peerToMTP(history->session().userPeerId()),
 		peerToMTP(history->peer->id),
 		MTPMessageFwdHeader(),
-		MTP_int(viaBotId),
-		MTP_int(replyTo),
+		MTPint(), // via_bot_id
+		MTPMessageReplyHeader(),
 		MTP_int(base::unixtime::now()),
 		MTP_string(),
 		MTP_messageMediaContact(
@@ -315,12 +315,15 @@ AdminLog::OwnedItem GenerateContactItem(
 			MTP_int(0)),
 		MTPReplyMarkup(),
 		MTPVector<MTPMessageEntity>(),
-		MTP_int(0),
-		MTP_int(0),
+		MTPint(), // views
+		MTPint(), // forwards
+		MTPMessageReplies(),
+		MTPint(), // edit_date
 		MTP_string(),
 		MTP_long(0),
 		//MTPMessageReactions(),
-		MTPVector<MTPRestrictionReason>());
+		MTPVector<MTPRestrictionReason>(),
+		MTPint()); // ttl_period
 	const auto item = history->makeMessage(
 		message.c_message(),
 		MTPDmessage_ClientFlag::f_fake_history_item);
@@ -404,9 +407,7 @@ void Autocomplete::setupContent() {
 			rpl::single(qsl("Search for templates"))), // #TODO hard_lang
 		st::autocompleteSearchPadding);
 	const auto input = inputWrap->entity();
-	const auto scroll = Ui::CreateChild<Ui::ScrollArea>(
-		this,
-		st::mentionScroll);
+	const auto scroll = Ui::CreateChild<Ui::ScrollArea>(this);
 
 	const auto inner = scroll->setOwnedWidget(object_ptr<Inner>(scroll));
 
@@ -479,11 +480,10 @@ void Autocomplete::submitValue(const QString &value) {
 	if (value.startsWith(prefix)) {
 		const auto line = value.indexOf('\n');
 		const auto text = (line > 0) ? value.mid(line + 1) : QString();
-		const auto commented = !text.isEmpty();
 		const auto contact = value.mid(
 			prefix.size(),
 			(line > 0) ? (line - prefix.size()) : -1);
-		const auto parts = contact.split(' ', QString::SkipEmptyParts);
+		const auto parts = contact.split(' ', base::QStringSkipEmptyParts);
 		if (parts.size() > 1) {
 			const auto phone = parts[0];
 			const auto firstName = parts[1];
@@ -503,10 +503,12 @@ void Autocomplete::submitValue(const QString &value) {
 
 ConfirmContactBox::ConfirmContactBox(
 	QWidget*,
+	not_null<Window::SessionController*> controller,
 	not_null<History*> history,
 	const Contact &data,
 	Fn<void(Qt::KeyboardModifiers)> submit)
-: _comment(GenerateCommentItem(this, history, data))
+: SimpleElementDelegate(controller, [=] { update(); })
+, _comment(GenerateCommentItem(this, history, data))
 , _contact(GenerateContactItem(this, history, data))
 , _submit(submit) {
 }
@@ -524,7 +526,7 @@ void ConfirmContactBox::prepare() {
 	_contact->initDimensions();
 	accumulate_max(maxWidth, _contact->maxWidth());
 	maxWidth += st::boxPadding.left() + st::boxPadding.right();
-	const auto width = snap(maxWidth, st::boxWidth, st::boxWideWidth);
+	const auto width = std::clamp(maxWidth, st::boxWidth, st::boxWideWidth);
 	const auto available = width
 		- st::boxPadding.left()
 		- st::boxPadding.right();

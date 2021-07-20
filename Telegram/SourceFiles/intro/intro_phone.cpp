@@ -16,7 +16,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/wrap/fade_wrap.h"
 #include "ui/special_fields.h"
 #include "main/main_account.h"
+#include "main/main_domain.h"
 #include "main/main_app_config.h"
+#include "main/main_session.h"
+#include "data/data_user.h"
 #include "boxes/confirm_phone_box.h"
 #include "boxes/confirm_box.h"
 #include "core/application.h"
@@ -43,23 +46,38 @@ PhoneWidget::PhoneWidget(
 , _code(this, st::introCountryCode)
 , _phone(this, st::introPhone)
 , _checkRequestTimer([=] { checkRequest(); }) {
-	connect(_phone, SIGNAL(voidBackspace(QKeyEvent*)), _code, SLOT(startErasing(QKeyEvent*)));
-	connect(_country, SIGNAL(codeChanged(const QString &)), _code, SLOT(codeSelected(const QString &)));
-	connect(_code, SIGNAL(codeChanged(const QString &)), _country, SLOT(onChooseCode(const QString &)));
-	connect(_code, SIGNAL(codeChanged(const QString &)), _phone, SLOT(onChooseCode(const QString &)));
-	connect(_country, SIGNAL(codeChanged(const QString &)), _phone, SLOT(onChooseCode(const QString &)));
-	connect(_code, SIGNAL(addedToNumber(const QString &)), _phone, SLOT(addedToNumber(const QString &)));
+	_phone->frontBackspaceEvent(
+	) | rpl::start_with_next([=](not_null<QKeyEvent*> e) {
+		_code->startErasing(e);
+	}, _code->lifetime());
+
+	connect(_country, &CountryInput::codeChanged, [=](const QString &code) {
+		_code->codeSelected(code);
+		_phone->chooseCode(code);
+	});
+	_code->codeChanged(
+	) | rpl::start_with_next([=](const QString &code) {
+		_country->onChooseCode(code);
+		_phone->chooseCode(code);
+	}, _code->lifetime());
+	_code->addedToNumber(
+	) | rpl::start_with_next([=](const QString &added) {
+		_phone->addedToNumber(added);
+	}, _phone->lifetime());
 	connect(_phone, &Ui::PhonePartInput::changed, [=] { phoneChanged(); });
 	connect(_code, &Ui::CountryCodeInput::changed, [=] { phoneChanged(); });
 
 	setTitleText(tr::lng_phone_title());
 	setDescriptionText(tr::lng_phone_desc());
-	subscribe(getData()->updated, [=] { countryChanged(); });
+	getData()->updated.events(
+	) | rpl::start_with_next([=] {
+		countryChanged();
+	}, lifetime());
 	setErrorCentered(true);
 	setupQrLogin();
 
-	if (!_country->onChooseCountry(getData()->country)) {
-		_country->onChooseCountry(qsl("US"));
+	if (!_country->chooseCountry(getData()->country)) {
+		_country->chooseCountry(qsl("US"));
 	}
 	_changed = false;
 }
@@ -94,7 +112,9 @@ void PhoneWidget::setupQrLogin() {
 				contentTop() + st::introQrLoginLinkTop);
 		}, qrLogin->lifetime());
 
-		qrLogin->setClickedCallback([=] { goReplace<QrWidget>(); });
+		qrLogin->setClickedCallback([=] {
+			goReplace<QrWidget>(Animate::Forward);
+		});
 	}, lifetime());
 }
 
@@ -127,7 +147,9 @@ void PhoneWidget::phoneChanged() {
 }
 
 void PhoneWidget::submit() {
-	if (_sentRequest || isHidden()) return;
+	if (_sentRequest || isHidden()) {
+		return;
+	}
 
 	const auto phone = fullNumber();
 	if (!AllowPhoneAttempt(phone)) {
@@ -136,20 +158,42 @@ void PhoneWidget::submit() {
 		return;
 	}
 
+	cancelNearestDcRequest();
+
+	// Check if such account is authorized already.
+	const auto digitsOnly = [](QString value) {
+		return value.replace(QRegularExpression("[^0-9]"), QString());
+	};
+	const auto phoneDigits = digitsOnly(phone);
+	for (const auto &[index, existing] : Core::App().domain().accounts()) {
+		const auto raw = existing.get();
+		if (const auto session = raw->maybeSession()) {
+			if (raw->mtp().environment() == account().mtp().environment()
+				&& digitsOnly(session->user()->phone()) == phoneDigits) {
+				crl::on_main(raw, [=] {
+					Core::App().domain().activate(raw);
+				});
+				return;
+			}
+		}
+	}
+
 	hidePhoneError();
 
 	_checkRequestTimer.callEach(1000);
 
 	_sentPhone = phone;
-	account().mtp()->setUserPhone(_sentPhone);
-	_sentRequest = MTP::send(
-		MTPauth_SendCode(
-			MTP_string(_sentPhone),
-			MTP_int(ApiId),
-			MTP_string(ApiHash),
-			MTP_codeSettings(MTP_flags(0))),
-		rpcDone(&PhoneWidget::phoneSubmitDone),
-		rpcFail(&PhoneWidget::phoneSubmitFail));
+	api().instance().setUserPhone(_sentPhone);
+	_sentRequest = api().request(MTPauth_SendCode(
+		MTP_string(_sentPhone),
+		MTP_int(ApiId),
+		MTP_string(ApiHash),
+		MTP_codeSettings(MTP_flags(0))
+	)).done([=](const MTPauth_SentCode &result) {
+		phoneSubmitDone(result);
+	}).fail([=](const MTP::Error &error) {
+		phoneSubmitFail(error);
+	}).handleFloodErrors().send();
 }
 
 void PhoneWidget::stopCheck() {
@@ -157,11 +201,11 @@ void PhoneWidget::stopCheck() {
 }
 
 void PhoneWidget::checkRequest() {
-	auto status = MTP::state(_sentRequest);
+	auto status = api().instance().state(_sentRequest);
 	if (status < 0) {
 		auto leftms = -status;
 		if (leftms >= 1000) {
-			MTP::cancel(base::take(_sentRequest));
+			api().request(base::take(_sentRequest)).cancel();
 		}
 	}
 	if (!_sentRequest && status == MTP::RequestSent) {
@@ -193,34 +237,28 @@ void PhoneWidget::phoneSubmitDone(const MTPauth_SentCode &result) {
 	goNext<CodeWidget>();
 }
 
-bool PhoneWidget::phoneSubmitFail(const RPCError &error) {
-	if (MTP::isFloodError(error)) {
+void PhoneWidget::phoneSubmitFail(const MTP::Error &error) {
+	if (MTP::IsFloodError(error)) {
 		stopCheck();
 		_sentRequest = 0;
 		showPhoneError(tr::lng_flood_error());
-		return true;
+		return;
 	}
-	if (MTP::isDefaultHandledError(error)) return false;
 
 	stopCheck();
 	_sentRequest = 0;
 	auto &err = error.type();
 	if (err == qstr("PHONE_NUMBER_FLOOD")) {
 		Ui::show(Box<InformBox>(tr::lng_error_phone_flood(tr::now)));
-		return true;
 	} else if (err == qstr("PHONE_NUMBER_INVALID")) { // show error
 		showPhoneError(tr::lng_bad_phone());
-		return true;
 	} else if (err == qstr("PHONE_NUMBER_BANNED")) {
 		ShowPhoneBannedError(_sentPhone);
-		return true;
-	}
-	if (Logs::DebugEnabled()) { // internal server error
+	} else if (Logs::DebugEnabled()) { // internal server error
 		showPhoneError(rpl::single(err + ": " + error.description()));
 	} else {
 		showPhoneError(rpl::single(Lang::Hard::ServerError()));
 	}
-	return false;
 }
 
 QString PhoneWidget::fullNumber() const {
@@ -228,7 +266,7 @@ QString PhoneWidget::fullNumber() const {
 }
 
 void PhoneWidget::selectCountry(const QString &country) {
-	_country->onChooseCountry(country);
+	_country->chooseCountry(country);
 }
 
 void PhoneWidget::setInnerFocus() {
@@ -244,13 +282,13 @@ void PhoneWidget::activate() {
 void PhoneWidget::finished() {
 	Step::finished();
 	_checkRequestTimer.cancel();
-	rpcInvalidate();
+	apiClear();
 
 	cancelled();
 }
 
 void PhoneWidget::cancelled() {
-	MTP::cancel(base::take(_sentRequest));
+	api().request(base::take(_sentRequest)).cancel();
 }
 
 } // namespace details

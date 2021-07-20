@@ -48,10 +48,13 @@ enum class Command {
 	FolderPrevious,
 
 	ShowArchive,
+	ShowContacts,
 
 	JustSendMessage,
 	SendSilentMessage,
 	ScheduleMessage,
+
+	ReadChat,
 
 	SupportReloadTemplates,
 	SupportToggleMuted,
@@ -60,7 +63,7 @@ enum class Command {
 	SupportHistoryForward,
 };
 
-constexpr auto kShowFolder = {
+[[maybe_unused]] constexpr auto kShowFolder = {
 	Command::ShowAllChats,
 	Command::ShowFolder1,
 	Command::ShowFolder2,

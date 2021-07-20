@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/rp_widget.h"
 #include "info/media/info_media_widget.h"
 #include "data/data_shared_media.h"
+#include "overview/overview_layout_delegate.h"
 
 class DeleteMessagesBox;
 
@@ -47,11 +48,14 @@ namespace Media {
 using BaseLayout = Overview::Layout::ItemBase;
 using UniversalMsgId = int32;
 
-class ListWidget : public Ui::RpWidget {
+class ListWidget final
+	: public Ui::RpWidget
+	, public Overview::Layout::Delegate {
 public:
 	ListWidget(
 		QWidget *parent,
 		not_null<AbstractController*> controller);
+	~ListWidget();
 
 	Main::Session &session() const;
 
@@ -72,22 +76,13 @@ public:
 	void saveState(not_null<Memento*> memento);
 	void restoreState(not_null<Memento*> memento);
 
-	~ListWidget();
+	void registerHeavyItem(not_null<const BaseLayout*> item) override;
+	void unregisterHeavyItem(not_null<const BaseLayout*> item) override;
 
-protected:
-	int resizeGetHeight(int newWidth) override;
-	void visibleTopBottomUpdated(
-		int visibleTop,
-		int visibleBottom) override;
-
-	void paintEvent(QPaintEvent *e) override;
-	void mouseMoveEvent(QMouseEvent *e) override;
-	void mousePressEvent(QMouseEvent *e) override;
-	void mouseReleaseEvent(QMouseEvent *e) override;
-	void mouseDoubleClickEvent(QMouseEvent *e) override;
-	void contextMenuEvent(QContextMenuEvent *e) override;
-	void enterEventHook(QEvent *e) override;
-	void leaveEventHook(QEvent *e) override;
+	void openPhoto(not_null<PhotoData*> photo, FullMsgId id) override;
+	void openDocument(
+		not_null<DocumentData*> document,
+		FullMsgId id) override;
 
 private:
 	struct Context;
@@ -104,6 +99,8 @@ private:
 	};
 	struct CachedItem {
 		CachedItem(std::unique_ptr<BaseLayout> item);
+		CachedItem(CachedItem &&other);
+		CachedItem &operator=(CachedItem &&other);
 		~CachedItem();
 
 		std::unique_ptr<BaseLayout> item;
@@ -155,6 +152,20 @@ private:
 		UniversalMsgId item = 0;
 		int shift = 0;
 	};
+
+	int resizeGetHeight(int newWidth) override;
+	void visibleTopBottomUpdated(
+		int visibleTop,
+		int visibleBottom) override;
+
+	void paintEvent(QPaintEvent *e) override;
+	void mouseMoveEvent(QMouseEvent *e) override;
+	void mousePressEvent(QMouseEvent *e) override;
+	void mouseReleaseEvent(QMouseEvent *e) override;
+	void mouseDoubleClickEvent(QMouseEvent *e) override;
+	void contextMenuEvent(QContextMenuEvent *e) override;
+	void enterEventHook(QEvent *e) override;
+	void leaveEventHook(QEvent *e) override;
 
 	void start();
 	int recountHeight();
@@ -237,7 +248,7 @@ private:
 		int bottom) const;
 	FoundItem findItemByPoint(QPoint point) const;
 	std::optional<FoundItem> findItemById(UniversalMsgId universalId);
-	std::optional<FoundItem> findItemDetails(BaseLayout *item);
+	FoundItem findItemDetails(not_null<BaseLayout*> item);
 	FoundItem foundItemInSection(
 		const FoundItem &item,
 		const Section &section) const;
@@ -265,17 +276,23 @@ private:
 	void updateDragSelection();
 	void clearDragSelection();
 
+	void updateDateBadgeFor(int top);
+	void scrollDateCheck();
+	void scrollDateHide();
+	void toggleScrollDateShown();
+
 	void trySwitchToWordSelection();
 	void switchToWordSelection();
 	void validateTrippleClickStartTime();
 	void checkMoveToOtherViewer();
+	void clearHeavyItems();
 
 	void setActionBoxWeak(QPointer<Ui::RpWidget> box);
 
 	const not_null<AbstractController*> _controller;
 	const not_null<PeerData*> _peer;
 	PeerData * const _migrated = nullptr;
-	Type _type = Type::Photo;
+	const Type _type = Type::Photo;
 
 	static constexpr auto kMinimalIdsLimit = 16;
 	static constexpr auto kDefaultAroundId = (ServerMaxMsgId - 1);
@@ -283,7 +300,9 @@ private:
 	int _idsLimit = kMinimalIdsLimit;
 	SparseIdsMergedSlice _slice;
 
-	std::map<UniversalMsgId, CachedItem> _layouts;
+	std::unordered_map<UniversalMsgId, CachedItem> _layouts;
+	base::flat_set<not_null<const BaseLayout*>> _heavyLayouts;
+	bool _heavyLayoutsInvalidated = false;
 	std::vector<Section> _sections;
 
 	int _visibleTop = 0;
@@ -307,6 +326,16 @@ private:
 	style::cursor _cursor = style::cur_default;
 	DragSelectAction _dragSelectAction = DragSelectAction::None;
 	bool _wasSelectedText = false; // was some text selected in current drag action
+
+	struct DateBadge {
+		SingleQueuedInvokation check;
+		base::Timer hideTimer;
+		Ui::Animations::Simple opacity;
+		bool goodType = false;
+		bool shown = false;
+		QString text;
+		QRect rect;
+	} _dateBadge;
 
 	base::unique_qptr<Ui::PopupMenu> _contextMenu;
 	rpl::event_stream<> _checkForHide;

@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/edit_color_box.h"
 #include "lang/lang_keys.h"
 #include "base/call_delayed.h"
+#include "base/qt_adapters.h"
 
 namespace Window {
 namespace Theme {
@@ -154,7 +155,7 @@ void EditorBlock::Row::fillSearchIndex() {
 	_searchWords.clear();
 	_searchStartChars.clear();
 	auto toIndex = _name + ' ' + _copyOf + ' ' + TextUtilities::RemoveAccents(_description.toString()) + ' ' + _valueString;
-	auto words = toIndex.toLower().split(SearchSplitter, QString::SkipEmptyParts);
+	auto words = toIndex.toLower().split(SearchSplitter, base::QStringSkipEmptyParts);
 	for_const (auto &word, words) {
 		_searchWords.insert(word);
 		_searchStartChars.insert(word[0]);
@@ -164,7 +165,7 @@ void EditorBlock::Row::fillSearchIndex() {
 EditorBlock::EditorBlock(QWidget *parent, Type type, Context *context) : TWidget(parent)
 , _type(type)
 , _context(context)
-, _transparent(style::transparentPlaceholderBrush()) {
+, _transparent(style::TransparentPlaceholder()) {
 	setMouseTracking(true);
 	subscribe(_context->updated, [this] {
 		if (_mouseSelection) {
@@ -220,7 +221,7 @@ bool EditorBlock::feedCopy(const QString &name, const QString &copyOf) {
 		}
 		addRow(name, copyOf, row->value());
 	} else {
-		LOG(("Theme Warning: Skipping value '%1: %2' (expected a color value in #rrggbb or #rrggbbaa or a previously defined key in the color scheme)").arg(name).arg(copyOf));
+		LOG(("Theme Warning: Skipping value '%1: %2' (expected a color value in #rrggbb or #rrggbbaa or a previously defined key in the color scheme)").arg(name, copyOf));
 	}
 	return true;
 }
@@ -319,7 +320,7 @@ bool EditorBlock::selectSkip(int direction) {
 	if (newSelected < -1 || newSelected > maxSelected) {
 		newSelected = maxSelected;
 	}
-	if (auto changed = (newSelected != _selected)) {
+	if (newSelected != _selected) {
 		setSelected(newSelected);
 		scrollToSelected();
 		return (newSelected >= 0);
@@ -445,7 +446,7 @@ void EditorBlock::enumerateRows(Callback callback) const {
 			}
 		}
 	} else {
-		for_const (auto &row, _data) {
+		for (const auto &row : _data) {
 			if (!callback(row)) {
 				break;
 			}
@@ -539,7 +540,6 @@ void EditorBlock::saveEditing(QColor value) {
 	auto &row = _data[_editing];
 	auto name = row.name();
 	if (_type == Type::New) {
-		auto removing = std::exchange(_editing, -1);
 		setSelected(-1);
 		setPressed(-1);
 

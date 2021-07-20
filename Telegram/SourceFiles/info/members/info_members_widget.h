@@ -24,7 +24,7 @@ using SavedState = Profile::MembersState;
 class Memento final : public ContentMemento {
 public:
 	Memento(not_null<Controller*> controller);
-	Memento(PeerId peerId, PeerId migratedPeerId);
+	Memento(not_null<PeerData*> peer, PeerId migratedPeerId);
 
 	object_ptr<ContentWidget> createWidget(
 		QWidget *parent,
@@ -60,7 +60,7 @@ private:
 	void saveState(not_null<Memento*> memento);
 	void restoreState(not_null<Memento*> memento);
 
-	std::unique_ptr<ContentMemento> doCreateMemento() override;
+	std::shared_ptr<ContentMemento> doCreateMemento() override;
 
 	Profile::Members *_inner = nullptr;
 

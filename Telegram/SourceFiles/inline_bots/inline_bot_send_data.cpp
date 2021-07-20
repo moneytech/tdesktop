@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/localstorage.h"
 #include "lang/lang_keys.h"
 #include "history/history.h"
+#include "history/history_message.h"
 #include "data/data_channel.h"
 #include "app.h"
 
@@ -33,7 +34,7 @@ void SendDataCommon::addToHistory(
 		MTPDmessage::Flags flags,
 		MTPDmessage_ClientFlags clientFlags,
 		MsgId msgId,
-		UserId fromId,
+		PeerId fromId,
 		MTPint mtpDate,
 		UserId viaBotId,
 		MsgId replyToId,
@@ -43,26 +44,37 @@ void SendDataCommon::addToHistory(
 	if (!fields.entities.v.isEmpty()) {
 		flags |= MTPDmessage::Flag::f_entities;
 	}
+	auto action = Api::SendAction(history);
+	action.replyTo = replyToId;
+	const auto replyHeader = NewMessageReplyHeader(action);
+	if (replyToId) {
+		flags |= MTPDmessage::Flag::f_reply_to;
+	}
+	const auto views = 1;
+	const auto forwards = 0;
 	history->addNewMessage(
 		MTP_message(
 			MTP_flags(flags),
 			MTP_int(msgId),
-			MTP_int(fromId),
+			peerToMTP(fromId),
 			peerToMTP(history->peer->id),
 			MTPMessageFwdHeader(),
-			MTP_int(viaBotId),
-			MTP_int(replyToId),
+			MTP_int(viaBotId.bare), // #TODO ids
+			replyHeader,
 			mtpDate,
 			fields.text,
 			fields.media,
 			markup,
 			fields.entities,
-			MTP_int(1),
-			MTPint(),
+			MTP_int(views),
+			MTP_int(forwards),
+			MTPMessageReplies(),
+			MTPint(), // edit_date
 			MTP_string(postAuthor),
 			MTPlong(),
 			//MTPMessageReactions(),
-			MTPVector<MTPRestrictionReason>()),
+			MTPVector<MTPRestrictionReason>(),
+			MTPint()), // ttl_period
 		clientFlags,
 		NewMessageType::Unread);
 }
@@ -72,20 +84,31 @@ QString SendDataCommon::getErrorOnSend(
 		not_null<History*> history) const {
 	const auto error = Data::RestrictionError(
 		history->peer,
-		ChatRestriction::f_send_messages);
+		ChatRestriction::SendMessages);
 	return error.value_or(QString());
 }
 
 SendDataCommon::SentMTPMessageFields SendText::getSentMessageFields() const {
 	SentMTPMessageFields result;
 	result.text = MTP_string(_message);
-	result.entities = Api::EntitiesToMTP(_entities);
+	result.entities = Api::EntitiesToMTP(&session(), _entities);
 	return result;
 }
 
 SendDataCommon::SentMTPMessageFields SendGeo::getSentMessageFields() const {
 	SentMTPMessageFields result;
-	result.media = MTP_messageMediaGeo(_location.toMTP());
+	if (_period) {
+		using Flag = MTPDmessageMediaGeoLive::Flag;
+		result.media = MTP_messageMediaGeoLive(
+			MTP_flags((_heading ? Flag::f_heading : Flag(0))
+				| (_proximityNotificationRadius ? Flag::f_proximity_notification_radius : Flag(0))),
+			_location.toMTP(),
+			MTP_int(_heading.value_or(0)),
+			MTP_int(*_period),
+			MTP_int(_proximityNotificationRadius.value_or(0)));
+	} else {
+		result.media = MTP_messageMediaGeo(_location.toMTP());
+	}
 	return result;
 }
 
@@ -129,7 +152,7 @@ void SendPhoto::addToHistory(
 		MTPDmessage::Flags flags,
 		MTPDmessage_ClientFlags clientFlags,
 		MsgId msgId,
-		UserId fromId,
+		PeerId fromId,
 		MTPint mtpDate,
 		UserId viaBotId,
 		MsgId replyToId,
@@ -154,7 +177,7 @@ QString SendPhoto::getErrorOnSend(
 		not_null<History*> history) const {
 	const auto error = Data::RestrictionError(
 		history->peer,
-		ChatRestriction::f_send_media);
+		ChatRestriction::SendMedia);
 	return error.value_or(QString());
 }
 
@@ -164,7 +187,7 @@ void SendFile::addToHistory(
 		MTPDmessage::Flags flags,
 		MTPDmessage_ClientFlags clientFlags,
 		MsgId msgId,
-		UserId fromId,
+		PeerId fromId,
 		MTPint mtpDate,
 		UserId viaBotId,
 		MsgId replyToId,
@@ -189,13 +212,13 @@ QString SendFile::getErrorOnSend(
 		not_null<History*> history) const {
 	const auto errorMedia = Data::RestrictionError(
 		history->peer,
-		ChatRestriction::f_send_media);
+		ChatRestriction::SendMedia);
 	const auto errorStickers = Data::RestrictionError(
 		history->peer,
-		ChatRestriction::f_send_stickers);
+		ChatRestriction::SendStickers);
 	const auto errorGifs = Data::RestrictionError(
 		history->peer,
-		ChatRestriction::f_send_gifs);
+		ChatRestriction::SendGifs);
 	return errorMedia
 		? *errorMedia
 		: (errorStickers && (_document->sticker() != nullptr))
@@ -213,7 +236,7 @@ void SendGame::addToHistory(
 		MTPDmessage::Flags flags,
 		MTPDmessage_ClientFlags clientFlags,
 		MsgId msgId,
-		UserId fromId,
+		PeerId fromId,
 		MTPint mtpDate,
 		UserId viaBotId,
 		MsgId replyToId,
@@ -237,8 +260,18 @@ QString SendGame::getErrorOnSend(
 		not_null<History*> history) const {
 	const auto error = Data::RestrictionError(
 		history->peer,
-		ChatRestriction::f_send_games);
+		ChatRestriction::SendGames);
 	return error.value_or(QString());
+}
+
+auto SendInvoice::getSentMessageFields() const -> SentMTPMessageFields {
+	SentMTPMessageFields result;
+	result.media = _media;
+	return result;
+}
+
+QString SendInvoice::getLayoutDescription(const Result *owner) const {
+	return qs(_media.c_messageMediaInvoice().vdescription());
 }
 
 } // namespace internal

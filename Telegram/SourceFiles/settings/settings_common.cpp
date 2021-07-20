@@ -15,6 +15,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "settings/settings_privacy_security.h"
 #include "settings/settings_folders.h"
 #include "settings/settings_calls.h"
+#include "core/application.h"
 #include "ui/wrap/padding_wrap.h"
 #include "ui/wrap/vertical_layout.h"
 #include "ui/widgets/labels.h"
@@ -27,15 +28,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lang/lang_keys.h"
 #include "mainwindow.h"
 #include "main/main_session.h"
+#include "main/main_domain.h"
 #include "styles/style_layers.h"
 #include "styles/style_settings.h"
 
 namespace Settings {
 
 object_ptr<Section> CreateSection(
-		Type type,
-		not_null<QWidget*> parent,
-		not_null<Window::SessionController*> controller) {
+	Type type,
+	not_null<QWidget*> parent,
+	not_null<Window::SessionController*> controller) {
 	switch (type) {
 	case Type::Main:
 		return object_ptr<Main>(parent, controller);
@@ -72,8 +74,8 @@ void AddDivider(not_null<Ui::VerticalLayout*> container) {
 }
 
 void AddDividerText(
-		not_null<Ui::VerticalLayout*> container,
-		rpl::producer<QString> text) {
+	not_null<Ui::VerticalLayout*> container,
+	rpl::producer<QString> text) {
 	container->add(object_ptr<Ui::DividerLabel>(
 		container,
 		object_ptr<Ui::FlatLabel>(
@@ -83,37 +85,49 @@ void AddDividerText(
 		st::settingsDividerLabelPadding));
 }
 
+not_null<Ui::RpWidget*> AddButtonIcon(
+		not_null<Ui::AbstractButton*> button,
+		const style::icon *leftIcon,
+		int iconLeft,
+		const style::color *leftIconOver) {
+	const auto icon = Ui::CreateChild<Ui::RpWidget>(button.get());
+	icon->setAttribute(Qt::WA_TransparentForMouseEvents);
+	icon->resize(leftIcon->size());
+	button->sizeValue(
+	) | rpl::start_with_next([=](QSize size) {
+		icon->moveToLeft(
+			iconLeft ? iconLeft : st::settingsSectionIconLeft,
+			(size.height() - icon->height()) / 2,
+			size.width());
+	}, icon->lifetime());
+	icon->paintRequest(
+	) | rpl::start_with_next([=] {
+		Painter p(icon);
+		const auto width = icon->width();
+		const auto paintOver = (button->isOver() || button->isDown())
+			&& !button->isDisabled();
+		if (!paintOver) {
+			leftIcon->paint(p, QPoint(), width);
+		} else if (leftIconOver) {
+			leftIcon->paint(p, QPoint(), width, (*leftIconOver)->c);
+		} else {
+			leftIcon->paint(p, QPoint(), width, st::menuIconFgOver->c);
+		}
+	}, icon->lifetime());
+	return icon;
+}
+
 object_ptr<Button> CreateButton(
 		not_null<QWidget*> parent,
 		rpl::producer<QString> text,
 		const style::SettingsButton &st,
 		const style::icon *leftIcon,
-		int iconLeft) {
+		int iconLeft,
+		const style::color *leftIconOver) {
 	auto result = object_ptr<Button>(parent, std::move(text), st);
 	const auto button = result.data();
 	if (leftIcon) {
-		const auto icon = Ui::CreateChild<Ui::RpWidget>(button);
-		icon->setAttribute(Qt::WA_TransparentForMouseEvents);
-		icon->resize(leftIcon->size());
-		button->sizeValue(
-		) | rpl::start_with_next([=](QSize size) {
-			icon->moveToLeft(
-				iconLeft ? iconLeft : st::settingsSectionIconLeft,
-				(size.height() - icon->height()) / 2,
-				size.width());
-		}, icon->lifetime());
-		icon->paintRequest(
-		) | rpl::start_with_next([=] {
-			Painter p(icon);
-			const auto width = icon->width();
-			const auto paintOver = (button->isOver() || button->isDown())
-				&& !button->isDisabled();
-			if (paintOver) {
-				leftIcon->paint(p, QPoint(), width, st::menuIconFgOver->c);
-			} else {
-				leftIcon->paint(p, QPoint(), width);
-			}
-		}, icon->lifetime());
+		AddButtonIcon(button, leftIcon, iconLeft, leftIconOver);
 	}
 	return result;
 }
@@ -135,7 +149,7 @@ void CreateRightLabel(
 		rpl::producer<QString> buttonText) {
 	const auto name = Ui::CreateChild<Ui::FlatLabel>(
 		button.get(),
-		st::settingsButtonRight);
+		st.rightLabel);
 	rpl::combine(
 		button->widthValue(),
 		std::move(buttonText),
@@ -195,6 +209,12 @@ void FillMenu(
 			tr::lng_settings_bg_theme_create(tr::now),
 			[=] { window->show(Box(Window::Theme::CreateBox, window)); });
 	} else {
+		const auto &list = Core::App().domain().accounts();
+		if (list.size() < ::Main::Domain::kMaxAccounts) {
+			addAction(tr::lng_menu_add_account(tr::now), [=] {
+				Core::App().domain().addActivated(MTP::Environment{});
+			});
+		}
 		if (!controller->session().supportMode()) {
 			addAction(
 				tr::lng_settings_information(tr::now),
@@ -202,7 +222,7 @@ void FillMenu(
 		}
 		addAction(
 			tr::lng_settings_logout(tr::now),
-			[=] { window->widget()->onLogout(); });
+			[=] { window->showLogoutConfirmation(); });
 	}
 }
 

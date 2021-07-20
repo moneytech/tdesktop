@@ -14,11 +14,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace Media {
 namespace Streaming {
-namespace {
-
-constexpr auto kMaxConcurrentRequests = 4;
-
-} // namespace
 
 LoaderMtproto::LoaderMtproto(
 	not_null<Storage::DownloadManagerMtproto*> owner,
@@ -27,11 +22,13 @@ LoaderMtproto::LoaderMtproto(
 	Data::FileOrigin origin)
 : DownloadMtprotoTask(owner, location, origin)
 , _size(size)
-, _api(api().instance()) {
+, _api(&api().instance()) {
 }
 
-std::optional<Storage::Cache::Key> LoaderMtproto::baseCacheKey() const {
-	return location().data.get<StorageFileLocation>().bigFileBaseCacheKey();
+Storage::Cache::Key LoaderMtproto::baseCacheKey() const {
+	return v::get<StorageFileLocation>(
+		location().data
+	).bigFileBaseCacheKey();
 }
 
 int LoaderMtproto::size() const {

@@ -8,12 +8,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/special_config_request.h"
 
 #include "mtproto/details/mtproto_rsa_public_key.h"
-#include "mtproto/dc_options.h"
+#include "mtproto/mtproto_dc_options.h"
 #include "mtproto/mtproto_auth_key.h"
 #include "base/unixtime.h"
 #include "base/openssl_help.h"
 #include "base/call_delayed.h"
-#include "facades.h"
 
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonArray>
@@ -80,9 +79,9 @@ bool CheckPhoneByPrefixesRules(const QString &phone, const QString &rules) {
 }
 
 QByteArray ConcatenateDnsTxtFields(const std::vector<DnsEntry> &response) {
-	auto entries = QMap<int, QString>();
+	auto entries = QMultiMap<int, QString>();
 	for (const auto &entry : response) {
-		entries.insertMulti(INT_MAX - entry.data.size(), entry.data);
+		entries.insert(INT_MAX - entry.data.size(), entry.data);
 	}
 	return QStringList(entries.values()).join(QString()).toLatin1();
 }
@@ -101,7 +100,7 @@ QByteArray ParseRemoteConfigResponse(const QByteArray &bytes) {
 	return document.object().value(
 		"entries"
 	).toObject().value(
-		qsl("%1%2").arg(kConfigKey).arg(kConfigSubKey)
+		qsl("%1%2").arg(kConfigKey, kConfigSubKey)
 	).toString().toLatin1();
 }
 
@@ -189,9 +188,11 @@ SpecialConfigRequest::SpecialConfigRequest(
 		int port,
 		bytes::const_span secret)> callback,
 	Fn<void()> timeDoneCallback,
+	const QString &domainString,
 	const QString &phone)
 : _callback(std::move(callback))
 , _timeDoneCallback(std::move(timeDoneCallback))
+, _domainString(domainString)
 , _phone(phone) {
 	Expects((_callback == nullptr) != (_timeDoneCallback == nullptr));
 
@@ -251,12 +252,19 @@ SpecialConfigRequest::SpecialConfigRequest(
 		const std::string &ip,
 		int port,
 		bytes::const_span secret)> callback,
+	const QString &domainString,
 	const QString &phone)
-: SpecialConfigRequest(std::move(callback), nullptr, phone) {
+: SpecialConfigRequest(std::move(callback), nullptr, domainString, phone) {
 }
 
-SpecialConfigRequest::SpecialConfigRequest(Fn<void()> timeDoneCallback)
-: SpecialConfigRequest(nullptr, std::move(timeDoneCallback), QString()) {
+SpecialConfigRequest::SpecialConfigRequest(
+	Fn<void()> timeDoneCallback,
+	const QString &domainString)
+: SpecialConfigRequest(
+	nullptr,
+	std::move(timeDoneCallback),
+	domainString,
+	QString()) {
 }
 
 void SpecialConfigRequest::sendNextRequest() {
@@ -282,17 +290,17 @@ void SpecialConfigRequest::performRequest(const Attempt &attempt) {
 	case Type::Mozilla: {
 		url.setHost(attempt.data);
 		url.setPath(qsl("/dns-query"));
-		url.setQuery(qsl("name=%1&type=16&random_padding=%2"
-		).arg(Global::TxtDomainString()
-		).arg(GenerateDnsRandomPadding()));
+		url.setQuery(qsl("name=%1&type=16&random_padding=%2").arg(
+			_domainString,
+			GenerateDnsRandomPadding()));
 		request.setRawHeader("accept", "application/dns-json");
 	} break;
 	case Type::Google: {
 		url.setHost(attempt.data);
 		url.setPath(qsl("/resolve"));
-		url.setQuery(qsl("name=%1&type=ANY&random_padding=%2"
-		).arg(Global::TxtDomainString()
-		).arg(GenerateDnsRandomPadding()));
+		url.setQuery(qsl("name=%1&type=ANY&random_padding=%2").arg(
+			_domainString,
+			GenerateDnsRandomPadding()));
 		if (!attempt.host.isEmpty()) {
 			const auto host = attempt.host + ".google.com";
 			request.setRawHeader("Host", host.toLatin1());
@@ -303,23 +311,24 @@ void SpecialConfigRequest::performRequest(const Attempt &attempt) {
 		url.setPath(qsl("/v1/projects/%1/namespaces/firebase:fetch"
 		).arg(kRemoteProject));
 		url.setQuery(qsl("key=%1").arg(kApiKey));
-		payload = qsl("{\"app_id\":\"%1\",\"app_instance_id\":\"%2\"}"
-		).arg(kAppId
-		).arg(InstanceId()).toLatin1();
+		payload = qsl("{\"app_id\":\"%1\",\"app_instance_id\":\"%2\"}").arg(
+			kAppId,
+			InstanceId()).toLatin1();
 		request.setRawHeader("Content-Type", "application/json");
 	} break;
 	case Type::Realtime: {
 		url.setHost(kFireProject + qsl(".%1").arg(attempt.data));
-		url.setPath(qsl("/%1%2.json").arg(kConfigKey).arg(kConfigSubKey));
+		url.setPath(qsl("/%1%2.json").arg(kConfigKey, kConfigSubKey));
 	} break;
 	case Type::FireStore: {
 		url.setHost(attempt.host.isEmpty()
 			? ApiDomain(attempt.data)
 			: attempt.data);
 		url.setPath(qsl("/v1/projects/%1/databases/(default)/documents/%2/%3"
-		).arg(kFireProject
-		).arg(kConfigKey
-		).arg(kConfigSubKey));
+		).arg(
+			kFireProject,
+			kConfigKey,
+			kConfigSubKey));
 		if (!attempt.host.isEmpty()) {
 			const auto host = ApiDomain(attempt.host);
 			request.setRawHeader("Host", host.toLatin1());
@@ -371,7 +380,7 @@ void SpecialConfigRequest::requestFinished(
 		not_null<QNetworkReply*> reply) {
 	handleHeaderUnixtime(reply);
 	const auto result = finalizeRequest(reply);
-	if (!_callback) {
+	if (!_callback || result.isEmpty()) {
 		return;
 	}
 
@@ -398,7 +407,7 @@ void SpecialConfigRequest::requestFinished(
 QByteArray SpecialConfigRequest::finalizeRequest(
 		not_null<QNetworkReply*> reply) {
 	if (reply->error() != QNetworkReply::NoError) {
-		LOG(("Config Error: Failed to get response, error: %2 (%3)"
+		DEBUG_LOG(("Config Error: Failed to get response, error: %2 (%3)"
 			).arg(reply->errorString()
 			).arg(reply->error()));
 	}

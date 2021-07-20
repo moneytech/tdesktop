@@ -58,7 +58,7 @@ ChatFilter ChatFilter::FromTL(
 			| (data.is_exclude_muted() ? Flag::NoMuted : Flag(0))
 			| (data.is_exclude_read() ? Flag::NoRead : Flag(0))
 			| (data.is_exclude_archived() ? Flag::NoArchived : Flag(0));
-		auto &&to_histories = ranges::view::transform([&](
+		auto &&to_histories = ranges::views::transform([&](
 				const MTPInputPeer &data) {
 			const auto peer = data.match([&](const MTPDinputPeerUser &data) {
 				const auto user = owner->user(data.vuser_id().v);
@@ -76,21 +76,21 @@ ChatFilter ChatFilter::FromTL(
 				return (PeerData*)nullptr;
 			});
 			return peer ? owner->history(peer).get() : nullptr;
-		}) | ranges::view::filter([](History *history) {
+		}) | ranges::views::filter([](History *history) {
 			return history != nullptr;
-		}) | ranges::view::transform([](History *history) {
+		}) | ranges::views::transform([](History *history) {
 			return not_null<History*>(history);
 		});
-		auto &&always = ranges::view::concat(
+		auto &&always = ranges::views::concat(
 			data.vinclude_peers().v
 		) | to_histories;
-		auto pinned = ranges::view::all(
+		auto pinned = ranges::views::all(
 			data.vpinned_peers().v
 		) | to_histories | ranges::to_vector;
-		auto &&never = ranges::view::all(
+		auto &&never = ranges::views::all(
 			data.vexclude_peers().v
 		) | to_histories;
-		auto &&all = ranges::view::concat(always, pinned);
+		auto &&all = ranges::views::concat(always, pinned);
 		auto list = base::flat_set<not_null<History*>>{
 			all.begin(),
 			all.end()
@@ -216,18 +216,7 @@ bool ChatFilter::contains(not_null<History*> history) const {
 }
 
 ChatFilters::ChatFilters(not_null<Session*> owner) : _owner(owner) {
-	//using Flag = ChatFilter::Flag;
-	//const auto all = Flag::Contacts
-	//	| Flag::NonContacts
-	//	| Flag::Groups
-	//	| Flag::Channels
-	//	| Flag::Bots
-	//	| Flag::NoArchived;
-	//_list.push_back(
-	//	ChatFilter(1, "Unmuted", all | Flag::NoMuted, {}, {}));
-	//_list.push_back(
-	//	ChatFilter(2, "Unread", all | Flag::NoRead, {}, {}));
-	load();
+	crl::on_main(&owner->session(), [=] { load(); });
 }
 
 ChatFilters::~ChatFilters() = default;
@@ -236,10 +225,21 @@ not_null<Dialogs::MainList*> ChatFilters::chatsList(FilterId filterId) {
 	auto &pointer = _chatsLists[filterId];
 	if (!pointer) {
 		pointer = std::make_unique<Dialogs::MainList>(
+			&_owner->session(),
 			filterId,
 			rpl::single(ChatFilter::kPinnedLimit));
 	}
 	return pointer.get();
+}
+
+void ChatFilters::setPreloaded(const QVector<MTPDialogFilter> &result) {
+	_loadRequestId = -1;
+	received(result);
+	crl::on_main(&_owner->session(), [=] {
+		if (_loadRequestId == -1) {
+			_loadRequestId = 0;
+		}
+	});
 }
 
 void ChatFilters::load() {
@@ -254,38 +254,42 @@ void ChatFilters::load(bool force) {
 	api.request(_loadRequestId).cancel();
 	_loadRequestId = api.request(MTPmessages_GetDialogFilters(
 	)).done([=](const MTPVector<MTPDialogFilter> &result) {
-		auto position = 0;
-		auto changed = false;
-		for (const auto &filter : result.v) {
-			auto parsed = ChatFilter::FromTL(filter, _owner);
-			const auto b = begin(_list) + position, e = end(_list);
-			const auto i = ranges::find(b, e, parsed.id(), &ChatFilter::id);
-			if (i == e) {
-				applyInsert(std::move(parsed), position);
-				changed = true;
-			} else if (i == b) {
-				if (applyChange(*b, std::move(parsed))) {
-					changed = true;
-				}
-			} else {
-				std::swap(*i, *b);
-				applyChange(*b, std::move(parsed));
-				changed = true;
-			}
-			++position;
-		}
-		while (position < _list.size()) {
-			applyRemove(position);
-			changed = true;
-		}
-		if (changed || !_loaded) {
-			_loaded = true;
-			_listChanged.fire({});
-		}
+		received(result.v);
 		_loadRequestId = 0;
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_loadRequestId = 0;
 	}).send();
+}
+
+void ChatFilters::received(const QVector<MTPDialogFilter> &list) {
+	auto position = 0;
+	auto changed = false;
+	for (const auto &filter : list) {
+		auto parsed = ChatFilter::FromTL(filter, _owner);
+		const auto b = begin(_list) + position, e = end(_list);
+		const auto i = ranges::find(b, e, parsed.id(), &ChatFilter::id);
+		if (i == e) {
+			applyInsert(std::move(parsed), position);
+			changed = true;
+		} else if (i == b) {
+			if (applyChange(*b, std::move(parsed))) {
+				changed = true;
+			}
+		} else {
+			std::swap(*i, *b);
+			applyChange(*b, std::move(parsed));
+			changed = true;
+		}
+		++position;
+	}
+	while (position < _list.size()) {
+		applyRemove(position);
+		changed = true;
+	}
+	if (changed || !_loaded) {
+		_loaded = true;
+		_listChanged.fire({});
+	}
 }
 
 void ChatFilters::apply(const MTPUpdate &update) {
@@ -393,11 +397,11 @@ bool ChatFilters::applyChange(ChatFilter &filter, ChatFilter &&updated) {
 			});
 		}
 	}
+	filter = std::move(updated);
 	if (pinnedChanged) {
 		const auto filterList = _owner->chatsFilters().chatsList(id);
-		filterList->pinned()->applyList(updated.pinned());
+		filterList->pinned()->applyList(filter.pinned());
 	}
-	filter = std::move(updated);
 	return true;
 }
 
@@ -407,9 +411,9 @@ bool ChatFilters::applyOrder(const QVector<MTPint> &order) {
 	} else if (_list.empty()) {
 		return true;
 	}
-	auto indices = ranges::view::all(
+	auto indices = ranges::views::all(
 		_list
-	) | ranges::view::transform(
+	) | ranges::views::transform(
 		&ChatFilter::id
 	) | ranges::to_vector;
 	auto b = indices.begin(), e = indices.end();
@@ -551,7 +555,7 @@ bool ChatFilters::loadNextExceptions(bool chatsListLoaded) {
 		_exceptionsLoadRequestId = 0;
 		_owner->session().data().histories().applyPeerDialogs(result);
 		_owner->session().api().requestMoreDialogsIfNeeded();
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_exceptionsLoadRequestId = 0;
 		_owner->session().api().requestMoreDialogsIfNeeded();
 	}).send();
@@ -559,12 +563,9 @@ bool ChatFilters::loadNextExceptions(bool chatsListLoaded) {
 }
 
 void ChatFilters::refreshHistory(not_null<History*> history) {
-	_refreshHistoryRequests.fire_copy(history);
-}
-
-auto ChatFilters::refreshHistoryRequests() const
--> rpl::producer<not_null<History*>> {
-	return _refreshHistoryRequests.events();
+	if (history->inChatList() && !list().empty()) {
+		_owner->refreshChatListEntry(history);
+	}
 }
 
 void ChatFilters::requestSuggested() {
@@ -581,9 +582,9 @@ void ChatFilters::requestSuggested() {
 		_suggestedRequestId = 0;
 		_suggestedLastReceived = crl::now();
 
-		_suggested = ranges::view::all(
+		_suggested = ranges::views::all(
 			data.v
-		) | ranges::view::transform([&](const MTPDialogFilterSuggested &f) {
+		) | ranges::views::transform([&](const MTPDialogFilterSuggested &f) {
 			return f.match([&](const MTPDdialogFilterSuggested &data) {
 				return SuggestedFilter{
 					Data::ChatFilter::FromTL(data.vfilter(), _owner),
@@ -593,7 +594,7 @@ void ChatFilters::requestSuggested() {
 		}) | ranges::to_vector;
 
 		_suggestedUpdated.fire({});
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_suggestedRequestId = 0;
 		_suggestedLastReceived = crl::now() + kRefreshSuggestedTimeout / 2;
 

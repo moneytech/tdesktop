@@ -15,7 +15,10 @@ class Session;
 
 namespace Core {
 
-class Changelogs : public base::has_weak_ptr, private base::Subscriber {
+[[nodiscard]] QString FormatVersionDisplay(int version);
+[[nodiscard]] QString FormatVersionPrecise(int version);
+
+class Changelogs final : public base::has_weak_ptr {
 public:
 	Changelogs(not_null<Main::Session*> session, int oldVersion);
 

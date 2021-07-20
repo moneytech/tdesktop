@@ -8,7 +8,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "boxes/abstract_box.h"
-#include "mtproto/mtproto_rpc_sender.h"
+#include "mtproto/sender.h"
+
+namespace Data {
+class PhotoMedia;
+class CloudImageView;
+} // namespace Data
 
 namespace Main {
 class Session;
@@ -18,17 +23,57 @@ namespace Ui {
 class Checkbox;
 class FlatLabel;
 class EmptyUserpic;
+class LinkButton;
 } // namespace Ui
 
 class InformBox;
 class ConfirmBox : public Ui::BoxContent, public ClickHandlerHost {
 public:
-	ConfirmBox(QWidget*, const QString &text, FnMut<void()> confirmedCallback = FnMut<void()>(), FnMut<void()> cancelledCallback = FnMut<void()>());
-	ConfirmBox(QWidget*, const QString &text, const QString &confirmText, FnMut<void()> confirmedCallback = FnMut<void()>(), FnMut<void()> cancelledCallback = FnMut<void()>());
-	ConfirmBox(QWidget*, const QString &text, const QString &confirmText, const style::RoundButton &confirmStyle, FnMut<void()> confirmedCallback = FnMut<void()>(), FnMut<void()> cancelledCallback = FnMut<void()>());
-	ConfirmBox(QWidget*, const QString &text, const QString &confirmText, const QString &cancelText, FnMut<void()> confirmedCallback = FnMut<void()>(), FnMut<void()> cancelledCallback = FnMut<void()>());
-	ConfirmBox(QWidget*, const QString &text, const QString &confirmText, const style::RoundButton &confirmStyle, const QString &cancelText, FnMut<void()> confirmedCallback = FnMut<void()>(), FnMut<void()> cancelledCallback = FnMut<void()>());
-	ConfirmBox(QWidget*, const TextWithEntities &text, const QString &confirmText, FnMut<void()> confirmedCallback = nullptr, FnMut<void()> cancelledCallback = nullptr);
+
+	using ConfirmedCallback = std::variant<
+		v::null_t,
+		FnMut<void()>,
+		FnMut<void(Fn<void()>)>>;
+
+	ConfirmBox(
+		QWidget*,
+		const QString &text,
+		ConfirmedCallback confirmedCallback = FnMut<void()>(),
+		FnMut<void()> cancelledCallback = FnMut<void()>());
+	ConfirmBox(
+		QWidget*,
+		const QString &text,
+		const QString &confirmText,
+		ConfirmedCallback confirmedCallback = FnMut<void()>(),
+		FnMut<void()> cancelledCallback = FnMut<void()>());
+	ConfirmBox(
+		QWidget*,
+		const QString &text,
+		const QString &confirmText,
+		const style::RoundButton &confirmStyle,
+		ConfirmedCallback confirmedCallback = FnMut<void()>(),
+		FnMut<void()> cancelledCallback = FnMut<void()>());
+	ConfirmBox(
+		QWidget*,
+		const QString &text,
+		const QString &confirmText,
+		const QString &cancelText,
+		ConfirmedCallback confirmedCallback = FnMut<void()>(),
+		FnMut<void()> cancelledCallback = FnMut<void()>());
+	ConfirmBox(
+		QWidget*,
+		const QString &text,
+		const QString &confirmText,
+		const style::RoundButton &confirmStyle,
+		const QString &cancelText,
+		ConfirmedCallback confirmedCallback = FnMut<void()>(),
+		FnMut<void()> cancelledCallback = FnMut<void()>());
+	ConfirmBox(
+		QWidget*,
+		const TextWithEntities &text,
+		const QString &confirmText,
+		ConfirmedCallback confirmedCallback = v::null,
+		FnMut<void()> cancelledCallback = nullptr);
 
 	void updateLink();
 
@@ -82,7 +127,7 @@ private:
 	bool _confirmed = false;
 	bool _cancelled = false;
 	bool _strictCancel = false;
-	FnMut<void()> _confirmedCallback;
+	ConfirmBox::ConfirmedCallback _confirmedCallback;
 	FnMut<void()> _cancelledCallback;
 
 };
@@ -96,7 +141,7 @@ public:
 
 };
 
-class MaxInviteBox : public Ui::BoxContent, private base::Subscriber {
+class MaxInviteBox final : public Ui::BoxContent {
 public:
 	MaxInviteBox(QWidget*, not_null<ChannelData*> channel);
 
@@ -124,7 +169,7 @@ private:
 
 };
 
-class PinMessageBox : public Ui::BoxContent, public RPCSender {
+class PinMessageBox final : public Ui::BoxContent {
 public:
 	PinMessageBox(QWidget*, not_null<PeerData*> peer, MsgId msgId);
 
@@ -136,20 +181,22 @@ protected:
 
 private:
 	void pinMessage();
-	void pinDone(const MTPUpdates &updates);
-	bool pinFail(const RPCError &error);
 
-	not_null<PeerData*> _peer;
-	MsgId _msgId;
+	const not_null<PeerData*> _peer;
+	MTP::Sender _api;
+	MsgId _msgId = 0;
+	bool _pinningOld = false;
 
 	object_ptr<Ui::FlatLabel> _text;
 	object_ptr<Ui::Checkbox> _notify = { nullptr };
+	object_ptr<Ui::Checkbox> _pinForPeer = { nullptr };
+	QPointer<Ui::Checkbox> _checkbox;
 
 	mtpRequestId _requestId = 0;
 
 };
 
-class DeleteMessagesBox : public Ui::BoxContent, public RPCSender {
+class DeleteMessagesBox final : public Ui::BoxContent {
 public:
 	DeleteMessagesBox(
 		QWidget*,
@@ -197,45 +244,9 @@ private:
 	object_ptr<Ui::Checkbox> _banUser = { nullptr };
 	object_ptr<Ui::Checkbox> _reportSpam = { nullptr };
 	object_ptr<Ui::Checkbox> _deleteAll = { nullptr };
+	object_ptr<Ui::LinkButton> _autoDeleteSettings = { nullptr };
 
 	Fn<void()> _deleteConfirmedCallback;
-
-};
-
-class ConfirmInviteBox
-	: public Ui::BoxContent
-	, public RPCSender
-	, private base::Subscriber {
-public:
-	ConfirmInviteBox(
-		QWidget*,
-		not_null<Main::Session*> session,
-		const MTPDchatInvite &data,
-		Fn<void()> submit);
-	~ConfirmInviteBox();
-
-protected:
-	void prepare() override;
-
-	void resizeEvent(QResizeEvent *e) override;
-	void paintEvent(QPaintEvent *e) override;
-
-private:
-	static std::vector<not_null<UserData*>> GetParticipants(
-		not_null<Main::Session*> session,
-		const MTPDchatInvite &data);
-
-	const not_null<Main::Session*> _session;
-
-	Fn<void()> _submit;
-	object_ptr<Ui::FlatLabel> _title;
-	object_ptr<Ui::FlatLabel> _status;
-	Image *_photo = nullptr;
-	std::unique_ptr<Ui::EmptyUserpic> _photoEmpty;
-	std::vector<not_null<UserData*>> _participants;
-	bool _isChannel = false;
-
-	int _userWidth = 0;
 
 };
 

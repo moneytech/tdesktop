@@ -16,10 +16,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <thread>
 
-namespace Data {
-class Session;
-} // namespace Data
-
 namespace Media {
 namespace Streaming {
 
@@ -27,7 +23,7 @@ class FileDelegate;
 
 class File final {
 public:
-	File(not_null<Data::Session*> owner, std::shared_ptr<Reader> reader);
+	explicit File(std::shared_ptr<Reader> reader);
 
 	File(const File &other) = delete;
 	File &operator=(const File &other) = delete;
@@ -86,7 +82,7 @@ private:
 
 		// TODO base::expected.
 		[[nodiscard]] auto readPacket()
-		-> base::variant<FFmpeg::Packet, FFmpeg::AvErrorWrap>;
+		-> std::variant<FFmpeg::Packet, FFmpeg::AvErrorWrap>;
 		void processQueuedPackets(SleepPolicy policy);
 
 		void handleEndOfFile();

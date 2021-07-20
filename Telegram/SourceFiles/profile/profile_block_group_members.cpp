@@ -14,45 +14,45 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/peers/edit_participants_box.h"
 #include "base/unixtime.h"
 #include "ui/widgets/popup_menu.h"
+#include "mtproto/mtproto_config.h"
 #include "data/data_peer_values.h"
 #include "data/data_channel.h"
 #include "data/data_chat.h"
 #include "data/data_user.h"
+#include "data/data_changes.h"
 #include "mainwidget.h"
 #include "apiwrap.h"
-#include "observer_peer.h"
 #include "main/main_session.h"
 #include "lang/lang_keys.h"
-#include "facades.h"
+#include "facades.h" // Ui::showPeerProfile
 
 namespace Profile {
 namespace {
 
-using UpdateFlag = Notify::PeerUpdate::Flag;
+using UpdateFlag = Data::PeerUpdate::Flag;
 
 } // namespace
 
-GroupMembersWidget::Member::Member(UserData *user) : Item(user) {
+GroupMembersWidget::Member::Member(not_null<UserData*> user) : Item(user) {
 }
 
-UserData *GroupMembersWidget::Member::user() const {
-	return static_cast<UserData*>(peer);
+not_null<UserData*> GroupMembersWidget::Member::user() const {
+	return static_cast<UserData*>(peer.get());
 }
 
 GroupMembersWidget::GroupMembersWidget(
 	QWidget *parent,
-	PeerData *peer,
+	not_null<PeerData*> peer,
 	const style::PeerListItem &st)
-: PeerListWidget(parent, peer, QString(), st, tr::lng_profile_kick(tr::now)) {
-	_updateOnlineTimer.setSingleShot(true);
-	connect(&_updateOnlineTimer, SIGNAL(timeout()), this, SLOT(onUpdateOnlineDisplay()));
-
-	auto observeEvents = UpdateFlag::AdminsChanged
-		| UpdateFlag::MembersChanged
-		| UpdateFlag::UserOnlineChanged;
-	subscribe(Notify::PeerUpdated(), Notify::PeerUpdatedHandler(observeEvents, [this](const Notify::PeerUpdate &update) {
+: PeerListWidget(parent, peer, QString(), st, tr::lng_profile_kick(tr::now))
+, _updateOnlineTimer([=] { updateOnlineDisplay(); }) {
+	peer->session().changes().peerUpdates(
+		UpdateFlag::Admins
+		| UpdateFlag::Members
+		| UpdateFlag::OnlineStatus
+	) | rpl::start_with_next([=](const Data::PeerUpdate &update) {
 		notifyPeerUpdated(update);
-	}));
+	}, lifetime());
 
 	setRemovedCallback([=](PeerData *selectedPeer) {
 		removePeer(selectedPeer);
@@ -71,36 +71,42 @@ GroupMembersWidget::GroupMembersWidget(
 }
 
 void GroupMembersWidget::removePeer(PeerData *selectedPeer) {
-	auto user = selectedPeer->asUser();
+	const auto user = selectedPeer->asUser();
 	Assert(user != nullptr);
 
 	auto text = tr::lng_profile_sure_kick(tr::now, lt_user, user->firstName);
-	auto currentRestrictedRights = [&]() -> MTPChatBannedRights {
+	auto currentRestrictedRights = [&]() -> ChatRestrictionsInfo {
 		if (auto channel = peer()->asMegagroup()) {
 			auto it = channel->mgInfo->lastRestricted.find(user);
 			if (it != channel->mgInfo->lastRestricted.cend()) {
 				return it->second.rights;
 			}
 		}
-		return MTP_chatBannedRights(MTP_flags(0), MTP_int(0));
+		return ChatRestrictionsInfo();
 	}();
-	Ui::show(Box<ConfirmBox>(text, tr::lng_box_remove(tr::now), [user, currentRestrictedRights, peer = peer()] {
+
+	const auto peer = this->peer();
+	const auto callback = [=] {
 		Ui::hideLayer();
 		if (const auto chat = peer->asChat()) {
-			Auth().api().kickParticipant(chat, user);
-			Ui::showPeerHistory(chat->id, ShowAtTheEndMsgId);
+			chat->session().api().kickParticipant(chat, user);
+			Ui::showPeerHistory(chat, ShowAtTheEndMsgId);
 		} else if (const auto channel = peer->asChannel()) {
-			Auth().api().kickParticipant(
+			channel->session().api().kickParticipant(
 				channel,
 				user,
 				currentRestrictedRights);
 		}
-	}));
+	};
+	Ui::show(Box<ConfirmBox>(
+		text,
+		tr::lng_box_remove(tr::now),
+		crl::guard(&peer->session(), callback)));
 }
 
-void GroupMembersWidget::notifyPeerUpdated(const Notify::PeerUpdate &update) {
+void GroupMembersWidget::notifyPeerUpdated(const Data::PeerUpdate &update) {
 	if (update.peer != peer()) {
-		if (update.flags & UpdateFlag::UserOnlineChanged) {
+		if (update.flags & UpdateFlag::OnlineStatus) {
 			if (auto user = update.peer->asUser()) {
 				refreshUserOnline(user);
 			}
@@ -108,11 +114,11 @@ void GroupMembersWidget::notifyPeerUpdated(const Notify::PeerUpdate &update) {
 		return;
 	}
 
-	if (update.flags & UpdateFlag::MembersChanged) {
+	if (update.flags & UpdateFlag::Members) {
 		refreshMembers();
 		contentSizeUpdated();
 	}
-	if (update.flags & UpdateFlag::AdminsChanged) {
+	if (update.flags & UpdateFlag::Admins) {
 		if (const auto chat = peer()->asChat()) {
 			for (const auto item : items()) {
 				setItemFlags(getMember(item), chat);
@@ -132,7 +138,7 @@ void GroupMembersWidget::refreshUserOnline(UserData *user) {
 
 	_now = base::unixtime::now();
 
-	auto member = getMember(it.value());
+	auto member = getMember(it->second);
 	member->statusHasOnlineColor = !user->isBot()
 		&& Data::OnlineTextActive(user->onlineTill, _now);
 	member->onlineTill = user->onlineTill;
@@ -152,7 +158,7 @@ void GroupMembersWidget::preloadMore() {
 	//if (auto megagroup = peer()->asMegagroup()) {
 	//	auto &megagroupInfo = megagroup->mgInfo;
 	//	if (!megagroupInfo->lastParticipants.isEmpty() && megagroupInfo->lastParticipants.size() < megagroup->membersCount()) {
-	//		Auth().api().requestLastParticipants(megagroup, false);
+	//		peer()->session().api().requestLastParticipants(megagroup, false);
 	//	}
 	//}
 }
@@ -178,7 +184,7 @@ void GroupMembersWidget::updateItemStatusText(Item *item) {
 	}
 	if (_updateOnlineAt <= _now || _updateOnlineAt > member->onlineTextTill) {
 		_updateOnlineAt = member->onlineTextTill;
-		_updateOnlineTimer.start((_updateOnlineAt - _now + 1) * 1000);
+		_updateOnlineTimer.callOnce((_updateOnlineAt - _now + 1) * 1000);
 	}
 }
 
@@ -187,13 +193,12 @@ void GroupMembersWidget::refreshMembers() {
 	if (const auto chat = peer()->asChat()) {
 		checkSelfAdmin(chat);
 		if (chat->noParticipantInfo()) {
-			Auth().api().requestFullPeer(chat);
+			chat->session().api().requestFullPeer(chat);
 		}
 		fillChatMembers(chat);
 	} else if (const auto megagroup = peer()->asMegagroup()) {
-		auto &megagroupInfo = megagroup->mgInfo;
 		if (megagroup->lastParticipantsRequestNeeded()) {
-			Auth().api().requestLastParticipants(megagroup);
+			megagroup->session().api().requestLastParticipants(megagroup);
 		}
 		fillMegagroupMembers(megagroup);
 	}
@@ -207,7 +212,7 @@ void GroupMembersWidget::checkSelfAdmin(not_null<ChatData*> chat) {
 		return;
 	}
 
-	const auto self = chat->session().user();
+	//const auto self = chat->session().user();
 	//if (chat->amAdmin() && !chat->admins.contains(self)) {
 	//	chat->admins.insert(self);
 	//} else if (!chat->amAdmin() && chat->admins.contains(self)) {
@@ -248,7 +253,6 @@ void GroupMembersWidget::updateOnlineCount() {
 	}
 	if (_onlineCount != newOnlineCount) {
 		_onlineCount = newOnlineCount;
-		emit onlineCountUpdated(_onlineCount);
 	}
 }
 
@@ -301,7 +305,7 @@ void GroupMembersWidget::setItemFlags(
 	if (item->peer->id == chat->session().userPeerId()) {
 		item->hasRemoveLink = false;
 	} else if (chat->amCreator()
-		|| ((chat->adminRights() & ChatAdminRight::f_ban_users)
+		|| ((chat->adminRights() & ChatAdminRight::BanUsers)
 			&& (adminState == AdminState::None))) {
 		item->hasRemoveLink = true;
 	} else if (chat->invitedByMe.contains(user)
@@ -334,7 +338,8 @@ void GroupMembersWidget::fillMegagroupMembers(
 	}
 
 	_sortByOnline = (megagroup->membersCount() > 0)
-		&& (megagroup->membersCount() <= Global::ChatSizeMax());
+		&& (megagroup->membersCount()
+			<= megagroup->session().serverConfig().chatSizeMax);
 
 	auto &membersList = megagroup->mgInfo->lastParticipants;
 	if (_sortByOnline) {
@@ -411,19 +416,19 @@ void GroupMembersWidget::setItemFlags(
 
 auto GroupMembersWidget::computeMember(not_null<UserData*> user)
 -> not_null<Member*> {
-	auto it = _membersByUser.constFind(user);
+	auto it = _membersByUser.find(user);
 	if (it == _membersByUser.cend()) {
 		auto member = new Member(user);
-		it = _membersByUser.insert(user, member);
+		it = _membersByUser.emplace(user, member).first;
 		member->statusHasOnlineColor = !user->isBot()
 			&& Data::OnlineTextActive(user->onlineTill, _now);
 		member->onlineTill = user->onlineTill;
 		member->onlineForSort = Data::SortByOnlineValue(user, _now);
 	}
-	return it.value();
+	return it->second;
 }
 
-void GroupMembersWidget::onUpdateOnlineDisplay() {
+void GroupMembersWidget::updateOnlineDisplay() {
 	if (_sortByOnline) {
 		_now = base::unixtime::now();
 
@@ -452,7 +457,7 @@ void GroupMembersWidget::onUpdateOnlineDisplay() {
 
 GroupMembersWidget::~GroupMembersWidget() {
 	auto members = base::take(_membersByUser);
-	for_const (auto member, members) {
+	for (const auto &[_, member] : members) {
 		delete member;
 	}
 }

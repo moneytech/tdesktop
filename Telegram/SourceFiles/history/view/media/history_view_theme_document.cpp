@@ -7,16 +7,22 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/media/history_view_theme_document.h"
 
-#include "layout.h"
+#include "history/history.h"
 #include "history/history_item.h"
 #include "history/view/history_view_element.h"
 #include "history/view/history_view_cursor_state.h"
 #include "data/data_document.h"
+#include "data/data_session.h"
+#include "data/data_document_media.h"
+#include "data/data_file_click_handler.h"
 #include "data/data_file_origin.h"
+#include "data/data_wall_paper.h"
 #include "base/qthelp_url.h"
-#include "window/themes/window_theme.h"
-#include "app.h"
-#include "styles/style_history.h"
+#include "ui/text/format_values.h"
+#include "ui/cached_round_corners.h"
+#include "ui/ui_utility.h"
+#include "layout.h" // FullSelection
+#include "styles/style_chat.h"
 
 namespace HistoryView {
 
@@ -34,7 +40,14 @@ ThemeDocument::ThemeDocument(
 
 	_data->loadThumbnail(_parent->data()->fullId());
 	setDocumentLinks(_data, parent->data());
-	setStatusSize(FileStatusSizeReady, _data->size, -1, 0);
+	setStatusSize(Ui::FileStatusSizeReady, _data->size, -1, 0);
+}
+
+ThemeDocument::~ThemeDocument() {
+	if (_dataMedia) {
+		_data->owner().keepAlive(base::take(_dataMedia));
+		_parent->checkHeavyPart();
+	}
 }
 
 void ThemeDocument::fillPatternFieldsFrom(const QString &url) {
@@ -56,8 +69,9 @@ QSize ThemeDocument::countOptimalSize() {
 	if (_data->isTheme()) {
 		return st::historyThemeSize;
 	}
-	auto tw = style::ConvertScale(_data->thumbnail()->width());
-	auto th = style::ConvertScale(_data->thumbnail()->height());
+	const auto &location = _data->thumbnailLocation();
+	auto tw = style::ConvertScale(location.width());
+	auto th = style::ConvertScale(location.height());
 	if (!tw || !th) {
 		tw = th = 1;
 	}
@@ -78,8 +92,9 @@ QSize ThemeDocument::countCurrentSize(int newWidth) {
 		_pixh = st::historyThemeSize.height();
 		return st::historyThemeSize;
 	}
-	auto tw = style::ConvertScale(_data->thumbnail()->width());
-	auto th = style::ConvertScale(_data->thumbnail()->height());
+	const auto &location = _data->thumbnailLocation();
+	auto tw = style::ConvertScale(location.width());
+	auto th = style::ConvertScale(location.height());
 	if (!tw || !th) {
 		tw = th = 1;
 	}
@@ -100,20 +115,19 @@ QSize ThemeDocument::countCurrentSize(int newWidth) {
 void ThemeDocument::draw(Painter &p, const QRect &r, TextSelection selection, crl::time ms) const {
 	if (width() < st::msgPadding.left() + st::msgPadding.right() + 1) return;
 
-	_data->automaticLoad(_realParent->fullId(), _parent->data());
+	ensureDataMediaCreated();
+
+	_dataMedia->automaticLoad(_realParent->fullId(), _parent->data());
 	auto selected = (selection == FullSelection);
-	auto loaded = _data->loaded();
+	auto loaded = dataLoaded();
 	auto displayLoading = _data->displayLoading();
 
-	auto inWebPage = (_parent->media() != this);
 	auto paintx = 0, painty = 0, paintw = width(), painth = height();
-
-	auto captionw = paintw - st::msgPadding.left() - st::msgPadding.right();
 
 	if (displayLoading) {
 		ensureAnimation();
 		if (!_animation->radial.animating()) {
-			_animation->radial.start(_data->progress());
+			_animation->radial.start(dataProgress());
 		}
 	}
 	const auto radial = isRadialAnimation();
@@ -124,14 +138,14 @@ void ThemeDocument::draw(Painter &p, const QRect &r, TextSelection selection, cr
 	validateThumbnail();
 	p.drawPixmap(rthumb.topLeft(), _thumbnail);
 	if (selected) {
-		App::complexOverlayRect(p, rthumb, roundRadius, roundCorners);
+		Ui::FillComplexOverlayRect(p, rthumb, roundRadius, roundCorners);
 	}
 
 	auto statusX = paintx + st::msgDateImgDelta + st::msgDateImgPadding.x();
 	auto statusY = painty + st::msgDateImgDelta + st::msgDateImgPadding.y();
 	auto statusW = st::normalFont->width(_statusText) + 2 * st::msgDateImgPadding.x();
 	auto statusH = st::normalFont->height + 2 * st::msgDateImgPadding.y();
-	App::roundRect(p, style::rtlrect(statusX - st::msgDateImgPadding.x(), statusY - st::msgDateImgPadding.y(), statusW, statusH, width()), selected ? st::msgDateImgBgSelected : st::msgDateImgBg, selected ? DateSelectedCorners : DateCorners);
+	Ui::FillRoundRect(p, style::rtlrect(statusX - st::msgDateImgPadding.x(), statusY - st::msgDateImgPadding.y(), statusW, statusH, width()), selected ? st::msgDateImgBgSelected : st::msgDateImgBg, selected ? Ui::DateSelectedCorners : Ui::DateCorners);
 	p.setFont(st::normalFont);
 	p.setPen(st::msgDateImgFg);
 	p.drawTextLeft(statusX, statusY, width(), _statusText, statusW - 2 * st::msgDateImgPadding.x());
@@ -140,7 +154,8 @@ void ThemeDocument::draw(Painter &p, const QRect &r, TextSelection selection, cr
 		const auto radialOpacity = (radial && loaded && !_data->uploading())
 			? _animation->radial.opacity() :
 			1.;
-		QRect inner(rthumb.x() + (rthumb.width() - st::msgFileSize) / 2, rthumb.y() + (rthumb.height() - st::msgFileSize) / 2, st::msgFileSize, st::msgFileSize);
+		const auto innerSize = st::msgFileLayout.thumbSize;
+		QRect inner(rthumb.x() + (rthumb.width() - innerSize) / 2, rthumb.y() + (rthumb.height() - innerSize) / 2, innerSize, innerSize);
 		p.setPen(Qt::NoPen);
 		if (selected) {
 			p.setBrush(st::msgDateImgBgSelected);
@@ -177,26 +192,32 @@ void ThemeDocument::draw(Painter &p, const QRect &r, TextSelection selection, cr
 	}
 }
 
+void ThemeDocument::ensureDataMediaCreated() const {
+	if (_dataMedia) {
+		return;
+	}
+	_dataMedia = _data->createMediaView();
+	_dataMedia->goodThumbnailWanted();
+	_dataMedia->thumbnailWanted(_realParent->fullId());
+	_parent->history()->owner().registerHeavyViewPart(_parent);
+}
+
 void ThemeDocument::validateThumbnail() const {
 	if (_thumbnailGood > 0) {
 		return;
 	}
-	const auto good = _data->goodThumbnail();
-	if (good) {
-		if (good->loaded()) {
-			prepareThumbnailFrom(good, 1);
-			return;
-		} else {
-			good->load({});
-		}
-	}
-	if (_thumbnailGood >= 0 || !_data->thumbnail()) {
+	ensureDataMediaCreated();
+	if (const auto good = _dataMedia->goodThumbnail()) {
+		prepareThumbnailFrom(good, 1);
 		return;
 	}
-	if (_data->thumbnail()->loaded()) {
-		prepareThumbnailFrom(_data->thumbnail(), 0);
-	} else if (const auto blurred = _data->thumbnailInline()) {
-		if (_thumbnail.isNull()) {
+	if (_thumbnailGood >= 0) {
+		return;
+	}
+	if (const auto normal = _dataMedia->thumbnail()) {
+		prepareThumbnailFrom(normal, 0);
+	} else if (_thumbnail.isNull()) {
+		if (const auto blurred = _dataMedia->thumbnailInline()) {
 			prepareThumbnailFrom(blurred, -1);
 		}
 	}
@@ -215,8 +236,9 @@ void ThemeDocument::prepareThumbnailFrom(
 			? Images::Option::TransparentBackground
 			: Images::Option(0));
 	auto original = image->original();
-	auto tw = isTheme ? _pixw : style::ConvertScale(_data->thumbnail()->width());
-	auto th = isTheme ? _pixh : style::ConvertScale(_data->thumbnail()->height());
+	const auto &location = _data->thumbnailLocation();
+	auto tw = isTheme ? _pixw : style::ConvertScale(location.width());
+	auto th = isTheme ? _pixh : style::ConvertScale(location.height());
 	if (!tw || !th) {
 		tw = th = 1;
 	}
@@ -234,7 +256,7 @@ void ThemeDocument::prepareThumbnailFrom(
 			Data::PatternColor(_background),
 			_intensity);
 	}
-	_thumbnail = App::pixmapFromImageInPlace(std::move(original));
+	_thumbnail = Ui::PixmapFromImage(std::move(original));
 	_thumbnailGood = good;
 }
 
@@ -245,11 +267,10 @@ TextState ThemeDocument::textState(QPoint point, StateRequest request) const {
 		return result;
 	}
 	auto paintx = 0, painty = 0, paintw = width(), painth = height();
-	auto bubble = _parent->hasBubble();
 	if (QRect(paintx, painty, paintw, painth).contains(point)) {
 		if (_data->uploading()) {
 			result.link = _cancell;
-		} else if (_data->loaded()) {
+		} else if (dataLoaded()) {
 			result.link = _openl;
 		} else if (_data->loading()) {
 			result.link = _cancell;
@@ -261,7 +282,8 @@ TextState ThemeDocument::textState(QPoint point, StateRequest request) const {
 }
 
 float64 ThemeDocument::dataProgress() const {
-	return _data->progress();
+	ensureDataMediaCreated();
+	return _dataMedia->progress();
 }
 
 bool ThemeDocument::dataFinished() const {
@@ -270,11 +292,13 @@ bool ThemeDocument::dataFinished() const {
 }
 
 bool ThemeDocument::dataLoaded() const {
-	return _data->loaded();
+	ensureDataMediaCreated();
+	return _dataMedia->loaded();
 }
 
 bool ThemeDocument::isReadyForOpen() const {
-	return _data->loaded();
+	ensureDataMediaCreated();
+	return _dataMedia->loaded();
 }
 
 QString ThemeDocument::additionalInfoString() const {
@@ -282,6 +306,14 @@ QString ThemeDocument::additionalInfoString() const {
 	// this attachment in WebPage media.
 	static auto result = QString(" ");
 	return result;
+}
+
+bool ThemeDocument::hasHeavyPart() const {
+	return (_dataMedia != nullptr);
+}
+
+void ThemeDocument::unloadHeavyPart() {
+	_dataMedia = nullptr;
 }
 
 } // namespace HistoryView

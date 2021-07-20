@@ -8,7 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/special_buttons.h"
 
 #include "styles/style_boxes.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 #include "dialogs/dialogs_layout.h"
 #include "ui/effects/ripple_animation.h"
 #include "ui/effects/radial_animation.h"
@@ -19,24 +19,31 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_folder.h"
 #include "data/data_channel.h"
+#include "data/data_cloud_file.h"
+#include "data/data_changes.h"
+#include "data/data_user.h"
+#include "data/data_streaming.h"
+#include "data/data_file_origin.h"
 #include "history/history.h"
 #include "core/file_utilities.h"
 #include "core/application.h"
-#include "boxes/photo_crop_box.h"
 #include "boxes/confirm_box.h"
+#include "editor/photo_editor_layer_widget.h"
+#include "media/streaming/media_streaming_instance.h"
+#include "media/streaming/media_streaming_player.h"
+#include "media/streaming/media_streaming_document.h"
+#include "window/window_controller.h"
 #include "window/window_session_controller.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
 #include "mainwidget.h"
-#include "observer_peer.h"
 #include "facades.h"
-#include "app.h"
 
 namespace Ui {
 namespace {
 
-constexpr int kWideScale = 5;
+constexpr auto kAnimationDuration = crl::time(120);
 
 QString CropTitle(not_null<PeerData*> peer) {
 	if (peer->isChat() || peer->isMegagroup()) {
@@ -58,80 +65,8 @@ QPixmap CreateSquarePixmap(int width, Callback &&paintCallback) {
 		Painter p(&image);
 		paintCallback(p);
 	}
-	return App::pixmapFromImageInPlace(std::move(image));
+	return Ui::PixmapFromImage(std::move(image));
 };
-
-template <typename Callback>
-void SuggestPhoto(
-		const QImage &image,
-		const QString &title,
-		Callback &&callback) {
-	auto badAspect = [](int a, int b) {
-		return (a >= 10 * b);
-	};
-	if (image.isNull()
-		|| badAspect(image.width(), image.height())
-		|| badAspect(image.height(), image.width())) {
-		Ui::show(
-			Box<InformBox>(tr::lng_bad_photo(tr::now)),
-			Ui::LayerOption::KeepOther);
-		return;
-	}
-
-	const auto box = Ui::show(
-		Box<PhotoCropBox>(image, title),
-		Ui::LayerOption::KeepOther);
-	box->ready(
-	) | rpl::start_with_next(
-		std::forward<Callback>(callback),
-		box->lifetime());
-}
-
-template <typename Callback>
-void SuggestPhotoFile(
-		const FileDialog::OpenResult &result,
-		const QString &title,
-		Callback &&callback) {
-	if (result.paths.isEmpty() && result.remoteContent.isEmpty()) {
-		return;
-	}
-
-	auto image = [&] {
-		if (!result.remoteContent.isEmpty()) {
-			return App::readImage(result.remoteContent);
-		} else if (!result.paths.isEmpty()) {
-			return App::readImage(result.paths.front());
-		}
-		return QImage();
-	}();
-	SuggestPhoto(
-		image,
-		title,
-		std::forward<Callback>(callback));
-}
-
-template <typename Callback>
-void ShowChoosePhotoBox(
-		QPointer<QWidget> parent,
-		const QString &title,
-		Callback &&callback) {
-	auto imgExtensions = cImgExtensions();
-	auto filter = qsl("Image files (*")
-		+ imgExtensions.join(qsl(" *"))
-		+ qsl(");;")
-		+ FileDialog::AllFilesFilter();
-	auto handleChosenPhoto = [
-		title,
-		callback = std::forward<Callback>(callback)
-	](auto &&result) mutable {
-		SuggestPhotoFile(result, title, std::move(callback));
-	};
-	FileDialog::GetOpenPath(
-		parent,
-		tr::lng_choose_image(tr::now),
-		filter,
-		std::move(handleChosenPhoto));
-}
 
 } // namespace
 
@@ -178,349 +113,35 @@ void HistoryDownButton::setUnreadCount(int unreadCount) {
 	}
 }
 
-EmojiButton::EmojiButton(QWidget *parent, const style::IconButton &st)
-: RippleButton(parent, st.ripple)
-, _st(st) {
-	resize(_st.width, _st.height);
-	setCursor(style::cur_pointer);
-}
+UserpicButton::UserpicButton(
+	QWidget *parent,
+	not_null<Window::Controller*> window,
+	not_null<PeerData*> peer,
+	Role role,
+	const style::UserpicButton &st)
+: RippleButton(parent, st.changeButton.ripple)
+, _st(st)
+, _controller(window->sessionController())
+, _window(window)
+, _peer(peer)
+, _cropTitle(CropTitle(peer))
+, _role(role) {
+	Expects(_role == Role::ChangePhoto);
 
-void EmojiButton::paintEvent(QPaintEvent *e) {
-	Painter p(this);
-
-	p.fillRect(e->rect(), st::historyComposeAreaBg);
-	paintRipple(p, _st.rippleAreaPosition.x(), _st.rippleAreaPosition.y(), _rippleOverride ? &(*_rippleOverride)->c : nullptr);
-
-	const auto over = isOver();
-	const auto loadingState = _loading
-		? _loading->computeState()
-		: Ui::RadialState{ 0., 0, FullArcLength };
-	if (loadingState.shown < 1.) {
-		p.setOpacity(1. - loadingState.shown);
-
-		const auto icon = _iconOverride ? _iconOverride : &(over ? _st.iconOver : _st.icon);
-		auto position = _st.iconPosition;
-		if (position.x() < 0) {
-			position.setX((width() - icon->width()) / 2);
-		}
-		if (position.y() < 0) {
-			position.setY((height() - icon->height()) / 2);
-		}
-		icon->paint(p, position, width());
-
-		p.setOpacity(1.);
-	}
-
-	QRect inner(QPoint((width() - st::historyEmojiCircle.width()) / 2, (height() - st::historyEmojiCircle.height()) / 2), st::historyEmojiCircle);
-	const auto color = (_colorOverride
-		? *_colorOverride
-		: (over
-			? st::historyEmojiCircleFgOver
-			: st::historyEmojiCircleFg));
-	if (anim::Disabled() && _loading && _loading->animating()) {
-		anim::DrawStaticLoading(
-			p,
-			inner,
-			st::historyEmojiCircleLine,
-			color);
-	} else {
-		auto pen = color->p;
-		pen.setWidth(st::historyEmojiCircleLine);
-		pen.setCapStyle(Qt::RoundCap);
-		p.setPen(pen);
-		p.setBrush(Qt::NoBrush);
-
-		PainterHighQualityEnabler hq(p);
-		if (loadingState.arcLength < FullArcLength) {
-			p.drawArc(inner, loadingState.arcFrom, loadingState.arcLength);
-		} else {
-			p.drawEllipse(inner);
-		}
-	}
-}
-
-void EmojiButton::loadingAnimationCallback() {
-	if (!anim::Disabled()) {
-		update();
-	}
-}
-
-void EmojiButton::setLoading(bool loading) {
-	if (loading && !_loading) {
-		_loading = std::make_unique<Ui::InfiniteRadialAnimation>(
-			[=] { loadingAnimationCallback(); },
-			st::defaultInfiniteRadialAnimation);
-	}
-	if (loading) {
-		_loading->start();
-		update();
-	} else if (_loading) {
-		_loading->stop();
-		update();
-	}
-}
-
-void EmojiButton::setColorOverrides(const style::icon *iconOverride, const style::color *colorOverride, const style::color *rippleOverride) {
-	_iconOverride = iconOverride;
-	_colorOverride = colorOverride;
-	_rippleOverride = rippleOverride;
-	update();
-}
-
-void EmojiButton::onStateChanged(State was, StateChangeSource source) {
-	RippleButton::onStateChanged(was, source);
-	auto wasOver = static_cast<bool>(was & StateFlag::Over);
-	if (isOver() != wasOver) {
-		update();
-	}
-}
-
-QPoint EmojiButton::prepareRippleStartPosition() const {
-	if (!_st.rippleAreaSize) {
-		return DisabledRippleStartPosition();
-	}
-	return mapFromGlobal(QCursor::pos()) - _st.rippleAreaPosition;
-}
-
-QImage EmojiButton::prepareRippleMask() const {
-	return RippleAnimation::ellipseMask(QSize(_st.rippleAreaSize, _st.rippleAreaSize));
-}
-
-SendButton::SendButton(QWidget *parent) : RippleButton(parent, st::historyReplyCancel.ripple) {
-	resize(st::historySendSize);
-}
-
-void SendButton::setType(Type type) {
-	Expects(isSlowmode() || type != Type::Slowmode);
-
-	if (isSlowmode() && type != Type::Slowmode) {
-		_afterSlowmodeType = type;
-		return;
-	}
-	if (_type != type) {
-		_contentFrom = grabContent();
-		_type = type;
-		_a_typeChanged.stop();
-		_contentTo = grabContent();
-		_a_typeChanged.start([=] { update(); }, 0., 1., st::historyRecordVoiceDuration);
-		setPointerCursor(_type != Type::Slowmode);
-		update();
-	}
-	if (_type != Type::Record) {
-		_recordActive = false;
-		_a_recordActive.stop();
-	}
-}
-
-void SendButton::setRecordActive(bool recordActive) {
-	if (_recordActive != recordActive) {
-		_recordActive = recordActive;
-		_a_recordActive.start([this] { recordAnimationCallback(); }, _recordActive ? 0. : 1., _recordActive ? 1. : 0, st::historyRecordVoiceDuration);
-		update();
-	}
-}
-
-void SendButton::setSlowmodeDelay(int seconds) {
-	Expects(seconds >= 0 && seconds < kSlowmodeDelayLimit);
-
-	if (_slowmodeDelay == seconds) {
-		return;
-	}
-	_slowmodeDelay = seconds;
-	_slowmodeDelayText = isSlowmode()
-		? qsl("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10, QChar('0'))
-		: QString();
-	setType(isSlowmode() ? Type::Slowmode : _afterSlowmodeType);
-	update();
-}
-
-void SendButton::finishAnimating() {
-	_a_typeChanged.stop();
-	_a_recordActive.stop();
-	update();
-}
-
-void SendButton::mouseMoveEvent(QMouseEvent *e) {
-	AbstractButton::mouseMoveEvent(e);
-	if (_recording) {
-		if (_recordUpdateCallback) {
-			_recordUpdateCallback(e->globalPos());
-		}
-	}
-}
-
-void SendButton::paintEvent(QPaintEvent *e) {
-	Painter p(this);
-
-	auto over = (isDown() || isOver());
-	auto changed = _a_typeChanged.value(1.);
-	if (changed < 1.) {
-		PainterHighQualityEnabler hq(p);
-		p.setOpacity(1. - changed);
-		auto targetRect = QRect((1 - kWideScale) / 2 * width(), (1 - kWideScale) / 2 * height(), kWideScale * width(), kWideScale * height());
-		auto hiddenWidth = anim::interpolate(0, (1 - kWideScale) / 2 * width(), changed);
-		auto hiddenHeight = anim::interpolate(0, (1 - kWideScale) / 2 * height(), changed);
-		p.drawPixmap(targetRect.marginsAdded(QMargins(hiddenWidth, hiddenHeight, hiddenWidth, hiddenHeight)), _contentFrom);
-		p.setOpacity(changed);
-		auto shownWidth = anim::interpolate((1 - kWideScale) / 2 * width(), 0, changed);
-		auto shownHeight = anim::interpolate((1 - kWideScale) / 2 * height(), 0, changed);
-		p.drawPixmap(targetRect.marginsAdded(QMargins(shownWidth, shownHeight, shownWidth, shownHeight)), _contentTo);
-		return;
-	}
-	switch (_type) {
-	case Type::Record: paintRecord(p, over); break;
-	case Type::Save: paintSave(p, over); break;
-	case Type::Cancel: paintCancel(p, over); break;
-	case Type::Send: paintSend(p, over); break;
-	case Type::Schedule: paintSchedule(p, over); break;
-	case Type::Slowmode: paintSlowmode(p); break;
-	}
-}
-
-void SendButton::paintRecord(Painter &p, bool over) {
-	auto recordActive = recordActiveRatio();
-	if (!isDisabled()) {
-		auto rippleColor = anim::color(st::historyAttachEmoji.ripple.color, st::historyRecordVoiceRippleBgActive, recordActive);
-		paintRipple(p, (width() - st::historyAttachEmoji.rippleAreaSize) / 2, st::historyAttachEmoji.rippleAreaPosition.y(), &rippleColor);
-	}
-
-	auto fastIcon = [&] {
-		if (isDisabled()) {
-			return &st::historyRecordVoice;
-		} else if (recordActive == 1.) {
-			return &st::historyRecordVoiceActive;
-		} else if (over) {
-			return &st::historyRecordVoiceOver;
-		}
-		return &st::historyRecordVoice;
-	};
-	fastIcon()->paintInCenter(p, rect());
-	if (!isDisabled() && recordActive > 0. && recordActive < 1.) {
-		p.setOpacity(recordActive);
-		st::historyRecordVoiceActive.paintInCenter(p, rect());
-		p.setOpacity(1.);
-	}
-}
-
-void SendButton::paintSave(Painter &p, bool over) {
-	const auto &saveIcon = over
-		? st::historyEditSaveIconOver
-		: st::historyEditSaveIcon;
-	saveIcon.paint(p, st::historySendIconPosition, width());
-}
-
-void SendButton::paintCancel(Painter &p, bool over) {
-	paintRipple(p, (width() - st::historyAttachEmoji.rippleAreaSize) / 2, st::historyAttachEmoji.rippleAreaPosition.y());
-
-	const auto &cancelIcon = over
-		? st::historyReplyCancelIconOver
-		: st::historyReplyCancelIcon;
-	cancelIcon.paintInCenter(p, rect());
-}
-
-void SendButton::paintSend(Painter &p, bool over) {
-	const auto &sendIcon = over
-		? st::historySendIconOver
-		: st::historySendIcon;
-	if (isDisabled()) {
-		const auto color = st::historyRecordVoiceFg->c;
-		sendIcon.paint(p, st::historySendIconPosition, width(), color);
-	} else {
-		sendIcon.paint(p, st::historySendIconPosition, width());
-	}
-}
-
-void SendButton::paintSchedule(Painter &p, bool over) {
-	{
-		PainterHighQualityEnabler hq(p);
-		p.setPen(Qt::NoPen);
-		p.setBrush(over ? st::historySendIconFgOver : st::historySendIconFg);
-		p.drawEllipse(
-			st::historyScheduleIconPosition.x(),
-			st::historyScheduleIconPosition.y(),
-			st::historyScheduleIcon.width(),
-			st::historyScheduleIcon.height());
-	}
-	st::historyScheduleIcon.paint(
-		p,
-		st::historyScheduleIconPosition,
-		width());
-}
-
-void SendButton::paintSlowmode(Painter &p) {
-	p.setFont(st::normalFont);
-	p.setPen(st::windowSubTextFg);
-	p.drawText(
-		rect().marginsRemoved(st::historySlowmodeCounterMargins),
-		_slowmodeDelayText,
-		style::al_center);
-}
-
-void SendButton::onStateChanged(State was, StateChangeSource source) {
-	RippleButton::onStateChanged(was, source);
-
-	auto down = (state() & StateFlag::Down);
-	if ((was & StateFlag::Down) != down) {
-		if (down) {
-			if (_type == Type::Record) {
-				_recording = true;
-				if (_recordStartCallback) {
-					_recordStartCallback();
-				}
-			}
-		} else if (_recording) {
-			_recording = false;
-			if (_recordStopCallback) {
-				_recordStopCallback(_recordActive);
-			}
-		}
-	}
-}
-
-bool SendButton::isSlowmode() const {
-	return (_slowmodeDelay > 0);
-}
-
-QPixmap SendButton::grabContent() {
-	auto result = QImage(kWideScale * size() * cIntRetinaFactor(), QImage::Format_ARGB32_Premultiplied);
-	result.setDevicePixelRatio(cRetinaFactor());
-	result.fill(Qt::transparent);
-	{
-		Painter p(&result);
-		p.drawPixmap(
-			(kWideScale - 1) / 2 * width(),
-			(kWideScale - 1) / 2 * height(),
-			GrabWidget(this));
-	}
-	return App::pixmapFromImageInPlace(std::move(result));
-}
-
-QImage SendButton::prepareRippleMask() const {
-	auto size = (_type == Type::Record) ? st::historyAttachEmoji.rippleAreaSize : st::historyReplyCancel.rippleAreaSize;
-	return Ui::RippleAnimation::ellipseMask(QSize(size, size));
-}
-
-QPoint SendButton::prepareRippleStartPosition() const {
-	auto real = mapFromGlobal(QCursor::pos());
-	auto size = (_type == Type::Record) ? st::historyAttachEmoji.rippleAreaSize : st::historyReplyCancel.rippleAreaSize;
-	auto y = (_type == Type::Record) ? st::historyAttachEmoji.rippleAreaPosition.y() : (height() - st::historyReplyCancel.rippleAreaSize) / 2;
-	return real - QPoint((width() - size) / 2, y);
-}
-
-void SendButton::recordAnimationCallback() {
-	update();
-	if (_recordAnimationCallback) {
-		_recordAnimationCallback();
-	}
+	_waiting = false;
+	prepare();
 }
 
 UserpicButton::UserpicButton(
 	QWidget *parent,
+	not_null<Window::Controller*> window,
 	const QString &cropTitle,
 	Role role,
 	const style::UserpicButton &st)
 : RippleButton(parent, st.changeButton.ripple)
 , _st(st)
+, _controller(window->sessionController())
+, _window(window)
 , _cropTitle(cropTitle)
 , _role(role) {
 	Expects(_role == Role::ChangePhoto);
@@ -538,6 +159,7 @@ UserpicButton::UserpicButton(
 : RippleButton(parent, st.changeButton.ripple)
 , _st(st)
 , _controller(controller)
+, _window(&controller->window())
 , _peer(peer)
 , _cropTitle(CropTitle(_peer))
 , _role(role) {
@@ -556,10 +178,12 @@ UserpicButton::UserpicButton(
 , _peer(peer)
 , _cropTitle(CropTitle(_peer))
 , _role(role) {
-	Expects(_role != Role::OpenProfile);
+	Expects(_role != Role::OpenProfile && _role != Role::OpenPhoto);
 
 	_waiting = false;
+	processPeerPhoto();
 	prepare();
+	setupPeerViewers();
 }
 
 void UserpicButton::prepare() {
@@ -577,11 +201,11 @@ void UserpicButton::setClickHandlerByRole() {
 		addClickHandler(App::LambdaDelayed(
 			_st.changeButton.ripple.hideDuration,
 			this,
-			[this] { changePhotoLazy(); }));
+			[=] { changePhotoLocally(); }));
 		break;
 
 	case Role::OpenPhoto:
-		addClickHandler([this] {
+		addClickHandler([=] {
 			openPeerPhoto();
 		});
 		break;
@@ -596,18 +220,20 @@ void UserpicButton::setClickHandlerByRole() {
 	}
 }
 
-void UserpicButton::changePhotoLazy() {
-	auto callback = crl::guard(
+void UserpicButton::changePhotoLocally(bool requestToUpload) {
+	if (!_window) {
+		return;
+	}
+	auto callback = [=](QImage &&image) {
+		setImage(std::move(image));
+		if (requestToUpload) {
+			_uploadPhotoRequests.fire({});
+		}
+	};
+	Editor::PrepareProfilePhoto(
 		this,
-		[this](QImage &&image) { setImage(std::move(image)); });
-	ShowChoosePhotoBox(this, _cropTitle, std::move(callback));
-}
-
-void UserpicButton::uploadNewPeerPhoto() {
-	auto callback = crl::guard(this, [=](QImage &&image) {
-		_peer->session().api().uploadPeerPhoto(_peer, std::move(image));
-	});
-	ShowChoosePhotoBox(this, _cropTitle, std::move(callback));
+		_window,
+		std::move(callback));
 }
 
 void UserpicButton::openPeerPhoto() {
@@ -615,7 +241,7 @@ void UserpicButton::openPeerPhoto() {
 	Expects(_controller != nullptr);
 
 	if (_changeOverlayEnabled && _cursorInChangeOverlay) {
-		uploadNewPeerPhoto();
+		changePhotoLocally(true);
 		return;
 	}
 
@@ -624,24 +250,25 @@ void UserpicButton::openPeerPhoto() {
 		return;
 	}
 	const auto photo = _peer->owner().photo(id);
-	if (photo->date) {
-		Core::App().showPhoto(photo, _peer);
+	if (photo->date && _controller) {
+		_controller->openPhoto(photo, _peer);
 	}
 }
 
 void UserpicButton::setupPeerViewers() {
-	Notify::PeerUpdateViewer(
+	_peer->session().changes().peerUpdates(
 		_peer,
-		Notify::PeerUpdate::Flag::PhotoChanged
-	) | rpl::start_with_next([this] {
+		Data::PeerUpdate::Flag::Photo
+	) | rpl::start_with_next([=] {
 		processNewPeerPhoto();
 		update();
 	}, lifetime());
 
-	base::ObservableViewer(
-		_peer->session().downloaderTaskFinished()
-	) | rpl::start_with_next([this] {
-		if (_waiting && _peer->userpicLoaded()) {
+	_peer->session().downloaderTaskFinished(
+	) | rpl::filter([=] {
+		return _waiting;
+	}) | rpl::start_with_next([=] {
+		if (!_userpicView || _userpicView->image()) {
 			_waiting = false;
 			startNewPhotoShowing();
 		}
@@ -650,6 +277,7 @@ void UserpicButton::setupPeerViewers() {
 
 void UserpicButton::paintEvent(QPaintEvent *e) {
 	Painter p(this);
+
 	if (!_waiting && _notShownYet) {
 		_notShownYet = false;
 		startAnimation();
@@ -666,12 +294,19 @@ void UserpicButton::paintEvent(QPaintEvent *e) {
 			photoPosition.y(),
 			width(),
 			_st.photoSize);
+	} else if (showRepliesMessages()) {
+		Ui::EmptyUserpic::PaintRepliesMessages(
+			p,
+			photoPosition.x(),
+			photoPosition.y(),
+			width(),
+			_st.photoSize);
 	} else {
 		if (_a_appearance.animating()) {
 			p.drawPixmapLeft(photoPosition, width(), _oldUserpic);
 			p.setOpacity(_a_appearance.value(1.));
 		}
-		p.drawPixmapLeft(photoPosition, width(), _userpic);
+		paintUserpicFrame(p, photoPosition);
 	}
 
 	if (_role == Role::ChangePhoto) {
@@ -751,6 +386,29 @@ void UserpicButton::paintEvent(QPaintEvent *e) {
 	}
 }
 
+void UserpicButton::paintUserpicFrame(Painter &p, QPoint photoPosition) {
+	checkStreamedIsStarted();
+	if (_streamed
+		&& _streamed->player().ready()
+		&& !_streamed->player().videoSize().isEmpty()) {
+		const auto paused = _controller
+			? _controller->isGifPausedAtLeastFor(
+				Window::GifPauseReason::RoundPlaying)
+			: false;
+		auto request = Media::Streaming::FrameRequest();
+		auto size = QSize{ _st.photoSize, _st.photoSize };
+		request.outer = size * cIntRetinaFactor();
+		request.resize = size * cIntRetinaFactor();
+		request.radius = ImageRoundRadius::Ellipse;
+		p.drawImage(QRect(photoPosition, size), _streamed->frame(request));
+		if (!paused) {
+			_streamed->markFrameShown();
+		}
+	} else {
+		p.drawPixmapLeft(photoPosition, width(), _userpic);
+	}
+}
+
 QPoint UserpicButton::countPhotoPosition() const {
 	auto photoLeft = (_st.photoPosition.x() < 0)
 		? (width() - _st.photoSize) / 2
@@ -776,7 +434,8 @@ QPoint UserpicButton::prepareRippleStartPosition() const {
 void UserpicButton::processPeerPhoto() {
 	Expects(_peer != nullptr);
 
-	_waiting = !_peer->userpicLoaded();
+	_userpicView = _peer->createUserpicView();
+	_waiting = _userpicView && !_userpicView->image();
 	if (_waiting) {
 		_peer->loadUserpic();
 	}
@@ -786,6 +445,7 @@ void UserpicButton::processPeerPhoto() {
 		}
 		_canOpenPhoto = (_peer->userpicPhotoId() != 0);
 		updateCursor();
+		updateVideo();
 	}
 }
 
@@ -795,6 +455,108 @@ void UserpicButton::updateCursor() {
 	auto pointer = _canOpenPhoto
 		|| (_changeOverlayEnabled && _cursorInChangeOverlay);
 	setPointerCursor(pointer);
+}
+
+bool UserpicButton::createStreamingObjects(not_null<PhotoData*> photo) {
+	Expects(_peer != nullptr);
+
+	using namespace Media::Streaming;
+
+	const auto origin = _peer->isUser()
+		? Data::FileOriginUserPhoto(peerToUser(_peer->id), photo->id)
+		: Data::FileOrigin(Data::FileOriginPeerPhoto(_peer->id));
+	_streamed = std::make_unique<Instance>(
+		photo->owner().streaming().sharedDocument(photo, origin),
+		nullptr);
+	_streamed->lockPlayer();
+	_streamed->player().updates(
+	) | rpl::start_with_next_error([=](Update &&update) {
+		handleStreamingUpdate(std::move(update));
+	}, [=](Error &&error) {
+		handleStreamingError(std::move(error));
+	}, _streamed->lifetime());
+	if (_streamed->ready()) {
+		streamingReady(base::duplicate(_streamed->info()));
+	}
+	if (!_streamed->valid()) {
+		clearStreaming();
+		return false;
+	}
+	return true;
+}
+
+void UserpicButton::clearStreaming() {
+	_streamed = nullptr;
+	_streamedPhoto = nullptr;
+}
+
+void UserpicButton::handleStreamingUpdate(Media::Streaming::Update &&update) {
+	using namespace Media::Streaming;
+
+	v::match(update.data, [&](Information &update) {
+		streamingReady(std::move(update));
+	}, [&](const PreloadedVideo &update) {
+	}, [&](const UpdateVideo &update) {
+		this->update();
+	}, [&](const PreloadedAudio &update) {
+	}, [&](const UpdateAudio &update) {
+	}, [&](const WaitingForData &update) {
+	}, [&](MutedByOther) {
+	}, [&](Finished) {
+	});
+}
+
+void UserpicButton::handleStreamingError(Media::Streaming::Error &&error) {
+	Expects(_peer != nullptr);
+
+	_streamedPhoto->setVideoPlaybackFailed();
+	_streamedPhoto = nullptr;
+	_streamed = nullptr;
+}
+
+void UserpicButton::streamingReady(Media::Streaming::Information &&info) {
+	update();
+}
+
+void UserpicButton::updateVideo() {
+	Expects(_role == Role::OpenPhoto);
+
+	const auto id = _peer->userpicPhotoId();
+	if (!id) {
+		clearStreaming();
+		return;
+	}
+	const auto photo = _peer->owner().photo(id);
+	if (!photo->date || !photo->videoCanBePlayed()) {
+		clearStreaming();
+		return;
+	} else if (_streamed && _streamedPhoto == photo) {
+		return;
+	}
+	if (!createStreamingObjects(photo)) {
+		photo->setVideoPlaybackFailed();
+		return;
+	}
+	_streamedPhoto = photo;
+	checkStreamedIsStarted();
+}
+
+void UserpicButton::checkStreamedIsStarted() {
+	Expects(!_streamed || _streamedPhoto);
+
+	if (!_streamed) {
+		return;
+	} else if (_streamed->paused()) {
+		_streamed->resume();
+	}
+	if (_streamed && !_streamed->active() && !_streamed->failed()) {
+		const auto position = _streamedPhoto->videoStartPosition();
+		auto options = Media::Streaming::PlaybackOptions();
+		options.position = position;
+		options.mode = Media::Streaming::Mode::Video;
+		options.loop = true;
+		_streamed->play(options);
+	}
 }
 
 void UserpicButton::mouseMoveEvent(QMouseEvent *e) {
@@ -898,6 +660,10 @@ bool UserpicButton::showSavedMessages() const {
 	return _showSavedMessagesOnSelf && _peer && _peer->isSelf();
 }
 
+bool UserpicButton::showRepliesMessages() const {
+	return _showSavedMessagesOnSelf && _peer && _peer->isRepliesChat();
+}
+
 void UserpicButton::startChangeOverlayAnimation() {
 	auto over = isOver() || isDown();
 	_changeOverlayShown.start(
@@ -931,7 +697,7 @@ void UserpicButton::setImage(QImage &&image) {
 		Qt::IgnoreAspectRatio,
 		Qt::SmoothTransformation);
 	Images::prepareCircle(small);
-	_userpic = App::pixmapFromImageInPlace(std::move(small));
+	_userpic = Ui::PixmapFromImage(std::move(small));
 	_userpic.setDevicePixelRatio(cRetinaFactor());
 	_userpicCustom = _userpicHasImage = true;
 	_result = std::move(image);
@@ -951,123 +717,62 @@ void UserpicButton::prepareUserpicPixmap() {
 		p.drawEllipse(0, 0, size, size);
 	};
 	_userpicHasImage = _peer
-		? (_peer->currentUserpic() || _role != Role::ChangePhoto)
+		? (_peer->currentUserpic(_userpicView) || _role != Role::ChangePhoto)
 		: false;
 	_userpic = CreateSquarePixmap(size, [&](Painter &p) {
 		if (_userpicHasImage) {
-			_peer->paintUserpic(p, 0, 0, _st.photoSize);
+			_peer->paintUserpic(p, _userpicView, 0, 0, _st.photoSize);
 		} else {
 			paintButton(p, _st.changeButton.textBg);
 		}
 	});
 	_userpicUniqueKey = _userpicHasImage
-		? _peer->userpicUniqueKey()
+		? _peer->userpicUniqueKey(_userpicView)
 		: InMemoryKey();
 }
-// // #feed
-//FeedUserpicButton::FeedUserpicButton(
-//	QWidget *parent,
-//	not_null<Window::SessionController*> controller,
-//	not_null<Data::Feed*> feed,
-//	const style::FeedUserpicButton &st)
-//: AbstractButton(parent)
-//, _st(st)
-//, _controller(controller)
-//, _feed(feed) {
-//	prepare();
-//}
-//
-//void FeedUserpicButton::prepare() {
-//	resize(_st.size);
-//
-//	_feed->owner().feedUpdated(
-//	) | rpl::filter([=](const Data::FeedUpdate &update) {
-//		return (update.feed == _feed)
-//			&& (update.flag == Data::FeedUpdateFlag::Channels);
-//	}) | rpl::start_with_next([=] {
-//		crl::on_main(this, [=] { checkParts(); });
-//	}, lifetime());
-//
-//	refreshParts();
-//}
-//
-//void FeedUserpicButton::checkParts() {
-//	if (!partsAreValid()) {
-//		refreshParts();
-//	}
-//}
-//
-//bool FeedUserpicButton::partsAreValid() const {
-//	const auto &channels = _feed->channels();
-//	const auto count = std::min(int(channels.size()), 4);
-//	if (count != _parts.size()) {
-//		return false;
-//	}
-//	for (auto i = 0; i != count; ++i) {
-//		if (channels[i]->peer != _parts[i].channel) {
-//			return false;
-//		}
-//	}
-//	return true;
-//}
-//
-//void FeedUserpicButton::refreshParts() {
-//	const auto &channels = _feed->channels();
-//	const auto count = std::min(int(channels.size()), 4);
-//
-//	const auto createButton = [&](not_null<ChannelData*> channel) {
-//		auto result = base::make_unique_q<Ui::UserpicButton>(
-//			this,
-//			_controller,
-//			channel,
-//			Ui::UserpicButton::Role::Custom,
-//			_st.innerPart);
-//		result->setAttribute(Qt::WA_TransparentForMouseEvents);
-//		result->show();
-//		return result;
-//	};
-//
-//	const auto position = countInnerPosition();
-//	auto x = position.x();
-//	auto y = position.y();
-//	const auto delta = _st.innerSize - _st.innerPart.photoSize;
-//	_parts.clear();
-//	for (auto i = 0; i != count; ++i) {
-//		const auto channel = channels[i]->peer->asChannel();
-//		_parts.push_back({ channel, createButton(channel) });
-//		_parts.back().button->moveToLeft(x, y);
-//		switch (i) {
-//		case 0:
-//		case 2: x += delta; break;
-//		case 1: x -= delta; y += delta; break;
-//		}
-//	}
-//}
-//
-//QPoint FeedUserpicButton::countInnerPosition() const {
-//	auto innerLeft = (_st.innerPosition.x() < 0)
-//		? (width() - _st.innerSize) / 2
-//		: _st.innerPosition.x();
-//	auto innerTop = (_st.innerPosition.y() < 0)
-//		? (height() - _st.innerSize) / 2
-//		: _st.innerPosition.y();
-//	return { innerLeft, innerTop };
-//}
+
+rpl::producer<> UserpicButton::uploadPhotoRequests() const {
+	return _uploadPhotoRequests.events();
+}
 
 SilentToggle::SilentToggle(QWidget *parent, not_null<ChannelData*> channel)
-: IconButton(parent, st::historySilentToggle)
+: RippleButton(parent, st::historySilentToggle.ripple)
+, _st(st::historySilentToggle)
+, _colorOver(st::historyComposeIconFgOver->c)
 , _channel(channel)
-, _checked(channel->owner().notifySilentPosts(_channel)) {
+, _checked(channel->owner().notifySilentPosts(_channel))
+, _crossLine(st::historySilentToggleCrossLine) {
 	Expects(!channel->owner().notifySilentPostsUnknown(_channel));
 
-	if (_checked) {
-		refreshIconOverrides();
-	}
+	resize(_st.width, _st.height);
+
+	style::PaletteChanged(
+	) | rpl::start_with_next([=] {
+		_crossLine.invalidate();
+	}, lifetime());
+
+	paintRequest(
+	) | rpl::start_with_next([=](const QRect &clip) {
+		Painter p(this);
+		paintRipple(p, _st.rippleAreaPosition, nullptr);
+
+		_crossLine.paint(
+			p,
+			(width() - _st.icon.width()) / 2,
+			(height() - _st.icon.height()) / 2,
+			_crossLineAnimation.value(_checked ? 1. : 0.),
+			// Since buttons of the compose controls have no duration
+			// for the over animation, we can skip this animation here.
+			isOver()
+				? std::make_optional<QColor>(_colorOver)
+				: std::nullopt);
+	}, lifetime());
+
 	setMouseTracking(true);
 }
 
 void SilentToggle::mouseMoveEvent(QMouseEvent *e) {
-	IconButton::mouseMoveEvent(e);
+	RippleButton::mouseMoveEvent(e);
 	if (rect().contains(e->pos())) {
 		Ui::Tooltip::Show(1000, this);
 	} else {
@@ -1078,28 +783,22 @@ void SilentToggle::mouseMoveEvent(QMouseEvent *e) {
 void SilentToggle::setChecked(bool checked) {
 	if (_checked != checked) {
 		_checked = checked;
-		refreshIconOverrides();
+		_crossLineAnimation.start(
+			[=] { update(); },
+			_checked ? 0. : 1.,
+			_checked ? 1. : 0.,
+			kAnimationDuration);
 	}
 }
 
-void SilentToggle::refreshIconOverrides() {
-	const auto iconOverride = _checked
-		? &st::historySilentToggleOn
-		: nullptr;
-	const auto iconOverOverride = _checked
-		? &st::historySilentToggleOnOver
-		: nullptr;
-	setIconOverride(iconOverride, iconOverOverride);
-}
-
 void SilentToggle::leaveEventHook(QEvent *e) {
-	IconButton::leaveEventHook(e);
+	RippleButton::leaveEventHook(e);
 	Ui::Tooltip::Hide();
 }
 
 void SilentToggle::mouseReleaseEvent(QMouseEvent *e) {
 	setChecked(!_checked);
-	IconButton::mouseReleaseEvent(e);
+	RippleButton::mouseReleaseEvent(e);
 	Ui::Tooltip::Show(0, this);
 	_channel->owner().updateNotifySettings(
 		_channel,
@@ -1119,6 +818,20 @@ QPoint SilentToggle::tooltipPos() const {
 
 bool SilentToggle::tooltipWindowActive() const {
 	return Ui::AppInFocus() && InFocusChain(window());
+}
+
+QPoint SilentToggle::prepareRippleStartPosition() const {
+	const auto result = mapFromGlobal(QCursor::pos())
+		- _st.rippleAreaPosition;
+	const auto rect = QRect(0, 0, _st.rippleAreaSize, _st.rippleAreaSize);
+	return rect.contains(result)
+		? result
+		: DisabledRippleStartPosition();
+}
+
+QImage SilentToggle::prepareRippleMask() const {
+	return RippleAnimation::ellipseMask(
+		QSize(_st.rippleAreaSize, _st.rippleAreaSize));
 }
 
 } // namespace Ui

@@ -12,9 +12,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/effects/panel_animation.h"
 #include "ui/ui_utility.h"
 #include "ui/filter_icons.h"
+#include "ui/cached_round_corners.h"
 #include "lang/lang_keys.h"
 #include "core/application.h"
-#include "app.h"
 #include "styles/style_chat_helpers.h"
 #include "styles/style_window.h"
 
@@ -22,7 +22,6 @@ namespace Ui {
 namespace {
 
 constexpr auto kHideTimeoutMs = crl::time(300);
-constexpr auto kDelayedHideTimeoutMs = 3 * crl::time(1000);
 constexpr auto kIconsPerRow = 6;
 
 constexpr auto kIcons = std::array{
@@ -103,7 +102,7 @@ void FilterIconPanel::setupInner() {
 	_inner->paintRequest(
 		) | rpl::start_with_next([=](QRect clip) {
 		auto p = Painter(_inner);
-		App::roundRect(
+		Ui::FillRoundRect(
 			p,
 			_inner->rect(),
 			st::emojiPanBg,
@@ -123,11 +122,11 @@ void FilterIconPanel::setupInner() {
 				continue;
 			}
 			if (i == selected) {
-				App::roundRect(
+				Ui::FillRoundRect(
 					p,
 					rect,
 					st::emojiPanHover,
-					StickerHoverCorners);
+					Ui::StickerHoverCorners);
 			}
 			const auto icon = LookupFilterIcon(kIcons[i]).normal;
 			icon->paintInCenter(p, rect, st::emojiIconFg->c);
@@ -390,7 +389,7 @@ QImage FilterIconPanel::grabForAnimation() {
 	_a_show = base::take(showAnimation);
 	_showAnimation = base::take(showAnimationData);
 	_a_opacity = base::take(opacityAnimation);
-	_cache = base::take(_cache);
+	_cache = base::take(cache);
 
 	return result;
 }

@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "export/output/export_output_abstract.h"
 #include "export/output/export_output_result.h"
 #include "export/output/export_output_stats.h"
+#include "mtproto/mtp_instance.h"
 
 namespace Export {
 namespace {
@@ -24,7 +25,6 @@ Settings NormalizeSettings(const Settings &settings) {
 		return base::duplicate(settings);
 	}
 	auto result = base::duplicate(settings);
-	result.format = Output::Format::Html;
 	result.types = result.fullChats = Settings::Type::AnyChatsMask;
 	return result;
 }
@@ -35,6 +35,7 @@ class ControllerObject {
 public:
 	ControllerObject(
 		crl::weak_on_queue<ControllerObject> weak,
+		QPointer<MTP::Instance> mtproto,
 		const MTPInputPeer &peer);
 
 	rpl::producer<State> state() const;
@@ -50,12 +51,14 @@ public:
 	void startExport(
 		const Settings &settings,
 		const Environment &environment);
+	void skipFile(uint64 randomId);
 	void cancelExportFast();
 
 private:
 	using Step = ProcessingState::Step;
 	using DownloadProgress = ApiWrap::DownloadProgress;
 
+	[[nodiscard]] bool stopped() const;
 	void setState(State &&state);
 	void ioError(const QString &path);
 	bool ioCatchError(Output::Result result);
@@ -132,12 +135,13 @@ private:
 
 ControllerObject::ControllerObject(
 	crl::weak_on_queue<ControllerObject> weak,
+	QPointer<MTP::Instance> mtproto,
 	const MTPInputPeer &peer)
-: _api(weak.runner())
+: _api(mtproto, weak.runner())
 , _state(PasswordCheckState{}) {
 	_api.errors(
-	) | rpl::start_with_next([=](RPCError &&error) {
-		setState(ApiErrorState{ std::move(error) });
+	) | rpl::start_with_next([=](const MTP::Error &error) {
+		setState(ApiErrorState{ error });
 	}, _lifetime);
 
 	_api.ioErrors(
@@ -159,13 +163,20 @@ rpl::producer<State> ControllerObject::state() const {
 	) | rpl::then(
 		_stateChanges.events()
 	) | rpl::filter([](const State &state) {
-		const auto password = base::get_if<PasswordCheckState>(&state);
+		const auto password = std::get_if<PasswordCheckState>(&state);
 		return !password || !password->requesting;
 	});
 }
 
+bool ControllerObject::stopped() const {
+	return v::is<CancelledState>(_state)
+		|| v::is<ApiErrorState>(_state)
+		|| v::is<OutputErrorState>(_state)
+		|| v::is<FinishedState>(_state);
+}
+
 void ControllerObject::setState(State &&state) {
-	if (_state.is<CancelledState>()) {
+	if (stopped()) {
 		return;
 	}
 	_state = std::move(state);
@@ -209,7 +220,7 @@ bool ControllerObject::ioCatchError(Output::Result result) {
 //	//)).done([=](const MTPaccount_Password &result) {
 //	//	_passwordRequestId = 0;
 //	//	passwordStateDone(result);
-//	//}).fail([=](const RPCError &error) {
+//	//}).fail([=](const MTP::Error &error) {
 //	//	apiError(error);
 //	//}).send();
 //}
@@ -241,6 +252,13 @@ void ControllerObject::startExport(
 	_writer = Output::CreateWriter(_settings.format);
 	fillExportSteps();
 	exportNext();
+}
+
+void ControllerObject::skipFile(uint64 randomId) {
+	if (stopped()) {
+		return;
+	}
+	_api.skipFile(randomId);
 }
 
 void ControllerObject::fillExportSteps() {
@@ -352,7 +370,9 @@ void ControllerObject::initialized(const ApiWrap::StartInfo &info) {
 void ControllerObject::collectDialogsList() {
 	setState(stateDialogsList(0));
 	_api.requestDialogsList([=](int count) {
-		setState(stateDialogsList(count));
+		if (count > 0) {
+			setState(stateDialogsList(count - 1));
+		}
 		return true;
 	}, [=](Data::DialogsInfo &&result) {
 		_dialogsInfo = std::move(result);
@@ -514,6 +534,7 @@ ProcessingState ControllerObject::stateUserpics(
 		result.entityIndex = _userpicsWritten + progress.itemIndex;
 		result.entityCount = std::max(_userpicsCount, result.entityIndex);
 		result.bytesType = ProcessingState::FileType::Photo;
+		result.bytesRandomId = progress.randomId;
 		if (!progress.path.isEmpty()) {
 			const auto last = progress.path.lastIndexOf('/');
 			result.bytesName = progress.path.mid(last + 1);
@@ -560,10 +581,13 @@ void ControllerObject::fillMessagesState(
 	result.entityName = dialog->name;
 	result.entityType = (dialog->type == Data::DialogInfo::Type::Self)
 		? ProcessingState::EntityType::SavedMessages
+		: (dialog->type == Data::DialogInfo::Type::Replies)
+		? ProcessingState::EntityType::RepliesMessages
 		: ProcessingState::EntityType::Chat;
 	result.itemIndex = _messagesWritten + progress.itemIndex;
 	result.itemCount = std::max(_messagesCount, result.itemIndex);
 	result.bytesType = ProcessingState::FileType::File; // TODO
+	result.bytesRandomId = progress.randomId;
 	if (!progress.path.isEmpty()) {
 		const auto last = progress.path.lastIndexOf('/');
 		result.bytesName = progress.path.mid(last + 1);
@@ -585,7 +609,10 @@ void ControllerObject::setFinishedState() {
 		_stats.bytesCount() });
 }
 
-Controller::Controller(const MTPInputPeer &peer) : _wrapped(peer) {
+Controller::Controller(
+	QPointer<MTP::Instance> mtproto,
+	const MTPInputPeer &peer)
+: _wrapped(std::move(mtproto), peer) {
 }
 
 rpl::producer<State> Controller::state() const {
@@ -631,6 +658,12 @@ void Controller::startExport(
 
 	_wrapped.with([=](Implementation &unwrapped) {
 		unwrapped.startExport(settings, environment);
+	});
+}
+
+void Controller::skipFile(uint64 randomId) {
+	_wrapped.with([=](Implementation &unwrapped) {
+		unwrapped.skipFile(randomId);
 	});
 }
 

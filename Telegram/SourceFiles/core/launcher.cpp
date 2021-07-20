@@ -10,13 +10,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "platform/platform_launcher.h"
 #include "platform/platform_specific.h"
 #include "base/platform/base_platform_info.h"
+#include "base/platform/base_platform_file_utilities.h"
 #include "ui/main_queue_processor.h"
-#include "ui/ui_utility.h"
 #include "core/crash_reports.h"
 #include "core/update_checker.h"
 #include "core/sandbox.h"
 #include "base/concurrent_timer.h"
-#include "facades.h"
+
+#include <QtCore/QLoggingCategory>
 
 namespace Core {
 namespace {
@@ -34,26 +35,47 @@ private:
 	static constexpr auto kForwardArgumentCount = 1;
 
 	int _count = 0;
-	char *_arguments[kForwardArgumentCount + 1] = { nullptr };
+	std::vector<QByteArray> _owned;
+	std::vector<char*> _arguments;
+
+	void pushArgument(const char *text);
 
 };
 
 FilteredCommandLineArguments::FilteredCommandLineArguments(
 	int argc,
-	char **argv)
-: _count(std::clamp(argc, 0, kForwardArgumentCount)) {
+	char **argv) {
 	// For now just pass only the first argument, the executable path.
-	for (auto i = 0; i != _count; ++i) {
-		_arguments[i] = argv[i];
+	for (auto i = 0; i != kForwardArgumentCount; ++i) {
+		pushArgument(argv[i]);
 	}
+
+#if defined Q_OS_WIN || defined Q_OS_MAC
+	if (cUseFreeType()) {
+		pushArgument("-platform");
+#ifdef Q_OS_WIN
+		pushArgument("windows:fontengine=freetype");
+#else // Q_OS_WIN
+		pushArgument("cocoa:fontengine=freetype");
+#endif // !Q_OS_WIN
+	}
+#endif // Q_OS_WIN || Q_OS_MAC
+
+	pushArgument(nullptr);
 }
 
 int &FilteredCommandLineArguments::count() {
+	_count = _arguments.size() - 1;
 	return _count;
 }
 
 char **FilteredCommandLineArguments::values() {
-	return _arguments;
+	return _arguments.data();
+}
+
+void FilteredCommandLineArguments::pushArgument(const char *text) {
+	_owned.emplace_back(text);
+	_arguments.push_back(_owned.back().data());
 }
 
 QString DebugModeSettingPath() {
@@ -74,11 +96,33 @@ void ComputeDebugMode() {
 	if (file.exists() && file.open(QIODevice::ReadOnly)) {
 		Logs::SetDebugEnabled(file.read(1) != "0");
 	}
+	if (cDebugMode()) {
+		Logs::SetDebugEnabled(true);
+	}
+	if (Logs::DebugEnabled()) {
+		QLoggingCategory::setFilterRules("qt.qpa.gl.debug=true");
+	}
 }
 
-void ComputeTestMode() {
-	if (QFile(cWorkingDir() + qsl("tdata/withtestmode")).exists()) {
-		cSetTestMode(true);
+void ComputeExternalUpdater() {
+	QFile file(qsl("/etc/tdesktop/externalupdater"));
+
+	if (file.exists() && file.open(QIODevice::ReadOnly)) {
+		QTextStream fileStream(&file);
+		while (!fileStream.atEnd()) {
+			const auto path = fileStream.readLine();
+
+			if (path == (cExeDir() + cExeName())) {
+				SetUpdaterDisabledAtStartup();
+				return;
+			}
+		}
+	}
+}
+
+void ComputeFreeType() {
+	if (QFile::exists(cWorkingDir() + qsl("tdata/withfreetype"))) {
+		cSetUseFreeType(true);
 	}
 }
 
@@ -97,7 +141,7 @@ void ComputeInstallBetaVersions() {
 	const auto installBetaSettingPath = InstallBetaVersionsSettingPath();
 	if (cAlphaVersion()) {
 		cSetInstallBetaVersion(false);
-	} else if (QFile(installBetaSettingPath).exists()) {
+	} else if (QFile::exists(installBetaSettingPath)) {
 		QFile f(installBetaSettingPath);
 		if (f.open(QIODevice::ReadOnly)) {
 			cSetInstallBetaVersion(f.read(1) != "0");
@@ -141,18 +185,16 @@ bool MoveLegacyAlphaFolder(const QString &folder, const QString &file) {
 	if (QDir(was).exists() && !QDir(now).exists()) {
 		const auto oldFile = was + "/tdata/" + file;
 		const auto newFile = was + "/tdata/alpha";
-		if (QFile(oldFile).exists() && !QFile(newFile).exists()) {
+		if (QFile::exists(oldFile) && !QFile::exists(newFile)) {
 			if (!QFile(oldFile).copy(newFile)) {
-				LOG(("FATAL: Could not copy '%1' to '%2'"
-					).arg(oldFile
-					).arg(newFile));
+				LOG(("FATAL: Could not copy '%1' to '%2'").arg(
+					oldFile,
+					newFile));
 				return false;
 			}
 		}
 		if (!QDir().rename(was, now)) {
-			LOG(("FATAL: Could not rename '%1' to '%2'"
-				).arg(was
-				).arg(now));
+			LOG(("FATAL: Could not rename '%1' to '%2'").arg(was, now));
 			return false;
 		}
 	}
@@ -230,14 +272,10 @@ std::unique_ptr<Launcher> Launcher::Create(int argc, char *argv[]) {
 
 Launcher::Launcher(
 	int argc,
-	char *argv[],
-	const QString &deviceModel,
-	const QString &systemVersion)
+	char *argv[])
 : _argc(argc)
 , _argv(argv)
-, _baseIntegration(_argc, _argv)
-, _deviceModel(deviceModel)
-, _systemVersion(systemVersion) {
+, _baseIntegration(_argc, _argv) {
 	base::Integration::Set(&_baseIntegration);
 }
 
@@ -245,16 +283,21 @@ void Launcher::init() {
 	_arguments = readArguments(_argc, _argv);
 
 	prepareSettings();
+	initQtMessageLogging();
 
 	QApplication::setApplicationName(qsl("TelegramDesktop"));
-
-#if defined(Q_OS_LINUX) && QT_VERSION >= QT_VERSION_CHECK(5, 7, 0)
-	QApplication::setDesktopFileName(Platform::GetLauncherFilename());
-#endif
 
 #ifndef OS_MAC_OLD
 	QApplication::setAttribute(Qt::AA_DisableHighDpiScaling, true);
 #endif // OS_MAC_OLD
+
+	// fallback session management is useless for tdesktop since it doesn't have
+	// any "are you sure you want to close this window?" dialogs
+	// but it produces bugs like https://github.com/telegramdesktop/tdesktop/issues/5022
+	// and https://github.com/telegramdesktop/tdesktop/issues/7549
+	// and https://github.com/telegramdesktop/tdesktop/issues/948
+	// more info: https://doc.qt.io/qt-5/qguiapplication.html#isFallbackSessionManagementEnabled
+	QApplication::setFallbackSessionManagementEnabled(false);
 
 	initHook();
 }
@@ -271,9 +314,25 @@ int Launcher::exec() {
 	// Must be started before Platform is started.
 	Logs::start(this);
 
+	if (Logs::DebugEnabled()) {
+		const auto openalLogPath = QDir::toNativeSeparators(
+			cWorkingDir() + qsl("DebugLogs/last_openal_log.txt"));
+
+		qputenv("ALSOFT_LOGLEVEL", "3");
+
+#ifdef Q_OS_WIN
+		_wputenv_s(
+			L"ALSOFT_LOGFILE",
+			openalLogPath.toStdWString().c_str());
+#else // Q_OS_WIN
+		qputenv(
+			"ALSOFT_LOGFILE",
+			QFile::encodeName(openalLogPath));
+#endif // !Q_OS_WIN
+	}
+
 	// Must be started before Sandbox is created.
 	Platform::start();
-	Ui::DisableCustomScaling();
 
 	auto result = executeApplication();
 
@@ -282,7 +341,7 @@ int Launcher::exec() {
 	if (!UpdaterDisabled() && cRestartingUpdate()) {
 		DEBUG_LOG(("Sandbox Info: executing updater to install update."));
 		if (!launchUpdater(UpdaterLaunch::PerformUpdate)) {
-			psDeleteDir(cWorkingDir() + qsl("tupdates/temp"));
+			base::Platform::DeleteDirectory(cWorkingDir() + qsl("tupdates/temp"));
 		}
 	} else if (cRestarting()) {
 		DEBUG_LOG(("Sandbox Info: executing Telegram because of restart."));
@@ -299,8 +358,9 @@ int Launcher::exec() {
 void Launcher::workingFolderReady() {
 	srand((unsigned int)time(nullptr));
 
-	ComputeTestMode();
 	ComputeDebugMode();
+	ComputeExternalUpdater();
+	ComputeFreeType();
 	ComputeInstallBetaVersions();
 	ComputeInstallationTag();
 }
@@ -341,7 +401,7 @@ bool Launcher::customWorkingDir() const {
 }
 
 void Launcher::prepareSettings() {
-	auto path = Platform::CurrentExecutablePath(_argc, _argv);
+	auto path = base::Platform::CurrentExecutablePath(_argc, _argv);
 	LOG(("Executable path before check: %1").arg(path));
 	if (!path.isEmpty()) {
 		auto info = QFileInfo(path);
@@ -361,12 +421,22 @@ void Launcher::prepareSettings() {
 	processArguments();
 }
 
-QString Launcher::deviceModel() const {
-	return _deviceModel;
-}
-
-QString Launcher::systemVersion() const {
-	return _systemVersion;
+void Launcher::initQtMessageLogging() {
+	static QtMessageHandler OriginalMessageHandler = nullptr;
+	OriginalMessageHandler = qInstallMessageHandler([](
+			QtMsgType type,
+			const QMessageLogContext &context,
+			const QString &msg) {
+		if (OriginalMessageHandler) {
+			OriginalMessageHandler(type, context, msg);
+		}
+		if (Logs::DebugEnabled() || !Logs::started()) {
+			if (!Logs::WritingEntry()) {
+				// Sometimes Qt logs something inside our own logging.
+				LOG((msg));
+			}
+		}
+	});
 }
 
 uint64 Launcher::installationTag() const {
@@ -382,6 +452,7 @@ void Launcher::processArguments() {
 	auto parseMap = std::map<QByteArray, KeyFormat> {
 		{ "-testmode"       , KeyFormat::NoValues },
 		{ "-debug"          , KeyFormat::NoValues },
+		{ "-freetype"       , KeyFormat::NoValues },
 		{ "-many"           , KeyFormat::NoValues },
 		{ "-key"            , KeyFormat::OneValue },
 		{ "-autostart"      , KeyFormat::NoValues },
@@ -399,7 +470,7 @@ void Launcher::processArguments() {
 	auto parseResult = QMap<QByteArray, QStringList>();
 	auto parsingKey = QByteArray();
 	auto parsingFormat = KeyFormat::NoValues;
-	for (const auto &argument : _arguments) {
+	for (const auto &argument : std::as_const(_arguments)) {
 		switch (parsingFormat) {
 		case KeyFormat::OneValue: {
 			parseResult[parsingKey] = QStringList(argument.mid(0, 8192));
@@ -422,8 +493,8 @@ void Launcher::processArguments() {
 	if (parseResult.contains("-externalupdater")) {
 		SetUpdaterDisabledAtStartup();
 	}
-	gTestMode = parseResult.contains("-testmode");
-	Logs::SetDebugEnabled(parseResult.contains("-debug"));
+	gUseFreeType = parseResult.contains("-freetype");
+	gDebugMode = parseResult.contains("-debug");
 	gManyInstance = parseResult.contains("-many");
 	gKeyFile = parseResult.value("-key", {}).join(QString()).toLower();
 	gKeyFile = gKeyFile.replace(QRegularExpression("[^a-z0-9\\-_]"), {});

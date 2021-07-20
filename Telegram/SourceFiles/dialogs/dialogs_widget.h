@@ -12,8 +12,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/effects/animations.h"
 #include "ui/widgets/scroll_area.h"
 #include "ui/special_buttons.h"
+#include "mtproto/sender.h"
 #include "api/api_single_message_search.h"
-#include "mtproto/mtproto_rpc_sender.h"
+
+namespace MTP {
+class Error;
+} // namespace MTP
 
 namespace Main {
 class Session;
@@ -49,21 +53,21 @@ struct ChosenRow;
 class InnerWidget;
 enum class SearchRequestType;
 
-class Widget : public Window::AbstractSectionWidget, public RPCSender {
+class Widget final : public Window::AbstractSectionWidget {
 	Q_OBJECT
 
 public:
 	Widget(QWidget *parent, not_null<Window::SessionController*> controller);
 
+	// When resizing the widget with top edge moved up or down and we
+	// want to add this top movement to the scroll position, so inner
+	// content will not move.
+	void setGeometryWithTopMoved(const QRect &newGeometry, int topDelta);
+
 	void updateDragInScroll(bool inScroll);
 
 	void searchInChat(Key chat);
 	void setInnerFocus();
-
-	void refreshDialog(Key key);
-	void removeDialog(Key key);
-	void repaintDialogRow(FilterId filterId, not_null<Row*> row);
-	void repaintDialogRow(RowDescriptor row);
 
 	void jumpToTop();
 
@@ -81,16 +85,20 @@ public:
 	void searchMessages(const QString &query, Key inChat = {});
 	void onSearchMore();
 
+	void updateForwardBar();
+
+	[[nodiscard]] rpl::producer<> closeForwardBarRequests() const;
+
 	// Float player interface.
-	bool wheelEventFromFloatPlayer(QEvent *e) override;
-	QRect rectForFloatPlayer() const override;
+	bool floatPlayerHandleWheelEvent(QEvent *e) override;
+	QRect floatPlayerAvailableRect() override;
 
 	~Widget();
 
-signals:
+Q_SIGNALS:
 	void cancelled();
 
-public slots:
+public Q_SLOTS:
 	void onDraggingScrollDelta(int delta);
 
 	void onListScroll();
@@ -106,7 +114,7 @@ public slots:
 
 	void onChooseByDrag();
 
-private slots:
+private Q_SLOTS:
 	void onDraggingScrollTimer();
 
 protected:
@@ -137,8 +145,9 @@ private:
 
 	void setupSupportMode();
 	void setupConnectingWidget();
+	void setupMainMenuToggle();
 	bool searchForPeersRequired(const QString &query) const;
-	void setSearchInChat(Key chat, UserData *from = nullptr);
+	void setSearchInChat(Key chat, PeerData *from = nullptr);
 	void showJumpToDate();
 	void showSearchFrom();
 	void showMainMenu();
@@ -150,7 +159,6 @@ private:
 	void updateSearchFromVisibility(bool fast = false);
 	void updateControlsGeometry();
 	void refreshFolderTopBar();
-	void updateForwardBar();
 	void checkUpdateStatus();
 	void changeOpenedFolder(Data::Folder *folder, anim::type animated);
 	QPixmap grabForFolderSlideAnimation();
@@ -161,14 +169,19 @@ private:
 	void refreshLoadMoreButton(bool mayBlock, bool isBlocked);
 	void loadMoreBlockedByDate();
 
-	bool searchFailed(SearchRequestType type, const RPCError &error, mtpRequestId req);
-	bool peopleFailed(const RPCError &error, mtpRequestId req);
+	void searchFailed(
+		SearchRequestType type,
+		const MTP::Error &error,
+		mtpRequestId requestId);
+	void peopleFailed(const MTP::Error &error, mtpRequestId requestId);
 
 	void scrollToTop();
 	void setupScrollUpButton();
 	void updateScrollUpVisibility();
 	void startScrollUpButtonAnimation(bool shown);
 	void updateScrollUpPosition();
+
+	MTP::Sender _api;
 
 	bool _dragInScroll = false;
 	bool _dragForward = false;
@@ -202,9 +215,9 @@ private:
 	object_ptr<Ui::HistoryDownButton> _scrollToTop;
 
 	Data::Folder *_openedFolder = nullptr;
-	Key _searchInChat;
+	Dialogs::Key _searchInChat;
 	History *_searchInMigrated = nullptr;
-	UserData *_searchFromUser = nullptr;
+	PeerData *_searchFromAuthor = nullptr;
 	QString _lastFilterText;
 
 	QTimer _searchTimer;
@@ -214,23 +227,27 @@ private:
 	mtpRequestId _peerSearchRequest = 0;
 
 	QString _searchQuery;
-	UserData *_searchQueryFrom = nullptr;
+	PeerData *_searchQueryFrom = nullptr;
 	int32 _searchNextRate = 0;
 	bool _searchFull = false;
 	bool _searchFullMigrated = false;
 	int _searchInHistoryRequest = 0; // Not real mtpRequestId.
 	mtpRequestId _searchRequest = 0;
 
-	QMap<QString, MTPmessages_Messages> _searchCache;
+	base::flat_map<QString, MTPmessages_Messages> _searchCache;
 	Api::SingleMessageSearch _singleMessageSearch;
-	QMap<mtpRequestId, QString> _searchQueries;
-	QMap<QString, MTPcontacts_Found> _peerSearchCache;
-	QMap<mtpRequestId, QString> _peerSearchQueries;
+	base::flat_map<mtpRequestId, QString> _searchQueries;
+	base::flat_map<QString, MTPcontacts_Found> _peerSearchCache;
+	base::flat_map<mtpRequestId, QString> _peerSearchQueries;
 
 	QPixmap _widthAnimationCache;
 
 	object_ptr<QTimer> _draggingScrollTimer = { nullptr };
 	int _draggingScrollDelta = 0;
+
+	int _topDelta = 0;
+
+	rpl::event_stream<> _closeForwardBarRequests;
 
 };
 

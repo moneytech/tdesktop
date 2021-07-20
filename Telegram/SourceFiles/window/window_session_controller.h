@@ -9,11 +9,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <rpl/variable.h>
 #include "base/flags.h"
-#include "base/observer.h"
 #include "base/object_ptr.h"
+#include "base/weak_ptr.h"
+#include "base/timer.h"
 #include "dialogs/dialogs_key.h"
 #include "ui/effects/animation_value.h"
+#include "ui/layers/layer_widget.h"
+#include "window/window_adaptive.h"
 
+class PhotoData;
 class MainWidget;
 class MainWindow;
 class HistoryMessage;
@@ -35,13 +39,6 @@ namespace Settings {
 enum class Type;
 } // namespace Settings
 
-namespace Media {
-namespace Player {
-class FloatController;
-class FloatDelegate;
-} // namespace Player
-} // namespace Media
-
 namespace Passport {
 struct FormRequest;
 class FormController;
@@ -49,6 +46,7 @@ class FormController;
 
 namespace Ui {
 class LayerWidget;
+enum class ReportReason;
 } // namespace Ui
 
 namespace Window {
@@ -88,6 +86,12 @@ struct SectionShow {
 		Backward,
 		ClearStack,
 	};
+
+	struct OriginMessage {
+		FullMsgId id;
+	};
+	using Origin = std::variant<v::null_t, OriginMessage>;
+
 	SectionShow(
 		Way way = Way::Forward,
 		anim::type animated = anim::type::normal,
@@ -116,23 +120,48 @@ struct SectionShow {
 	anim::type animated = anim::type::normal;
 	anim::activation activation = anim::activation::normal;
 	bool thirdColumn = false;
+	Origin origin;
 
 };
 
 class SessionController;
 
-class SessionNavigation {
+class SessionNavigation : public base::has_weak_ptr {
 public:
 	explicit SessionNavigation(not_null<Main::Session*> session);
+	virtual ~SessionNavigation();
 
 	Main::Session &session() const;
 
 	virtual void showSection(
-		SectionMemento &&memento,
+		std::shared_ptr<SectionMemento> memento,
 		const SectionShow &params = SectionShow()) = 0;
 	virtual void showBackFromStack(
 		const SectionShow &params = SectionShow()) = 0;
 	virtual not_null<SessionController*> parentController() = 0;
+
+	struct CommentId {
+		MsgId id = 0;
+	};
+	struct ThreadId {
+		MsgId id = 0;
+	};
+	using RepliesByLinkInfo = std::variant<v::null_t, CommentId, ThreadId>;
+	struct PeerByLinkInfo {
+		std::variant<QString, ChannelId> usernameOrId;
+		MsgId messageId = ShowAtUnreadMsgId;
+		RepliesByLinkInfo repliesInfo;
+		QString startToken;
+		std::optional<QString> voicechatHash;
+		FullMsgId clickFromMessageId;
+	};
+	void showPeerByLink(const PeerByLinkInfo &info);
+
+	void showRepliesForMessage(
+		not_null<History*> history,
+		MsgId rootId,
+		MsgId commentId = 0,
+		const SectionShow &params = SectionShow());
 
 	void showPeerInfo(
 		PeerId peerId,
@@ -144,6 +173,27 @@ public:
 		not_null<History*> history,
 		const SectionShow &params = SectionShow());
 
+	virtual void showPeerHistory(
+		PeerId peerId,
+		const SectionShow &params = SectionShow::Way::ClearStack,
+		MsgId msgId = ShowAtUnreadMsgId) = 0;
+	void showPeerHistory(
+		not_null<PeerData*> peer,
+		const SectionShow &params = SectionShow::Way::ClearStack,
+		MsgId msgId = ShowAtUnreadMsgId);
+	void showPeerHistory(
+		not_null<History*> history,
+		const SectionShow &params = SectionShow::Way::ClearStack,
+		MsgId msgId = ShowAtUnreadMsgId);
+
+	void clearSectionStack(
+			const SectionShow &params = SectionShow::Way::ClearStack) {
+		showPeerHistory(
+			PeerId(0),
+			params,
+			ShowAtUnreadMsgId);
+	}
+
 	void showSettings(
 		Settings::Type type,
 		const SectionShow &params = SectionShow());
@@ -154,25 +204,57 @@ public:
 		FullMsgId contextId,
 		const SectionShow &params = SectionShow());
 
-	virtual ~SessionNavigation() = default;
 
 private:
+	void resolveUsername(
+		const QString &username,
+		Fn<void(not_null<PeerData*>)> done);
+	void resolveChannelById(
+		ChannelId channelId,
+		Fn<void(not_null<ChannelData*>)> done);
+
+	void showPeerByLinkResolved(
+		not_null<PeerData*> peer,
+		const PeerByLinkInfo &info);
+
 	const not_null<Main::Session*> _session;
+
+	mtpRequestId _resolveRequestId = 0;
+
+	History *_showingRepliesHistory = nullptr;
+	MsgId _showingRepliesRootId = 0;
+	mtpRequestId _showingRepliesRequestId = 0;
+
 
 };
 
-class SessionController
-	: public SessionNavigation
-	, private base::Subscriber {
+class SessionController : public SessionNavigation {
 public:
 	SessionController(
 		not_null<Main::Session*> session,
 		not_null<Controller*> window);
+	~SessionController();
 
 	[[nodiscard]] Controller &window() const {
 		return *_window;
 	}
 	[[nodiscard]] not_null<::MainWindow*> widget() const;
+	[[nodiscard]] not_null<MainWidget*> content() const;
+	[[nodiscard]] Adaptive &adaptive() const;
+
+	// We need access to this from MainWidget::MainWidget, where
+	// we can't call content() yet.
+	void setSelectingPeer(bool selecting) {
+		_selectingPeer = selecting;
+	}
+	[[nodiscard]] bool selectingPeer() const {
+		return _selectingPeer;
+	}
+
+	QPointer<Ui::BoxContent> show(
+		object_ptr<Ui::BoxContent> content,
+		Ui::LayerOptions options = Ui::LayerOption::KeepOther,
+		anim::type animated = anim::type::normal);
 
 	[[nodiscard]] auto tabbedSelector() const
 	-> not_null<ChatHelpers::TabbedSelector*>;
@@ -200,13 +282,11 @@ public:
 
 	void enableGifPauseReason(GifPauseReason reason);
 	void disableGifPauseReason(GifPauseReason reason);
-	base::Observable<void> &gifPauseLevelChanged() {
-		return _gifPauseLevelChanged;
+	rpl::producer<> gifPauseLevelChanged() const {
+		return _gifPauseLevelChanged.events();
 	}
 	bool isGifPausedAtLeastFor(GifPauseReason reason) const;
-	base::Observable<void> &floatPlayerAreaUpdated() {
-		return _floatPlayerAreaUpdated;
-	}
+	void floatPlayerAreaUpdated();
 
 	struct ColumnLayout {
 		int bodyWidth;
@@ -225,32 +305,35 @@ public:
 	void resizeForThirdSection();
 	void closeThirdSection();
 
+	enum class GroupCallJoinConfirm {
+		None,
+		IfNowInAnother,
+		Always,
+	};
+	void startOrJoinGroupCall(
+		not_null<PeerData*> peer,
+		QString joinHash = QString(),
+		GroupCallJoinConfirm confirm = GroupCallJoinConfirm::IfNowInAnother);
+
 	void showSection(
-		SectionMemento &&memento,
+		std::shared_ptr<SectionMemento> memento,
 		const SectionShow &params = SectionShow()) override;
 	void showBackFromStack(
 		const SectionShow &params = SectionShow()) override;
 
+	using SessionNavigation::showPeerHistory;
 	void showPeerHistory(
 		PeerId peerId,
 		const SectionShow &params = SectionShow::Way::ClearStack,
-		MsgId msgId = ShowAtUnreadMsgId);
-	void showPeerHistory(
-		not_null<PeerData*> peer,
-		const SectionShow &params = SectionShow::Way::ClearStack,
-		MsgId msgId = ShowAtUnreadMsgId);
-	void showPeerHistory(
-		not_null<History*> history,
-		const SectionShow &params = SectionShow::Way::ClearStack,
-		MsgId msgId = ShowAtUnreadMsgId);
+		MsgId msgId = ShowAtUnreadMsgId) override;
 
-	void clearSectionStack(
-			const SectionShow &params = SectionShow::Way::ClearStack) {
-		showPeerHistory(
-			PeerId(0),
-			params,
-			ShowAtUnreadMsgId);
-	}
+	void showPeerHistoryAtItem(not_null<const HistoryItem*> item);
+	void cancelUploadLayer(not_null<HistoryItem*> item);
+
+	void showLayer(
+		std::unique_ptr<Ui::LayerWidget> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated = anim::type::normal);
 
 	void showSpecialLayer(
 		object_ptr<Ui::LayerWidget> &&layer,
@@ -265,8 +348,25 @@ public:
 		Dialogs::Key chat,
 		QDate requestedDate);
 
+	void showAddContact();
+	void showNewGroup();
+	void showNewChannel();
+
 	void showPassportForm(const Passport::FormRequest &request);
 	void clearPassportForm();
+
+	void openPhoto(not_null<PhotoData*> photo, FullMsgId contextId);
+	void openPhoto(not_null<PhotoData*> photo, not_null<PeerData*> peer);
+	void openDocument(
+		not_null<DocumentData*> document,
+		FullMsgId contextId,
+		bool showInMediaView = false);
+
+	void showChooseReportMessages(
+		not_null<PeerData*> peer,
+		Ui::ReportReason reason,
+		Fn<void(MessageIdsList)> done);
+	void clearChooseReportMessages();
 
 	base::Variable<bool> &dialogsListFocused() {
 		return _dialogsListFocused;
@@ -285,14 +385,6 @@ public:
 		return this;
 	}
 
-	void setDefaultFloatPlayerDelegate(
-		not_null<Media::Player::FloatDelegate*> delegate);
-	void replaceFloatPlayerDelegate(
-		not_null<Media::Player::FloatDelegate*> replacement);
-	void restoreFloatPlayerDelegate(
-		not_null<Media::Player::FloatDelegate*> replacement);
-	rpl::producer<FullMsgId> floatPlayerClosed() const;
-
 	[[nodiscard]] int filtersWidth() const;
 	[[nodiscard]] rpl::producer<FilterId> activeChatsFilter() const;
 	[[nodiscard]] FilterId activeChatsFilterCurrent() const;
@@ -305,16 +397,14 @@ public:
 		return _lifetime;
 	}
 
-	~SessionController();
-
 private:
 	void init();
 	void initSupportMode();
 	void refreshFiltersMenu();
 	void checkOpenedFilter();
+	void suggestArchiveAndMute();
 
 	int minimalThreeColumnWidth() const;
-	not_null<MainWidget*> chats() const;
 	int countDialogsWidthFromRatio(int bodyWidth) const;
 	int countThirdColumnWidthFromRatio(int bodyWidth) const;
 	struct ShrinkResult {
@@ -328,6 +418,9 @@ private:
 
 	void pushToChatEntryHistory(Dialogs::RowDescriptor row);
 	bool chatEntryHistoryMove(int steps);
+	void resetFakeUnreadWhileOpened();
+
+	void checkInvitePeek();
 
 	const not_null<Controller*> _window;
 
@@ -335,8 +428,7 @@ private:
 	std::unique_ptr<FiltersMenu> _filters;
 
 	GifPauseReasons _gifPauseReasons = 0;
-	base::Observable<void> _gifPauseLevelChanged;
-	base::Observable<void> _floatPlayerAreaUpdated;
+	rpl::event_stream<> _gifPauseLevelChanged;
 
 	// Depends on _gifPause*.
 	const std::unique_ptr<ChatHelpers::TabbedSelector> _tabbedSelector;
@@ -346,12 +438,11 @@ private:
 	base::Variable<bool> _dialogsListDisplayForced = { false };
 	std::deque<Dialogs::RowDescriptor> _chatEntryHistory;
 	int _chatEntryHistoryPosition = -1;
+	bool _selectingPeer = false;
+
+	base::Timer _invitePeekTimer;
 
 	rpl::variable<FilterId> _activeChatsFilter;
-
-	std::unique_ptr<Media::Player::FloatController> _floatPlayers;
-	Media::Player::FloatDelegate *_defaultFloatPlayerDelegate = nullptr;
-	Media::Player::FloatDelegate *_replacementFloatPlayerDelegate = nullptr;
 
 	PeerData *_showEditPeer = nullptr;
 	rpl::variable<Data::Folder*> _openedFolder;
@@ -361,5 +452,7 @@ private:
 	rpl::lifetime _lifetime;
 
 };
+
+void ActivateWindow(not_null<SessionController*> controller);
 
 } // namespace Window

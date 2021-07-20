@@ -17,7 +17,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/search_field_controller.h"
 #include "data/data_user.h"
 #include "data/data_session.h"
-#include "apiwrap.h"
 #include "styles/style_info.h"
 #include "styles/style_widgets.h"
 
@@ -28,7 +27,7 @@ namespace {
 constexpr auto kCommonGroupsPerPage = 40;
 constexpr auto kCommonGroupsSearchAfter = 20;
 
-class ListController : public PeerListController , private base::Subscriber {
+class ListController final : public PeerListController {
 public:
 	ListController(
 		not_null<Controller*> controller,
@@ -51,7 +50,7 @@ private:
 	std::unique_ptr<PeerListRow> createRow(not_null<PeerData*> peer);
 
 	struct SavedState : SavedStateBase {
-		int32 preloadGroupId = 0;
+		PeerId preloadGroupId = 0;
 		bool allLoaded = false;
 		bool wasLoading = false;
 	};
@@ -60,7 +59,7 @@ private:
 	not_null<UserData*> _user;
 	mtpRequestId _preloadRequestId = 0;
 	bool _allLoaded = false;
-	int32 _preloadGroupId = 0;
+	PeerId _preloadGroupId = 0;
 
 };
 
@@ -69,7 +68,7 @@ ListController::ListController(
 	not_null<UserData*> user)
 : PeerListController()
 , _controller(controller)
-, _api(_controller->session().api().instance())
+, _api(&_controller->session().mtp())
 , _user(user) {
 	_controller->setSearchEnabledByContent(false);
 }
@@ -97,7 +96,9 @@ void ListController::loadMoreRows() {
 	}
 	_preloadRequestId = _api.request(MTPmessages_GetCommonChats(
 		_user->inputUser,
-		MTP_int(_preloadGroupId),
+		MTP_int(peerIsChat(_preloadGroupId)
+			? peerToChat(_preloadGroupId).bare
+			: peerToChannel(_preloadGroupId).bare), // #TODO ids
 		MTP_int(kCommonGroupsPerPage)
 	)).done([this](const MTPmessages_Chats &result) {
 		_preloadRequestId = 0;
@@ -113,7 +114,7 @@ void ListController::loadMoreRows() {
 						delegate()->peerListAppendRow(
 							createRow(peer));
 					}
-					_preloadGroupId = peer->bareId();
+					_preloadGroupId = peer->id;
 					_allLoaded = false;
 				}
 			}
@@ -214,10 +215,10 @@ int InnerWidget::desiredHeight() const {
 object_ptr<InnerWidget::ListWidget> InnerWidget::setupList(
 		RpWidget *parent,
 		not_null<PeerListController*> controller) const {
+	controller->setStyleOverrides(&st::infoCommonGroupsList);
 	auto result = object_ptr<ListWidget>(
 		parent,
-		controller,
-		st::infoCommonGroupsList);
+		controller);
 	result->scrollToRequests(
 	) | rpl::start_with_next([this](Ui::ScrollToRequest request) {
 		auto addmin = (request.ymin < 0)
@@ -257,10 +258,6 @@ bool InnerWidget::peerListIsRowChecked(not_null<PeerListRow*> row) {
 
 int InnerWidget::peerListSelectedRowsCount() {
 	return 0;
-}
-
-std::vector<not_null<PeerData*>> InnerWidget::peerListCollectSelectedRows() {
-	return {};
 }
 
 void InnerWidget::peerListScrollToTop() {

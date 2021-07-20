@@ -16,6 +16,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace Data {
 struct Group;
+class CloudImageView;
 } // namespace Data
 
 namespace HistoryView {
@@ -34,13 +35,14 @@ class SessionController;
 
 namespace Ui {
 class PopupMenu;
+enum class ReportReason;
+class PathShiftGradient;
 } // namespace Ui
 
 class HistoryWidget;
 class HistoryInner
 	: public Ui::RpWidget
-	, public Ui::AbstractTooltipShower
-	, private base::Subscriber {
+	, public Ui::AbstractTooltipShower {
 	// The Q_OBJECT meta info is used for qobject_cast!
 	Q_OBJECT
 
@@ -62,6 +64,8 @@ public:
 
 	void touchScrollUpdated(const QPoint &screenPos);
 
+	void setItemsRevealHeight(int revealHeight);
+	void changeItemsRevealHeight(int revealHeight);
 	void checkHistoryActivation();
 	void recountHistoryGeometry();
 	void updateSize();
@@ -82,12 +86,29 @@ public:
 		int from,
 		int till) const;
 	void elementStartStickerLoop(not_null<const Element*> view);
+	[[nodiscard]] crl::time elementHighlightTime(
+		not_null<const HistoryItem*> item);
 	void elementShowPollResults(
 		not_null<PollData*> poll,
 		FullMsgId context);
+	void elementOpenPhoto(
+		not_null<PhotoData*> photo,
+		FullMsgId context);
+	void elementOpenDocument(
+		not_null<DocumentData*> document,
+		FullMsgId context,
+		bool showInMediaView = false);
+	void elementCancelUpload(const FullMsgId &context);
 	void elementShowTooltip(
 		const TextWithEntities &text,
 		Fn<void()> hiddenCallback);
+	bool elementIsGifPaused();
+	void elementSendBotCommand(
+		const QString &command,
+		const FullMsgId &context);
+	void elementHandleViaClick(not_null<UserData*> bot);
+	bool elementIsChatWide();
+	not_null<Ui::PathShiftGradient*> elementPathShiftGradient();
 
 	void updateBotInfo(bool recount = true);
 
@@ -103,16 +124,19 @@ public:
 	int historyTop() const;
 	int historyDrawTop() const;
 
+	void setChooseReportReason(Ui::ReportReason reason);
+	void clearChooseReportReason();
+
 	// -1 if should not be visible, -2 if bad history()
 	int itemTop(const HistoryItem *item) const;
 	int itemTop(const Element *view) const;
 
+	// Returns (view, offset-from-top).
+	[[nodiscard]] std::pair<Element*, int> findViewForPinnedTracking(
+		int top) const;
+
 	void notifyIsBotChanged();
 	void notifyMigrateUpdated();
-
-	// When inline keyboard has moved because of the edition of its item we want
-	// to move scroll position so that mouse points to the same button row.
-	int moveScrollFollowingInlineKeyboard(const HistoryItem *item, int oldKeyboardTop, int newKeyboardTop);
 
 	// Ui::AbstractTooltipShower interface.
 	QString tooltipText() const override;
@@ -140,7 +164,7 @@ protected:
 	void keyPressEvent(QKeyEvent *e) override;
 	void contextMenuEvent(QContextMenuEvent *e) override;
 
-public slots:
+public Q_SLOTS:
 	void onParentGeometryChanged();
 
 	void onTouchSelect();
@@ -206,8 +230,6 @@ private:
 	template <typename Method>
 	void enumerateDates(Method method);
 
-	ClickHandlerPtr hiddenUserpicLink(FullMsgId id);
-
 	void scrollDateCheck();
 	void scrollDateHideByTimer();
 	bool canHaveFromUserpics() const;
@@ -239,7 +261,6 @@ private:
 
 	void itemRemoved(not_null<const HistoryItem*> item);
 	void viewRemoved(not_null<const Element*> view);
-	void refreshView(not_null<HistoryItem*> item);
 
 	void touchResetSpeed();
 	void touchUpdateSpeed();
@@ -307,6 +328,9 @@ private:
 	void deleteAsGroup(FullMsgId itemId);
 	void reportItem(FullMsgId itemId);
 	void reportAsGroup(FullMsgId itemId);
+	void reportItems(MessageIdsList ids);
+	void blockSenderItem(FullMsgId itemId);
+	void blockSenderAsGroup(FullMsgId itemId);
 	void copySelectedText();
 
 	// Does any of the shown histories has this flag set.
@@ -323,6 +347,7 @@ private:
 	History *_migrated = nullptr;
 	int _contentWidth = 0;
 	int _historyPaddingTop = 0;
+	int _revealHeight = 0;
 
 	// Save visible area coords for painting / pressing userpics.
 	int _visibleAreaTop = 0;
@@ -343,8 +368,15 @@ private:
 
 	style::cursor _cursor = style::cur_default;
 	SelectedItems _selected;
+	std::optional<Ui::ReportReason> _chooseForReportReason;
+
+	const std::unique_ptr<Ui::PathShiftGradient> _pathGradient;
+	bool _isChatWide = false;
 
 	base::flat_set<not_null<const HistoryItem*>> _animatedStickersPlayed;
+	base::flat_map<
+		not_null<PeerData*>,
+		std::shared_ptr<Data::CloudImageView>> _userpics, _userpicsCache;
 
 	MouseAction _mouseAction = MouseAction::None;
 	TextSelectType _mouseSelectType = TextSelectType::Letters;

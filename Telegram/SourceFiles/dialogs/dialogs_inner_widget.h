@@ -13,7 +13,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/rp_widget.h"
 #include "base/flags.h"
 #include "base/object_ptr.h"
-#include "mtproto/mtproto_rpc_sender.h"
+
+namespace MTP {
+class Error;
+} // namespace MTP
 
 namespace Main {
 class Session;
@@ -29,9 +32,9 @@ namespace Window {
 class SessionController;
 } // namespace Window
 
-namespace Notify {
-struct PeerUpdate;
-} // namespace Notify
+namespace Data {
+class CloudImageView;
+} // namespace Data
 
 namespace Dialogs {
 
@@ -59,10 +62,7 @@ enum class WidgetState {
 	Filtered,
 };
 
-class InnerWidget
-	: public Ui::RpWidget
-	, public RPCSender
-	, private base::Subscriber {
+class InnerWidget final : public Ui::RpWidget {
 	Q_OBJECT
 
 public:
@@ -88,11 +88,6 @@ public:
 	void selectSkip(int32 direction);
 	void selectSkipPage(int32 pixels, int32 direction);
 
-	void refreshDialog(Key key);
-	void removeDialog(Key key);
-	void repaintDialogRow(FilterId filterId, not_null<Row*> row);
-	void repaintDialogRow(RowDescriptor row);
-
 	void dragLeft();
 
 	void clearFilter();
@@ -116,7 +111,7 @@ public:
 	}
 	bool hasFilteredResults() const;
 
-	void searchInChat(Key key, UserData *from);
+	void searchInChat(Key key, PeerData *from);
 
 	void applyFilterUpdate(QString newFilter, bool force = false);
 	void onHashtagFilterUpdate(QStringRef newFilter);
@@ -125,17 +120,16 @@ public:
 
 	void setLoadMoreCallback(Fn<void()> callback);
 	[[nodiscard]] rpl::producer<> listBottomReached() const;
-
-	base::Observable<UserData*> searchFromUserChanged;
-
-	rpl::producer<ChosenRow> chosenRow() const;
+	[[nodiscard]] rpl::producer<> cancelSearchFromUserRequests() const;
+	[[nodiscard]] rpl::producer<ChosenRow> chosenRow() const;
+	[[nodiscard]] rpl::producer<> updated() const;
 
 	~InnerWidget();
 
-public slots:
+public Q_SLOTS:
 	void onParentGeometryChanged();
 
-signals:
+Q_SIGNALS:
 	void draggingScrollDelta(int delta);
 	void mustScrollTo(int scrollToTop, int scrollToBottom);
 	void dialogMoved(int movedFrom, int movedTo);
@@ -193,6 +187,10 @@ private:
 		not_null<FakeRow*> result,
 		const RowDescriptor &entry) const;
 
+	void repaintDialogRow(FilterId filterId, not_null<Row*> row);
+	void repaintDialogRow(RowDescriptor row);
+	void refreshDialogRow(RowDescriptor row);
+
 	void clearMouseSelection(bool clearSelection = false);
 	void mousePressReleased(QPoint globalPosition, Qt::MouseButton button);
 	void clearIrrelevantState();
@@ -225,7 +223,13 @@ private:
 
 	int defaultRowTop(not_null<Row*> row) const;
 	void setupOnlineStatusCheck();
-	void userOnlineUpdated(const Notify::PeerUpdate &update);
+	void userOnlineUpdated(not_null<PeerData*> peer);
+	void groupHasCallUpdated(not_null<PeerData*> peer);
+
+	void updateRowCornerStatusShown(
+		not_null<History*> history,
+		bool shown);
+	void updateDialogRowCornerStatus(not_null<History*> history);
 
 	void setupShortcuts();
 	RowDescriptor computeJump(
@@ -282,17 +286,17 @@ private:
 	void paintSearchInPeer(
 		Painter &p,
 		not_null<PeerData*> peer,
+		std::shared_ptr<Data::CloudImageView> &userpic,
 		int top,
 		const Ui::Text::String &text) const;
 	void paintSearchInSaved(
 		Painter &p,
 		int top,
 		const Ui::Text::String &text) const;
-	//void paintSearchInFeed( // #feed
-	//	Painter &p,
-	//	not_null<Data::Feed*> feed,
-	//	int top,
-	//	const Ui::Text::String &text) const;
+	void paintSearchInReplies(
+		Painter &p,
+		int top,
+		const Ui::Text::String &text) const;
 	template <typename PaintUserpic>
 	void paintSearchInFilter(
 		Painter &p,
@@ -315,7 +319,7 @@ private:
 	int countPinnedIndex(Row *ofRow);
 	void savePinnedOrder();
 	bool pinnedShiftAnimationCallback(crl::time now);
-	void handleChatMigration(not_null<ChatData*> chat);
+	void handleChatListEntryRefreshes();
 
 	not_null<Window::SessionController*> _controller;
 
@@ -392,7 +396,9 @@ private:
 
 	Key _searchInChat;
 	History *_searchInMigrated = nullptr;
-	UserData *_searchFromUser = nullptr;
+	PeerData *_searchFromPeer = nullptr;
+	mutable std::shared_ptr<Data::CloudImageView> _searchInChatUserpic;
+	mutable std::shared_ptr<Data::CloudImageView> _searchFromUserUserpic;
 	Ui::Text::String _searchInChatText;
 	Ui::Text::String _searchFromUserText;
 	RowDescriptor _menuRow;
@@ -400,6 +406,7 @@ private:
 	Fn<void()> _loadMoreCallback;
 	rpl::event_stream<> _listBottomReached;
 	rpl::event_stream<ChosenRow> _chosenRow;
+	rpl::event_stream<> _updated;
 
 	base::unique_qptr<Ui::PopupMenu> _menu;
 

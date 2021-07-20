@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "export/output/export_output_result.h"
 #include "export/data/export_data_types.h"
 #include "core/utils.h"
+#include "ui/text/format_values.h"
 
 #include <QtCore/QSize>
 #include <QtCore/QFile>
@@ -151,6 +152,7 @@ QByteArray SerializeList(const std::vector<QByteArray> &values) {
 	}
 	return QByteArray();
 }
+
 QByteArray MakeLinks(const QByteArray &value) {
 	const auto domain = QByteArray("https://telegram.org/");
 	auto result = QByteArray();
@@ -190,27 +192,6 @@ QByteArray MakeLinks(const QByteArray &value) {
 	return result;
 }
 
-void SerializeMultiline(
-		QByteArray &appendTo,
-		const QByteArray &value,
-		int newline) {
-	const auto data = value.data();
-	auto offset = 0;
-	do {
-		appendTo.append("> ");
-		const auto win = (newline > 0 && *(data + newline - 1) == '\r');
-		if (win) --newline;
-		appendTo.append(data + offset, newline - offset).append(kLineBreak);
-		if (win) ++newline;
-		offset = newline + 1;
-		newline = value.indexOf('\n', offset);
-	} while (newline > 0);
-	if (const auto size = value.size(); size > offset) {
-		appendTo.append("> ");
-		appendTo.append(data + offset, size - offset).append(kLineBreak);
-	}
-}
-
 QByteArray JoinList(
 		const QByteArray &separator,
 		const std::vector<QByteArray> &list) {
@@ -240,9 +221,9 @@ QByteArray JoinList(
 QByteArray FormatText(
 		const std::vector<Data::TextPart> &data,
 		const QString &internalLinksDomain) {
-	return JoinList(QByteArray(), ranges::view::all(
+	return JoinList(QByteArray(), ranges::views::all(
 		data
-	) | ranges::view::transform([&](const Data::TextPart &part) {
+	) | ranges::views::transform([&](const Data::TextPart &part) {
 		const auto text = SerializeString(part.text);
 		using Type = Data::TextPart::Type;
 		switch (part.type) {
@@ -294,31 +275,6 @@ QByteArray FormatText(
 	}) | ranges::to_vector);
 }
 
-QByteArray SerializeKeyValue(
-		std::vector<std::pair<QByteArray, QByteArray>> &&values) {
-	auto result = QByteArray();
-	for (const auto &[key, value] : values) {
-		if (value.isEmpty()) {
-			continue;
-		}
-		result.append(key);
-		if (const auto newline = value.indexOf('\n'); newline >= 0) {
-			result.append(':').append(kLineBreak);
-			SerializeMultiline(result, value, newline);
-		} else {
-			result.append(": ").append(value).append(kLineBreak);
-		}
-	}
-	return result;
-}
-
-QByteArray SerializeBlockquote(
-		std::vector<std::pair<QByteArray, QByteArray>> &&values) {
-	return "<blockquote>"
-		+ SerializeKeyValue(std::move(values))
-		+ "</blockquote>";
-}
-
 Data::Utf8String FormatUsername(const Data::Utf8String &username) {
 	return username.isEmpty() ? username : ('@' + username);
 }
@@ -364,12 +320,6 @@ QByteArray FormatTimeText(TimeId date) {
 		+ Data::NumberToString(parsed.minute(), 2);
 }
 
-QByteArray SerializeLink(
-		const Data::Utf8String &text,
-		const QString &path) {
-	return "<a href=\"" + path.toUtf8() + "\">" + text + "</a>";
-}
-
 } // namespace
 
 namespace details {
@@ -385,7 +335,6 @@ struct UserpicData {
 
 class PeersMap {
 public:
-	using PeerId = Data::PeerId;
 	using Peer = Data::Peer;
 	using User = Data::User;
 	using Chat = Data::Chat;
@@ -393,15 +342,14 @@ public:
 	PeersMap(const std::map<PeerId, Peer> &data);
 
 	const Peer &peer(PeerId peerId) const;
-	const User &user(int32 userId) const;
-	const Chat &chat(int32 chatId) const;
+	const User &user(UserId userId) const;
 
 	QByteArray wrapPeerName(PeerId peerId) const;
-	QByteArray wrapUserName(int32 userId) const;
-	QByteArray wrapUserNames(const std::vector<int32> &data) const;
+	QByteArray wrapUserName(UserId userId) const;
+	QByteArray wrapUserNames(const std::vector<UserId> &data) const;
 
 private:
-	const std::map<Data::PeerId, Data::Peer> &_data;
+	const std::map<PeerId, Data::Peer> &_data;
 
 };
 
@@ -425,19 +373,11 @@ auto PeersMap::peer(PeerId peerId) const -> const Peer & {
 	return empty;
 }
 
-auto PeersMap::user(int32 userId) const -> const User & {
-	if (const auto result = peer(Data::UserPeerId(userId)).user()) {
+auto PeersMap::user(UserId userId) const -> const User & {
+	if (const auto result = peer(peerFromUser(userId)).user()) {
 		return *result;
 	}
 	static auto empty = User();
-	return empty;
-}
-
-auto PeersMap::chat(int32 chatId) const -> const Chat & {
-	if (const auto result = peer(Data::ChatPeerId(chatId)).chat()) {
-		return *result;
-	}
-	static auto empty = Chat();
 	return empty;
 }
 
@@ -448,14 +388,14 @@ QByteArray PeersMap::wrapPeerName(PeerId peerId) const {
 		: SerializeString(result);
 }
 
-QByteArray PeersMap::wrapUserName(int32 userId) const {
+QByteArray PeersMap::wrapUserName(UserId userId) const {
 	const auto result = user(userId).name();
 	return result.isEmpty()
 		? QByteArray("Deleted Account")
 		: SerializeString(result);
 }
 
-QByteArray PeersMap::wrapUserNames(const std::vector<int32> &data) const {
+QByteArray PeersMap::wrapUserNames(const std::vector<UserId> &data) const {
 	auto list = std::vector<QByteArray>();
 	for (const auto userId : data) {
 		list.push_back(wrapUserName(userId));
@@ -514,13 +454,15 @@ struct HtmlWriter::MessageInfo {
 		Service,
 		Default,
 	};
-	int32 id = 0;
+	int id = 0;
 	Type type = Type::Service;
-	int32 fromId = 0;
+	PeerId fromId = 0;
+	UserId viaBotId = 0;
 	TimeId date = 0;
-	Data::PeerId forwardedFromId = 0;
+	PeerId forwardedFromId = 0;
 	QString forwardedFromName;
 	bool forwarded = false;
+	bool showForwardedAsOriginal = false;
 	TimeId forwardedDate = 0;
 };
 
@@ -764,7 +706,9 @@ QByteArray HtmlWriter::Wrap::pushUserpic(const UserpicData &userpic) {
 			"line-height: " + size));
 		auto character = [](const QByteArray &from) {
 			const auto utf = QString::fromUtf8(from).trimmed();
-			return utf.isEmpty() ? QByteArray() : utf.mid(0, 1).toUtf8();
+			return utf.isEmpty()
+				? QByteArray()
+				: SerializeString(utf.mid(0, 1).toUtf8());
 		};
 		result.append(character(userpic.firstName));
 		result.append(character(userpic.lastName));
@@ -845,7 +789,7 @@ QByteArray HtmlWriter::Wrap::pushGenericListEntry(
 		result.append(SerializeString(subname));
 		result.append(popTag());
 	}
-	for (const auto detail : details) {
+	for (const auto &detail : details) {
 		result.append(pushDiv("details_entry details"));
 		result.append(SerializeString(detail));
 		result.append(popTag());
@@ -936,8 +880,7 @@ QByteArray HtmlWriter::Wrap::pushServiceMessage(
 	result.append(popTag());
 	if (photo) {
 		auto userpic = UserpicData();
-		userpic.colorIndex = Data::PeerColorIndex(
-			Data::BarePeerId(dialog.peerId));
+		userpic.colorIndex = Data::PeerColorIndex(dialog.peerId);
 		userpic.firstName = dialog.name;
 		userpic.lastName = dialog.lastName;
 		userpic.pixelSize = kServiceMessagePhotoSize;
@@ -968,12 +911,14 @@ auto HtmlWriter::Wrap::pushMessage(
 	auto info = MessageInfo();
 	info.id = message.id;
 	info.fromId = message.fromId;
+	info.viaBotId = message.viaBotId;
 	info.date = message.date;
 	info.forwardedFromId = message.forwardedFromId;
 	info.forwardedFromName = message.forwardedFromName;
 	info.forwardedDate = message.forwardedDate;
 	info.forwarded = message.forwarded;
-	if (message.media.content.is<UnsupportedMedia>()) {
+	info.showForwardedAsOriginal = message.showForwardedAsOriginal;
+	if (v::is<UnsupportedMedia>(message.media.content)) {
 		return { info, pushServiceMessage(
 			message.id,
 			dialog,
@@ -989,20 +934,24 @@ auto HtmlWriter::Wrap::pushMessage(
 	using DialogType = Data::DialogInfo::Type;
 	const auto isChannel = (dialog.type == DialogType::PrivateChannel)
 		|| (dialog.type == DialogType::PublicChannel);
-	const auto serviceFrom = peers.wrapUserName(message.fromId);
-	const auto serviceText = message.action.content.match(
-	[&](const ActionChatCreate &data) {
+	const auto serviceFrom = peers.wrapPeerName(message.fromId);
+	const auto serviceText = v::match(message.action.content, [&](
+			const ActionChatCreate &data) {
 		return serviceFrom
-			+ " created group &laquo;" + data.title + "&raquo;"
+			+ " created group &laquo;"
+			+ SerializeString(data.title)
+			+ "&raquo;"
 			+ (data.userIds.empty()
 				? QByteArray()
 				: " with members " + peers.wrapUserNames(data.userIds));
 	}, [&](const ActionChatEditTitle &data) {
 		return isChannel
-			? ("Channel title changed to &laquo;" + data.title + "&raquo;")
+			? ("Channel title changed to &laquo;"
+				+ SerializeString(data.title)
+				+ "&raquo;")
 			: (serviceFrom
 				+ " changed group title to &laquo;"
-				+ data.title
+				+ SerializeString(data.title)
 				+ "&raquo;");
 	}, [&](const ActionChatEditPhoto &data) {
 		return isChannel
@@ -1025,14 +974,16 @@ auto HtmlWriter::Wrap::pushMessage(
 			+ " joined group by link from "
 			+ peers.wrapUserName(data.inviterId);
 	}, [&](const ActionChannelCreate &data) {
-		return "Channel &laquo;" + data.title + "&raquo; created";
+		return "Channel &laquo;"
+			+ SerializeString(data.title)
+			+ "&raquo; created";
 	}, [&](const ActionChatMigrateTo &data) {
 		return serviceFrom
 			+ " converted this group to a supergroup";
 	}, [&](const ActionChannelMigrateFrom &data) {
 		return serviceFrom
 			+ " converted a basic group to this supergroup "
-			+ "&laquo;" + data.title + "&raquo;";
+			+ "&laquo;" + SerializeString(data.title) + "&raquo;";
 	}, [&](const ActionPinMessage &data) {
 		return serviceFrom
 			+ " pinned "
@@ -1058,7 +1009,7 @@ auto HtmlWriter::Wrap::pushMessage(
 		return data.message;
 	}, [&](const ActionBotAllowed &data) {
 		return "You allowed this bot to message you when you logged in on "
-			+ data.domain;
+			+ SerializeString(data.domain);
 	}, [&](const ActionSecureValuesSent &data) {
 		auto list = std::vector<QByteArray>();
 		for (const auto type : data.types) {
@@ -1088,14 +1039,70 @@ auto HtmlWriter::Wrap::pushMessage(
 			+ SerializeList(list);
 	}, [&](const ActionContactSignUp &data) {
 		return serviceFrom + " joined Telegram";
+	}, [&](const ActionGeoProximityReached &data) {
+		const auto fromName = peers.wrapPeerName(data.fromId);
+		const auto toName = peers.wrapPeerName(data.toId);
+		const auto distance = [&]() -> QString {
+			if (data.distance >= 1000) {
+				const auto km = (10 * (data.distance / 10)) / 1000.;
+				return QString::number(km) + " km";
+			} else if (data.distance == 1) {
+				return "1 meter";
+			} else {
+				return QString::number(data.distance) + " meters";
+			}
+		}().toUtf8();
+		if (data.fromSelf) {
+			return "You are now within " + distance + " from " + toName;
+		} else if (data.toSelf) {
+			return fromName + " is now within " + distance + " from you";
+		} else {
+			return fromName
+				+ " is now within "
+				+ distance
+				+ " from "
+				+ toName;
+		}
 	}, [&](const ActionPhoneNumberRequest &data) {
 		return serviceFrom + " requested your phone number";
-	}, [](std::nullopt_t) { return QByteArray(); });
+	}, [&](const ActionGroupCall &data) {
+		const auto durationText = (data.duration
+			? (" (" + QString::number(data.duration) + " seconds)")
+			: QString()).toUtf8();
+		return isChannel
+			? ("Voice chat" + durationText)
+			: (serviceFrom + " started voice chat" + durationText);
+	}, [&](const ActionInviteToGroupCall &data) {
+		return serviceFrom
+			+ " invited "
+			+ peers.wrapUserNames(data.userIds)
+			+ " to the voice chat";
+	}, [&](const ActionSetMessagesTTL &data) {
+		const auto periodText = (data.period == 7 * 86400)
+			? "7 days"
+			: (data.period == 86400)
+			? "24 hours"
+			: QByteArray();
+		return isChannel
+			? (data.period
+				? "New messages will auto-delete in " + periodText
+				: "New messages will not auto-delete")
+			: (data.period
+				? (serviceFrom
+					+ " has set messages to auto-delete in " + periodText)
+				: (serviceFrom
+					+ " has set messages not to auto-delete"));
+	}, [&](const ActionGroupCallScheduled &data) {
+		const auto dateText = FormatDateTime(data.date);
+		return isChannel
+			? "Voice chat scheduled for " + dateText
+			: (serviceFrom + " scheduled a voice chat for " + dateText);
+	}, [](v::null_t) { return QByteArray(); });
 
 	if (!serviceText.isEmpty()) {
 		const auto &content = message.action.content;
-		const auto photo = content.is<ActionChatEditPhoto>()
-			? &content.get_unchecked<ActionChatEditPhoto>().photo
+		const auto photo = v::is<ActionChatEditPhoto>(content)
+			? &v::get<ActionChatEditPhoto>(content).photo
 			: nullptr;
 		return { info, pushServiceMessage(
 			message.id,
@@ -1107,13 +1114,31 @@ auto HtmlWriter::Wrap::pushMessage(
 	info.type = MessageInfo::Type::Default;
 
 	const auto wrap = messageNeedsWrap(message, previous);
-	const auto fromPeerId = message.fromId
-		? UserPeerId(message.fromId)
-		: ChatPeerId(message.chatId);
+	const auto fromPeerId = message.fromId;
+	const auto showForwardedInfo = message.forwarded
+		&& !message.showForwardedAsOriginal;
+	auto forwardedUserpic = UserpicData();
+	if (message.forwarded) {
+		forwardedUserpic.colorIndex = message.forwardedFromId
+			? PeerColorIndex(message.forwardedFromId)
+			: PeerColorIndex(message.id);
+		forwardedUserpic.pixelSize = kHistoryUserpicSize;
+		if (message.forwardedFromId) {
+			FillUserpicNames(
+				forwardedUserpic,
+				peers.peer(message.forwardedFromId));
+		} else {
+			FillUserpicNames(forwardedUserpic, message.forwardedFromName);
+		}
+	}
 	auto userpic = UserpicData();
-	userpic.colorIndex = PeerColorIndex(BarePeerId(fromPeerId));
-	userpic.pixelSize = kHistoryUserpicSize;
-	FillUserpicNames(userpic, peers.peer(fromPeerId));
+	if (message.showForwardedAsOriginal) {
+		userpic = forwardedUserpic;
+	} else {
+		userpic.colorIndex = PeerColorIndex(fromPeerId);
+		userpic.pixelSize = kHistoryUserpicSize;
+		FillUserpicNames(userpic, peers.peer(fromPeerId));
+	}
 
 	const auto via = [&] {
 		if (message.viaBotId) {
@@ -1148,25 +1173,13 @@ auto HtmlWriter::Wrap::pushMessage(
 		block.append(pushDiv("from_name"));
 		block.append(SerializeString(
 			ComposeName(userpic, "Deleted Account")));
-		if (!via.isEmpty() && !message.forwarded) {
+		if (!via.isEmpty()
+			&& (!message.forwarded || message.showForwardedAsOriginal)) {
 			block.append(" via @" + via);
 		}
 		block.append(popTag());
 	}
-	if (message.forwarded) {
-		auto forwardedUserpic = UserpicData();
-		forwardedUserpic.colorIndex = message.forwardedFromId
-			? PeerColorIndex(BarePeerId(message.forwardedFromId))
-			: PeerColorIndex(message.id);
-		forwardedUserpic.pixelSize = kHistoryUserpicSize;
-		if (message.forwardedFromId) {
-			FillUserpicNames(
-				forwardedUserpic,
-				peers.peer(message.forwardedFromId));
-		} else {
-			FillUserpicNames(forwardedUserpic, message.forwardedFromName);
-		}
-
+	if (showForwardedInfo) {
 		const auto forwardedWrap = forwardedNeedsWrap(message, previous);
 		if (forwardedWrap) {
 			block.append(pushDiv("pull_left forwarded userpic_wrap"));
@@ -1192,8 +1205,12 @@ auto HtmlWriter::Wrap::pushMessage(
 	}
 	if (message.replyToMsgId) {
 		block.append(pushDiv("reply_to details"));
-		block.append("In reply to ");
-		block.append(wrapReplyToLink("this message"));
+		if (message.replyToPeerId) {
+			block.append("In reply to a message in another chat");
+		} else {
+			block.append("In reply to ");
+			block.append(wrapReplyToLink("this message"));
+		}
 		block.append(popTag());
 	}
 
@@ -1210,7 +1227,7 @@ auto HtmlWriter::Wrap::pushMessage(
 		block.append(SerializeString(message.signature));
 		block.append(popTag());
 	}
-	if (message.forwarded) {
+	if (showForwardedInfo) {
 		block.append(popTag());
 	}
 	block.append(popTag());
@@ -1228,10 +1245,15 @@ bool HtmlWriter::Wrap::messageNeedsWrap(
 		return true;
 	} else if (!message.fromId || previous->fromId != message.fromId) {
 		return true;
+	} else if (message.viaBotId != previous->viaBotId) {
+		return true;
 	} else if (QDateTime::fromTime_t(previous->date).date()
 		!= QDateTime::fromTime_t(message.date).date()) {
 		return true;
-	} else if (message.forwarded != previous->forwarded) {
+	} else if (message.forwarded != previous->forwarded
+		|| message.showForwardedAsOriginal != previous->showForwardedAsOriginal
+		|| message.forwardedFromId != previous->forwardedFromId
+		|| message.forwardedFromName != previous->forwardedFromName) {
 		return true;
 	} else if (std::abs(message.date - previous->date)
 		> ((message.forwardedFromId || !message.forwardedFromName.isEmpty())
@@ -1256,7 +1278,7 @@ QByteArray HtmlWriter::Wrap::pushMedia(
 		return pushGenericMedia(data);
 	}
 	const auto &content = message.media.content;
-	if (const auto document = base::get_if<Data::Document>(&content)) {
+	if (const auto document = std::get_if<Data::Document>(&content)) {
 		Assert(!message.media.ttl);
 		if (document->isSticker) {
 			return pushStickerMedia(*document, basePath);
@@ -1266,13 +1288,13 @@ QByteArray HtmlWriter::Wrap::pushMedia(
 			return pushVideoFileMedia(*document, basePath);
 		}
 		Unexpected("Non generic document in HtmlWriter::Wrap::pushMedia.");
-	} else if (const auto photo = base::get_if<Data::Photo>(&content)) {
+	} else if (const auto photo = std::get_if<Data::Photo>(&content)) {
 		Assert(!message.media.ttl);
 		return pushPhotoMedia(*photo, basePath);
-	} else if (const auto poll = base::get_if<Data::Poll>(&content)) {
+	} else if (const auto poll = std::get_if<Data::Poll>(&content)) {
 		return pushPoll(*poll);
 	}
-	Assert(!content.has_value());
+	Assert(v::is_null(content));
 	return QByteArray();
 }
 
@@ -1509,9 +1531,8 @@ QByteArray HtmlWriter::Wrap::pushPhotoMedia(
 	if (thumb.isEmpty()) {
 		auto generic = MediaData();
 		generic.title = "Photo";
-		generic.status = NumberToString(data.image.width)
-			+ "x"
-			+ NumberToString(data.image.height);
+		generic.status = Ui::FormatImageSizeText(
+			QSize(data.image.width, data.image.height)).toUtf8();
 		if (data.image.file.relativePath.isEmpty()) {
 			generic.status += ", " + FormatFileSize(data.image.file.size);
 		} else {
@@ -1602,9 +1623,11 @@ MediaData HtmlWriter::Wrap::prepareMediaData(
 
 	auto result = MediaData();
 	const auto &action = message.action;
-	if (const auto call = base::get_if<ActionPhoneCall>(&action.content)) {
+	if (const auto call = std::get_if<ActionPhoneCall>(&action.content)) {
 		result.classes = "media_call";
-		result.title = peers.peer(message.toId).name();
+		result.title = peers.peer(message.out
+				? message.peerId
+				: message.selfId).name();
 		result.status = [&] {
 			using Reason = ActionPhoneCall::DiscardReason;
 			const auto reason = call->discardReason;
@@ -1626,7 +1649,7 @@ MediaData HtmlWriter::Wrap::prepareMediaData(
 		return result;
 	}
 
-	message.media.content.match([&](const Photo &data) {
+	v::match(message.media.content, [&](const Photo &data) {
 		if (message.media.ttl) {
 			result.title = "Self-destructing photo";
 			result.status = data.id
@@ -1751,7 +1774,7 @@ MediaData HtmlWriter::Wrap::prepareMediaData(
 	}, [](const Poll &data) {
 	}, [](const UnsupportedMedia &data) {
 		Unexpected("Unsupported message.");
-	}, [](std::nullopt_t) {});
+	}, [](v::null_t) {});
 	return result;
 }
 
@@ -1765,7 +1788,7 @@ bool HtmlWriter::Wrap::forwardedNeedsWrap(
 	} else if (!message.forwardedFromId
 		|| message.forwardedFromId != previous->forwardedFromId) {
 		return true;
-	} else if (Data::IsChatPeerId(message.forwardedFromId)) {
+	} else if (!peerIsUser(message.forwardedFromId)) {
 		return true;
 	} else if (abs(message.forwardedDate - previous->forwardedDate)
 		> kJoinWithinSeconds) {
@@ -2163,7 +2186,7 @@ Result HtmlWriter::writeFrequentContacts(const Data::ContactsList &data) {
 				return {};
 			}();
 			auto userpic = UserpicData{
-				Data::PeerColorIndex(Data::BarePeerId(top.peer.id())),
+				Data::PeerColorIndex(top.peer.id()),
 				kEntryUserpicSize
 			};
 			userpic.firstName = name;
@@ -2464,6 +2487,7 @@ Result HtmlWriter::writeDialogEnd() {
 		switch (type) {
 		case Type::Unknown: return "unknown";
 		case Type::Self:
+		case Type::Replies:
 		case Type::Personal: return "private";
 		case Type::Bot: return "bot";
 		case Type::PrivateGroup:
@@ -2478,6 +2502,7 @@ Result HtmlWriter::writeDialogEnd() {
 		switch (type) {
 		case Type::Unknown:
 		case Type::Self:
+		case Type::Replies:
 		case Type::Personal:
 		case Type::Bot: return "Deleted Account";
 		case Type::PrivateGroup:
@@ -2492,6 +2517,8 @@ Result HtmlWriter::writeDialogEnd() {
 			const Data::DialogInfo &dialog) -> QByteArray {
 		if (dialog.type == Type::Self) {
 			return "Saved messages";
+		} else if (dialog.type == Type::Replies) {
+			return "Replies";
 		}
 		return dialog.name;
 	};
@@ -2512,9 +2539,9 @@ Result HtmlWriter::writeDialogEnd() {
 			+ (outgoing ? " outgoing messages" : " messages");
 	};
 	auto userpic = UserpicData{
-		(_dialog.type == Type::Self
+		((_dialog.type == Type::Self || _dialog.type == Type::Replies)
 			? kSavedMessagesColorIndex
-			: Data::PeerColorIndex(Data::BarePeerId(_dialog.peerId))),
+			: Data::PeerColorIndex(_dialog.peerId)),
 		kEntryUserpicSize
 	};
 	userpic.firstName = NameString(_dialog);
@@ -2629,7 +2656,6 @@ Result HtmlWriter::writeSections() {
 }
 
 QByteArray HtmlWriter::wrapMessageLink(int messageId, QByteArray text) {
-	const auto finishedCount = _lastMessageIdsPerFile.size();
 	const auto it = ranges::find_if(_lastMessageIdsPerFile, [&](int maxMessageId) {
 		return messageId <= maxMessageId;
 	});

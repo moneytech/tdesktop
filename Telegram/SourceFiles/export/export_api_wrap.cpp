@@ -11,9 +11,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "export/data/export_data_types.h"
 #include "export/output/export_output_result.h"
 #include "export/output/export_output_file.h"
-#include "mtproto/mtproto_rpc_sender.h"
+#include "mtproto/mtproto_response.h"
 #include "base/value_ordering.h"
 #include "base/bytes.h"
+#include "base/openssl_help.h"
 #include <set>
 #include <deque>
 
@@ -23,11 +24,11 @@ namespace {
 constexpr auto kUserpicsSliceLimit = 100;
 constexpr auto kFileChunkSize = 128 * 1024;
 constexpr auto kFileRequestsCount = 2;
-constexpr auto kFileNextRequestDelay = crl::time(20);
+//constexpr auto kFileNextRequestDelay = crl::time(20);
 constexpr auto kChatsSliceLimit = 100;
 constexpr auto kMessagesSliceLimit = 100;
 constexpr auto kTopPeerSliceLimit = 100;
-constexpr auto kFileMaxSize = 1500 * 1024 * 1024;
+constexpr auto kFileMaxSize = 2000 * 1024 * 1024;
 constexpr auto kLocationCacheSize = 100'000;
 
 struct LocationKey {
@@ -39,34 +40,16 @@ struct LocationKey {
 	}
 };
 
-std::tuple<const uint64 &, const uint64 &> value_ordering_helper(const LocationKey &value) {
-	return std::tie(
-		value.type,
-		value.id);
-}
-
 LocationKey ComputeLocationKey(const Data::FileLocation &value) {
 	auto result = LocationKey();
 	result.type = value.dcId;
-	value.data.match([&](const MTPDinputFileLocation &data) {
-		result.type |= (1ULL << 24);
-		result.type |= (uint64(uint32(data.vlocal_id().v)) << 32);
-		result.id = data.vvolume_id().v;
-	}, [&](const MTPDinputDocumentFileLocation &data) {
+	value.data.match([&](const MTPDinputDocumentFileLocation &data) {
 		const auto letter = data.vthumb_size().v.isEmpty()
 			? char(0)
 			: data.vthumb_size().v[0];
 		result.type |= (2ULL << 24);
 		result.type |= (uint64(uint32(letter)) << 16);
 		result.id = data.vid().v;
-	}, [&](const MTPDinputSecureFileLocation &data) {
-		result.type |= (3ULL << 24);
-		result.id = data.vid().v;
-	}, [&](const MTPDinputEncryptedFileLocation &data) {
-		result.type |= (4ULL << 24);
-		result.id = data.vid().v;
-	}, [&](const MTPDinputTakeoutFileLocation &data) {
-		result.type |= (5ULL << 24);
 	}, [&](const MTPDinputPhotoFileLocation &data) {
 		const auto letter = data.vthumb_size().v.isEmpty()
 			? char(0)
@@ -74,20 +57,10 @@ LocationKey ComputeLocationKey(const Data::FileLocation &value) {
 		result.type |= (6ULL << 24);
 		result.type |= (uint64(uint32(letter)) << 16);
 		result.id = data.vid().v;
-	}, [&](const MTPDinputPeerPhotoFileLocation &data) {
-		const auto letter = data.is_big() ? char(1) : char(0);
-		result.type |= (7ULL << 24);
-		result.type |= (uint64(uint32(data.vlocal_id().v)) << 32);
-		result.type |= (uint64(uint32(letter)) << 16);
-		result.id = data.vvolume_id().v;
-	}, [&](const MTPDinputStickerSetThumb &data) {
-		result.type |= (8ULL << 24);
-		result.type |= (uint64(uint32(data.vlocal_id().v)) << 32);
-		result.id = data.vvolume_id().v;
-	}, [&](const MTPDinputPhotoLegacyFileLocation &data) {
-		result.type |= (9ULL << 24);
-		result.type |= (uint64(uint32(data.vlocal_id().v)) << 32);
-		result.id = data.vvolume_id().v;
+	}, [&](const MTPDinputTakeoutFileLocation &data) {
+		result.type |= (5ULL << 24);
+	}, [](const auto &data) {
+		Unexpected("File location type in Export::ComputeLocationKey.");
 	});
 	return result;
 }
@@ -180,6 +153,7 @@ struct ApiWrap::FileProcess {
 	Fn<bool(FileProgress)> progress;
 	FnMut<void(const QString &relativePath)> done;
 
+	uint64 randomId = 0;
 	Data::FileLocation location;
 	Data::FileOrigin origin;
 	int offset = 0;
@@ -190,6 +164,7 @@ struct ApiWrap::FileProcess {
 		QByteArray bytes;
 	};
 	std::deque<Request> requests;
+	mtpRequestId requestId = 0;
 };
 
 struct ApiWrap::FileProgress {
@@ -203,7 +178,7 @@ struct ApiWrap::ChatsProcess {
 
 	Data::DialogsInfo info;
 	int processedCount = 0;
-	std::map<Data::PeerId, int> indexByPeer;
+	std::map<PeerId, int> indexByPeer;
 };
 
 struct ApiWrap::LeftChannelsProcess : ChatsProcess {
@@ -247,26 +222,26 @@ public:
 
 	RequestBuilder(
 		Original &&builder,
-		FnMut<void(RPCError&&)> commonFailHandler);
+		Fn<void(const MTP::Error&)> commonFailHandler);
 
 	[[nodiscard]] RequestBuilder &done(FnMut<void()> &&handler);
 	[[nodiscard]] RequestBuilder &done(
 		FnMut<void(Response &&)> &&handler);
 	[[nodiscard]] RequestBuilder &fail(
-		FnMut<bool(const RPCError &)> &&handler);
+		Fn<bool(const MTP::Error&)> &&handler);
 
 	mtpRequestId send();
 
 private:
 	Original _builder;
-	FnMut<void(RPCError&&)> _commonFailHandler;
+	Fn<void(const MTP::Error&)> _commonFailHandler;
 
 };
 
 template <typename Request>
 ApiWrap::RequestBuilder<Request>::RequestBuilder(
 	Original &&builder,
-	FnMut<void(RPCError&&)> commonFailHandler)
+	Fn<void(const MTP::Error&)> commonFailHandler)
 : _builder(std::move(builder))
 , _commonFailHandler(std::move(commonFailHandler)) {
 }
@@ -276,7 +251,7 @@ auto ApiWrap::RequestBuilder<Request>::done(
 	FnMut<void()> &&handler
 ) -> RequestBuilder& {
 	if (handler) {
-		auto &silence_warning = _builder.done(std::move(handler));
+		[[maybe_unused]] auto &silence_warning = _builder.done(std::move(handler));
 	}
 	return *this;
 }
@@ -286,22 +261,22 @@ auto ApiWrap::RequestBuilder<Request>::done(
 	FnMut<void(Response &&)> &&handler
 ) -> RequestBuilder& {
 	if (handler) {
-		auto &silence_warning = _builder.done(std::move(handler));
+		[[maybe_unused]] auto &silence_warning = _builder.done(std::move(handler));
 	}
 	return *this;
 }
 
 template <typename Request>
 auto ApiWrap::RequestBuilder<Request>::fail(
-	FnMut<bool(const RPCError &)> &&handler
+	Fn<bool(const MTP::Error &)> &&handler
 ) -> RequestBuilder& {
 	if (handler) {
-		auto &silence_warning = _builder.fail([
+		[[maybe_unused]] auto &silence_warning = _builder.fail([
 			common = base::take(_commonFailHandler),
 			specific = std::move(handler)
-		](RPCError &&error) mutable {
+		](const MTP::Error &error) {
 			if (!specific(error)) {
-				common(std::move(error));
+				common(error);
 			}
 		});
 	}
@@ -362,7 +337,7 @@ auto ApiWrap::mainRequest(Request &&request) {
 
 	return RequestBuilder<MTPInvokeWithTakeout<Request>>(
 		std::move(original),
-		[=](RPCError &&result) { error(std::move(result)); });
+		[=](const MTP::Error &result) { error(result); });
 }
 
 template <typename Request>
@@ -381,6 +356,7 @@ auto ApiWrap::fileRequest(const Data::FileLocation &location, int offset) {
 	Expects(location.dcId != 0
 		|| location.data.type() == mtpc_inputTakeoutFileLocation);
 	Expects(_takeoutId.has_value());
+	Expects(_fileProcess->requestId == 0);
 
 	return std::move(_mtp.request(MTPInvokeWithTakeout<MTPupload_GetFile>(
 		MTP_long(*_takeoutId),
@@ -389,7 +365,8 @@ auto ApiWrap::fileRequest(const Data::FileLocation &location, int offset) {
 			location.data,
 			MTP_int(offset),
 			MTP_int(kFileChunkSize))
-	)).fail([=](RPCError &&result) {
+	)).fail([=](const MTP::Error &result) {
+		_fileProcess->requestId = 0;
 		if (result.type() == qstr("TAKEOUT_FILE_EMPTY")
 			&& _otherDataProcess != nullptr) {
 			filePartDone(
@@ -399,7 +376,8 @@ auto ApiWrap::fileRequest(const Data::FileLocation &location, int offset) {
 					MTP_int(0),
 					MTP_bytes()));
 		} else if (result.type() == qstr("LOCATION_INVALID")
-			|| result.type() == qstr("VERSION_INVALID")) {
+			|| result.type() == qstr("VERSION_INVALID")
+			|| result.type() == qstr("LOCATION_NOT_AVAILABLE")) {
 			filePartUnavailable();
 		} else if (result.code() == 400
 			&& result.type().startsWith(qstr("FILE_REFERENCE_"))) {
@@ -410,12 +388,12 @@ auto ApiWrap::fileRequest(const Data::FileLocation &location, int offset) {
 	}).toDC(MTP::ShiftDcId(location.dcId, MTP::kExportMediaDcShift)));
 }
 
-ApiWrap::ApiWrap(Fn<void(FnMut<void()>)> runner)
-: _mtp(std::move(runner))
+ApiWrap::ApiWrap(QPointer<MTP::Instance> weak, Fn<void(FnMut<void()>)> runner)
+: _mtp(weak, std::move(runner))
 , _fileCache(std::make_unique<LoadedFileCache>(kLocationCacheSize)) {
 }
 
-rpl::producer<RPCError> ApiWrap::errors() const {
+rpl::producer<MTP::Error> ApiWrap::errors() const {
 	return _errors.events();
 }
 
@@ -660,18 +638,37 @@ void ApiWrap::startMainSession(FnMut<void()> done) {
 			? Flag::f_message_channels
 			: Flag(0));
 
-	_mtp.request(MTPaccount_InitTakeoutSession(
-		MTP_flags(flags),
-		MTP_int(sizeLimit)
+	_mtp.request(MTPusers_GetUsers(
+		MTP_vector<MTPInputUser>(1, MTP_inputUserSelf())
 	)).done([=, done = std::move(done)](
-			const MTPaccount_Takeout &result) mutable {
-		_takeoutId = result.match([](const MTPDaccount_takeout &data) {
-			return data.vid().v;
-		});
-		done();
-	}).fail([=](RPCError &&result) {
-		error(std::move(result));
-	}).toDC(MTP::ShiftDcId(0, MTP::kExportDcShift)).send();
+			const MTPVector<MTPUser> &result) mutable {
+		for (const auto &user : result.v) {
+			user.match([&](const MTPDuser &data) {
+				if (data.is_self()) {
+					_selfId.emplace(data.vid());
+				}
+			}, [&](const MTPDuserEmpty&) {
+			});
+		}
+		if (!_selfId) {
+			error("Could not retrieve selfId.");
+			return;
+		}
+		_mtp.request(MTPaccount_InitTakeoutSession(
+			MTP_flags(flags),
+			MTP_int(sizeLimit)
+		)).done([=, done = std::move(done)](
+				const MTPaccount_Takeout &result) mutable {
+			_takeoutId = result.match([](const MTPDaccount_takeout &data) {
+				return data.vid().v;
+			});
+			done();
+		}).fail([=](const MTP::Error &result) {
+			error(result);
+		}).toDC(MTP::ShiftDcId(0, MTP::kExportDcShift)).send();
+	}).fail([=](const MTP::Error &result) {
+		error(result);
+	}).send();
 }
 
 void ApiWrap::requestPersonalInfo(FnMut<void(Data::PersonalInfo&&)> done) {
@@ -831,6 +828,7 @@ bool ApiWrap::loadUserpicProgress(FileProgress progress) {
 			< _userpicsProcess->slice->list.size()));
 
 	return _userpicsProcess->fileProgress(DownloadProgress{
+		_fileProcess->randomId,
 		_fileProcess->relativePath,
 		_userpicsProcess->fileIndex,
 		progress.ready,
@@ -943,8 +941,10 @@ void ApiWrap::requestMessages(
 		Fn<bool(Data::MessagesSlice&&)> slice,
 		FnMut<void()> done) {
 	Expects(_chatProcess == nullptr);
+	Expects(_selfId.has_value());
 
 	_chatProcess = std::make_unique<ChatProcess>();
+	_chatProcess->context.selfPeerId = peerFromUser(*_selfId);
 	_chatProcess->info = info;
 	_chatProcess->start = std::move(start);
 	_chatProcess->fileProgress = std::move(progress);
@@ -1037,6 +1037,17 @@ void ApiWrap::finishExport(FnMut<void()> done) {
 	)).done(std::move(done)).send();
 }
 
+void ApiWrap::skipFile(uint64 randomId) {
+	if (!_fileProcess || _fileProcess->randomId != randomId) {
+		return;
+	}
+	LOG(("Export Info: File skipped."));
+	Assert(!_fileProcess->requests.empty());
+	Assert(_fileProcess->requestId != 0);
+	_mtp.request(base::take(_fileProcess->requestId)).cancel();
+	base::take(_fileProcess)->done(QString());
+}
+
 void ApiWrap::cancelExportFast() {
 	if (_takeoutId.has_value()) {
 		const auto requestId = mainRequest(MTPaccount_FinishTakeoutSession(
@@ -1047,34 +1058,9 @@ void ApiWrap::cancelExportFast() {
 }
 
 void ApiWrap::requestSinglePeerDialog() {
-	const auto isChannelType = [](Data::DialogInfo::Type type) {
-		using Type = Data::DialogInfo::Type;
-		return (type == Type::PrivateSupergroup)
-			|| (type == Type::PublicSupergroup)
-			|| (type == Type::PrivateChannel)
-			|| (type == Type::PublicChannel);
-	};
 	auto doneSinglePeer = [=](const auto &result) {
-		auto info = Data::ParseDialogsInfo(_settings->singlePeer, result);
-
-		_dialogsProcess->processedCount += info.chats.size();
-		appendDialogsSlice(std::move(info));
-
-		const auto last = _dialogsProcess->splitIndexPlusOne - 1;
-		for (auto &info : _dialogsProcess->info.chats) {
-			if (isChannelType(info.type)) {
-				continue;
-			}
-			for (auto i = last; i != 0; --i) {
-				info.splits.push_back(i - 1);
-				info.messagesCountPerSplit.push_back(0);
-			}
-		}
-
-		if (!_dialogsProcess->progress(_dialogsProcess->processedCount)) {
-			return;
-		}
-		finishDialogsList();
+		appendSinglePeerDialogs(
+			Data::ParseDialogsInfo(_settings->singlePeer, result));
 	};
 	const auto requestUser = [&](const MTPInputUser &data) {
 		mainRequest(MTPusers_GetUsers(
@@ -1102,6 +1088,76 @@ void ApiWrap::requestSinglePeerDialog() {
 	}, [](const MTPDinputPeerEmpty &data) {
 		Unexpected("Empty peer in ApiWrap::requestSinglePeerDialog.");
 	});
+}
+
+mtpRequestId ApiWrap::requestSinglePeerMigrated(
+		const Data::DialogInfo &info) {
+	const auto input = info.input.match([&](
+		const MTPDinputPeerChannel & data) {
+		return MTP_inputChannel(
+			data.vchannel_id(),
+			data.vaccess_hash());
+	}, [](auto&&) -> MTPinputChannel {
+		Unexpected("Peer type in a supergroup.");
+	});
+	return mainRequest(MTPchannels_GetFullChannel(
+		input
+	)).done([=](const MTPmessages_ChatFull &result) {
+		auto info = result.match([&](
+				const MTPDmessages_chatFull &data) {
+			const auto migratedChatId = data.vfull_chat().match([&](
+					const MTPDchannelFull &data) {
+				return data.vmigrated_from_chat_id().value_or_empty();
+			}, [](auto &&other) {
+				return 0;
+			});
+			return migratedChatId
+				? Data::ParseDialogsInfo(
+					MTP_inputPeerChat(MTP_int(migratedChatId)),
+					MTP_messages_chats(data.vchats()))
+				: Data::DialogsInfo();
+		});
+		appendSinglePeerDialogs(std::move(info));
+	}).send();
+}
+
+void ApiWrap::appendSinglePeerDialogs(Data::DialogsInfo &&info) {
+	const auto isSupergroupType = [](Data::DialogInfo::Type type) {
+		using Type = Data::DialogInfo::Type;
+		return (type == Type::PrivateSupergroup)
+			|| (type == Type::PublicSupergroup);
+	};
+	const auto isChannelType = [](Data::DialogInfo::Type type) {
+		using Type = Data::DialogInfo::Type;
+		return (type == Type::PrivateChannel)
+			|| (type == Type::PublicChannel);
+	};
+
+	auto migratedRequestId = mtpRequestId(0);
+	const auto last = _dialogsProcess->splitIndexPlusOne - 1;
+	for (auto &info : info.chats) {
+		if (isSupergroupType(info.type) && !migratedRequestId) {
+			migratedRequestId = requestSinglePeerMigrated(info);
+			continue;
+		} else if (isChannelType(info.type)) {
+			continue;
+		}
+		for (auto i = last; i != 0; --i) {
+			info.splits.push_back(i - 1);
+			info.messagesCountPerSplit.push_back(0);
+		}
+	}
+
+	if (!migratedRequestId) {
+		_dialogsProcess->processedCount += info.chats.size();
+	}
+	appendDialogsSlice(std::move(info));
+
+	if (migratedRequestId
+		|| !_dialogsProcess->progress(_dialogsProcess->processedCount)) {
+		return;
+	}
+	finishDialogsList();
 }
 
 void ApiWrap::requestDialogsSlice() {
@@ -1261,15 +1317,41 @@ void ApiWrap::appendChatsSlice(
 	Expects(_settings != nullptr);
 
 	const auto types = _settings->types;
-	auto filtered = ranges::view::all(
+	const auto goodByTypes = [&](const Data::DialogInfo &info) {
+		return ((types & SettingsFromDialogsType(info.type)) != 0);
+	};
+	auto filtered = ranges::views::all(
 		from
-	) | ranges::view::filter([&](const Data::DialogInfo &info) {
-		return (types & SettingsFromDialogsType(info.type)) != 0;
+	) | ranges::views::filter([&](const Data::DialogInfo &info) {
+		if (goodByTypes(info)) {
+			return true;
+		} else if (info.migratedToChannelId
+			&& (((types & Settings::Type::PublicGroups) != 0)
+				|| ((types & Settings::Type::PrivateGroups) != 0))) {
+			return true;
+		}
+		return false;
 	});
 	to.reserve(to.size() + from.size());
 	for (auto &info : filtered) {
 		const auto nextIndex = to.size();
-		const auto [i, ok] = process.indexByPeer.emplace(info.peerId, nextIndex);
+		if (info.migratedToChannelId) {
+			const auto toPeerId = PeerId(info.migratedToChannelId);
+			const auto i = process.indexByPeer.find(toPeerId);
+			if (i != process.indexByPeer.end()
+				&& Data::AddMigrateFromSlice(
+					to[i->second],
+					info,
+					splitIndex,
+					int(_splits.size()))) {
+				continue;
+			} else if (!goodByTypes(info)) {
+				continue;
+			}
+		}
+		const auto [i, ok] = process.indexByPeer.emplace(
+			info.peerId,
+			nextIndex);
 		if (ok) {
 			to.push_back(std::move(info));
 		}
@@ -1325,12 +1407,20 @@ void ApiWrap::requestChatMessages(
 
 		base::take(_chatProcess->requestDone)(std::move(result));
 	};
+	const auto splitsCount = int(_splits.size());
+	const auto realPeerInput = (splitIndex >= 0)
+		? _chatProcess->info.input
+		: _chatProcess->info.migratedFromInput;
+	const auto realSplitIndex = (splitIndex >= 0)
+		? splitIndex
+		: (splitsCount + splitIndex);
 	if (_chatProcess->info.onlyMyMessages) {
-		splitRequest(splitIndex, MTPmessages_Search(
+		splitRequest(realSplitIndex, MTPmessages_Search(
 			MTP_flags(MTPmessages_Search::Flag::f_from_id),
-			_chatProcess->info.input,
+			realPeerInput,
 			MTP_string(), // query
-			_user,
+			MTP_inputPeerSelf(),
+			MTPint(), // top_msg_id
 			MTP_inputMessagesFilterEmpty(),
 			MTP_int(0), // min_date
 			MTP_int(0), // max_date
@@ -1342,8 +1432,8 @@ void ApiWrap::requestChatMessages(
 			MTP_int(0) // hash
 		)).done(doneHandler).send();
 	} else {
-		splitRequest(splitIndex, MTPmessages_GetHistory(
-			_chatProcess->info.input,
+		splitRequest(realSplitIndex, MTPmessages_GetHistory(
+			realPeerInput,
 			MTP_int(offsetId),
 			MTP_int(0), // offset_date
 			MTP_int(addOffset),
@@ -1351,11 +1441,11 @@ void ApiWrap::requestChatMessages(
 			MTP_int(0), // max_id
 			MTP_int(0), // min_id
 			MTP_int(0)  // hash
-		)).fail([=](const RPCError &error) {
+		)).fail([=](const MTP::Error &error) {
 			Expects(_chatProcess != nullptr);
 
 			if (error.type() == qstr("CHANNEL_PRIVATE")) {
-				if (_chatProcess->info.input.type() == mtpc_inputPeerChannel
+				if (realPeerInput.type() == mtpc_inputPeerChannel
 					&& !_chatProcess->info.onlyMyMessages) {
 
 					// Perhaps we just left / were kicked from channel.
@@ -1399,10 +1489,16 @@ Data::FileOrigin ApiWrap::currentFileMessageOrigin() const {
 	Expects(_chatProcess != nullptr);
 	Expects(_chatProcess->slice.has_value());
 
+	const auto splitIndex = _chatProcess->info.splits[
+		_chatProcess->localSplitIndex];
 	auto result = Data::FileOrigin();
 	result.messageId = currentFileMessage()->id;
-	result.peer = _chatProcess->info.input;
-	result.split = _chatProcess->info.splits[_chatProcess->localSplitIndex];
+	result.split = (splitIndex >= 0)
+		? splitIndex
+		: (int(_splits.size()) + splitIndex);
+	result.peer = (splitIndex >= 0)
+		? _chatProcess->info.input
+		: _chatProcess->info.migratedFromInput;
 	return result;
 }
 
@@ -1452,6 +1548,11 @@ void ApiWrap::finishMessagesSlice() {
 	auto slice = *base::take(_chatProcess->slice);
 	if (!slice.list.empty()) {
 		_chatProcess->largestIdPlusOne = slice.list.back().id + 1;
+		const auto splitIndex = _chatProcess->info.splits[
+			_chatProcess->localSplitIndex];
+		if (splitIndex < 0) {
+			slice = AdjustMigrateMessageIds(std::move(slice));
+		}
 		if (!_chatProcess->handleSlice(std::move(slice))) {
 			return;
 		}
@@ -1477,10 +1578,11 @@ bool ApiWrap::loadMessageFileProgress(FileProgress progress) {
 		&& (_chatProcess->fileIndex < _chatProcess->slice->list.size()));
 
 	return _chatProcess->fileProgress(DownloadProgress{
-		_fileProcess->relativePath,
-		_chatProcess->fileIndex,
-		progress.ready,
-		progress.total });
+		.randomId = _fileProcess->randomId,
+		.path = _fileProcess->relativePath,
+		.itemIndex = _chatProcess->fileIndex,
+		.ready = progress.ready,
+		.total = progress.total });
 }
 
 void ApiWrap::loadMessageFileDone(const QString &relativePath) {
@@ -1544,8 +1646,8 @@ bool ApiWrap::processFileLoad(
 	}
 
 	using Type = MediaSettings::Type;
-	const auto type = message ? message->media.content.match(
-	[&](const Data::Document &data) {
+	const auto type = message ? v::match(message->media.content, [&](
+			const Data::Document &data) {
 		if (data.isSticker) {
 			return Type::Sticker;
 		} else if (data.isVideoMessage) {
@@ -1626,6 +1728,8 @@ void ApiWrap::loadFile(
 	}
 
 	loadFilePart();
+
+	Ensures(_fileProcess->requestId != 0);
 }
 
 auto ApiWrap::prepareFileProcess(
@@ -1644,11 +1748,13 @@ auto ApiWrap::prepareFileProcess(
 	result->location = file.location;
 	result->size = file.size;
 	result->origin = origin;
+	result->randomId = openssl::RandomValue<uint64>();
 	return result;
 }
 
 void ApiWrap::loadFilePart() {
 	if (!_fileProcess
+		|| _fileProcess->requestId
 		|| _fileProcess->requests.size() >= kFileRequestsCount
 		|| (_fileProcess->size > 0
 			&& _fileProcess->offset >= _fileProcess->size)) {
@@ -1657,16 +1763,18 @@ void ApiWrap::loadFilePart() {
 
 	const auto offset = _fileProcess->offset;
 	_fileProcess->requests.push_back({ offset });
-	fileRequest(
+	_fileProcess->requestId = fileRequest(
 		_fileProcess->location,
 		_fileProcess->offset
 	).done([=](const MTPupload_File &result) {
+		_fileProcess->requestId = 0;
 		filePartDone(offset, result);
 	}).send();
 	_fileProcess->offset += kFileChunkSize;
 
 	if (_fileProcess->size > 0
 		&& _fileProcess->requests.size() < kFileRequestsCount) {
+		// Only one request at a time supported right now.
 		//const auto runner = _runner;
 		//crl::on_main([=] {
 		//	QTimer::singleShot(kFileNextRequestDelay, [=] {
@@ -1740,6 +1848,7 @@ void ApiWrap::filePartDone(int offset, const MTPupload_File &result) {
 
 void ApiWrap::filePartRefreshReference(int offset) {
 	Expects(_fileProcess != nullptr);
+	Expects(_fileProcess->requestId == 0);
 
 	const auto &origin = _fileProcess->origin;
 	if (!origin.messageId) {
@@ -1756,26 +1865,33 @@ void ApiWrap::filePartRefreshReference(int offset) {
 				origin.peer.c_inputPeerChannelFromMessage().vpeer(),
 				origin.peer.c_inputPeerChannelFromMessage().vmsg_id(),
 				origin.peer.c_inputPeerChannelFromMessage().vchannel_id());
-		mainRequest(MTPchannels_GetMessages(
+		_fileProcess->requestId = mainRequest(MTPchannels_GetMessages(
 			channel,
 			MTP_vector<MTPInputMessage>(
 				1,
 				MTP_inputMessageID(MTP_int(origin.messageId)))
-		)).fail([=](const RPCError &error) {
+		)).fail([=](const MTP::Error &error) {
+			_fileProcess->requestId = 0;
 			filePartUnavailable();
 			return true;
 		}).done([=](const MTPmessages_Messages &result) {
+			_fileProcess->requestId = 0;
 			filePartExtractReference(offset, result);
 		}).send();
 	} else {
-		splitRequest(origin.split, MTPmessages_GetMessages(
-			MTP_vector<MTPInputMessage>(
-				1,
-				MTP_inputMessageID(MTP_int(origin.messageId)))
-		)).fail([=](const RPCError &error) {
+		_fileProcess->requestId = splitRequest(
+			origin.split,
+			MTPmessages_GetMessages(
+				MTP_vector<MTPInputMessage>(
+					1,
+					MTP_inputMessageID(MTP_int(origin.messageId)))
+			)
+		).fail([=](const MTP::Error &error) {
+			_fileProcess->requestId = 0;
 			filePartUnavailable();
 			return true;
 		}).done([=](const MTPmessages_Messages &result) {
+			_fileProcess->requestId = 0;
 			filePartExtractReference(offset, result);
 		}).send();
 	}
@@ -1785,11 +1901,15 @@ void ApiWrap::filePartExtractReference(
 		int offset,
 		const MTPmessages_Messages &result) {
 	Expects(_fileProcess != nullptr);
+	Expects(_fileProcess->requestId == 0);
 
 	result.match([&](const MTPDmessages_messagesNotModified &data) {
 		error("Unexpected messagesNotModified received.");
 	}, [&](const auto &data) {
+		Expects(_selfId.has_value());
+
 		auto context = Data::ParseMediaContext();
+		context.selfPeerId = peerFromUser(*_selfId);
 		const auto messages = Data::ParseMessagesSlice(
 			context,
 			data.vmessages(),
@@ -1805,10 +1925,11 @@ void ApiWrap::filePartExtractReference(
 					_fileProcess->location,
 					message.thumb().file.location);
 				if (refresh1 || refresh2) {
-					fileRequest(
+					_fileProcess->requestId = fileRequest(
 						_fileProcess->location,
 						offset
 					).done([=](const MTPupload_File &result) {
+						_fileProcess->requestId = 0;
 						filePartDone(offset, result);
 					}).send();
 					return;
@@ -1828,12 +1949,13 @@ void ApiWrap::filePartUnavailable() {
 	base::take(_fileProcess)->done(QString());
 }
 
-void ApiWrap::error(RPCError &&error) {
-	_errors.fire(std::move(error));
+void ApiWrap::error(const MTP::Error &error) {
+	_errors.fire_copy(error);
 }
 
 void ApiWrap::error(const QString &text) {
-	error(MTP_rpc_error(MTP_int(0), MTP_string("API_ERROR: " + text)));
+	error(MTP::Error(
+		MTP_rpc_error(MTP_int(0), MTP_string("API_ERROR: " + text))));
 }
 
 void ApiWrap::ioError(const Output::Result &result) {

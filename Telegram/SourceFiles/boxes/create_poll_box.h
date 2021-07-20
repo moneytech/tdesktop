@@ -18,9 +18,13 @@ namespace Ui {
 class VerticalLayout;
 } // namespace Ui
 
-namespace Main {
-class Session;
-} // namespace Main
+namespace Window {
+class SessionController;
+} // namespace Window
+
+namespace SendMenu {
+enum class Type;
+} // namespace SendMenu
 
 class CreatePollBox : public Ui::BoxContent {
 public:
@@ -31,10 +35,11 @@ public:
 
 	CreatePollBox(
 		QWidget*,
-		not_null<Main::Session*> session,
+		not_null<Window::SessionController*> controller,
 		PollData::Flags chosen,
 		PollData::Flags disabled,
-		Api::SendType sendType);
+		Api::SendType sendType,
+		SendMenu::Type sendMenuType);
 
 	[[nodiscard]] rpl::producer<Result> submitRequests() const;
 	void submitFailed(const QString &error);
@@ -62,10 +67,11 @@ private:
 		not_null<Ui::VerticalLayout*> container,
 		rpl::producer<bool> shown);
 
-	const not_null<Main::Session*> _session;
+	const not_null<Window::SessionController*> _controller;
 	const PollData::Flags _chosen = PollData::Flags();
 	const PollData::Flags _disabled = PollData::Flags();
 	const Api::SendType _sendType = Api::SendType();
+	const SendMenu::Type _sendMenuType;
 	Fn<void()> _setInnerFocus;
 	Fn<rpl::producer<bool>()> _dataIsValidValue;
 	rpl::event_stream<Result> _submitRequests;

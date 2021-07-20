@@ -9,6 +9,28 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "ui/basic_click_handlers.h"
 
+namespace Main {
+class Session;
+} // namespace Main
+
+namespace HistoryView {
+class ElementDelegate;
+} // namespace HistoryView
+
+namespace Window {
+class SessionController;
+} // namespace Window
+
+[[nodiscard]] bool UrlRequiresConfirmation(const QUrl &url);
+
+struct ClickHandlerContext {
+	FullMsgId itemId;
+	Fn<HistoryView::ElementDelegate*()> elementDelegate;
+	base::weak_ptr<Window::SessionController> sessionWindow;
+	bool skipBotAutoLogin = false;
+};
+Q_DECLARE_METATYPE(ClickHandlerContext);
+
 class HiddenUrlClickHandler : public UrlClickHandler {
 public:
 	HiddenUrlClickHandler(QString url) : UrlClickHandler(url, false) {
@@ -72,10 +94,15 @@ private:
 
 class MentionNameClickHandler : public ClickHandler {
 public:
-	MentionNameClickHandler(QString text, UserId userId, uint64 accessHash)
-		: _text(text)
-		, _userId(userId)
-		, _accessHash(accessHash) {
+	MentionNameClickHandler(
+		not_null<Main::Session*> session,
+		QString text,
+		UserId userId,
+		uint64 accessHash)
+	: _session(session)
+	, _text(text)
+	, _userId(userId)
+	, _accessHash(accessHash) {
 	}
 
 	void onClick(ClickContext context) const override;
@@ -85,6 +112,7 @@ public:
 	QString tooltip() const override;
 
 private:
+	const not_null<Main::Session*> _session;
 	QString _text;
 	UserId _userId;
 	uint64 _accessHash;
@@ -153,30 +181,14 @@ public:
 		return _cmd;
 	}
 
-	static void setPeerForCommand(PeerData *peer) {
-		_peer = peer;
-	}
-	static void setBotForCommand(UserData *bot) {
-		_bot = bot;
-	}
-
 	TextEntity getTextEntity() const override;
 
 protected:
 	QString url() const override {
 		return _cmd;
 	}
-	static PeerData *peerForCommand() {
-		return _peer;
-	}
-	static UserData *botForCommand() {
-		return _bot;
-	}
 
 private:
 	QString _cmd;
-
-	static PeerData *_peer;
-	static UserData *_bot;
 
 };

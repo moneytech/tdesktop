@@ -8,9 +8,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "base/variant.h"
-#include "mtproto/mtproto_rpc_sender.h"
+#include "mtproto/mtproto_response.h"
 
+#include <QtCore/QPointer>
 #include <crl/crl_object_on_queue.h>
+
+namespace MTP {
+class Instance;
+} // namespace MTP
 
 namespace Export {
 
@@ -51,6 +56,7 @@ struct ProcessingState {
 	enum class EntityType {
 		Chat,
 		SavedMessages,
+		RepliesMessages,
 		Other,
 	};
 
@@ -68,6 +74,7 @@ struct ProcessingState {
 	int itemIndex = 0;
 	int itemCount = 0;
 
+	uint64 bytesRandomId = 0;
 	FileType bytesType = FileType::None;
 	QString bytesName;
 	int bytesLoaded = 0;
@@ -75,7 +82,7 @@ struct ProcessingState {
 };
 
 struct ApiErrorState {
-	RPCError data;
+	MTP::Error data;
 };
 
 struct OutputErrorState {
@@ -91,7 +98,8 @@ struct FinishedState {
 	int64 bytesCount = 0;
 };
 
-using State = base::optional_variant<
+using State = std::variant<
+	v::null_t,
 	PasswordCheckState,
 	ProcessingState,
 	ApiErrorState,
@@ -112,7 +120,9 @@ using State = base::optional_variant<
 
 class Controller {
 public:
-	explicit Controller(const MTPInputPeer &peer);
+	Controller(
+		QPointer<MTP::Instance> mtproto,
+		const MTPInputPeer &peer);
 
 	rpl::producer<State> state() const;
 
@@ -127,6 +137,7 @@ public:
 	void startExport(
 		const Settings &settings,
 		const Environment &environment);
+	void skipFile(uint64 randomId);
 	void cancelExportFast();
 
 	rpl::lifetime &lifetime();

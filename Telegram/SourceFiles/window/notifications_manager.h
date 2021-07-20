@@ -11,6 +11,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 class History;
 
+namespace Data {
+class CloudImageView;
+} // namespace Data
+
 namespace Main {
 class Session;
 } // namespace Main
@@ -28,10 +32,20 @@ class Track;
 } // namespace Media
 
 namespace Window {
+
+class SessionController;
+
 namespace Notifications {
+
+enum class ManagerType {
+	Dummy,
+	Default,
+	Native,
+};
 
 enum class ChangeType {
 	SoundEnabled,
+	FlashBounceEnabled,
 	IncludeMuted,
 	CountMessages,
 	DesktopEnabled,
@@ -39,6 +53,7 @@ enum class ChangeType {
 	MaxCount,
 	Corner,
 	DemoIsShown,
+	DemoIsHidden,
 };
 
 } // namespace Notifications
@@ -57,30 +72,33 @@ namespace Notifications {
 
 class Manager;
 
-class System final : private base::Subscriber {
+class System final {
 public:
-	explicit System(not_null<Main::Session*> session);
+	System();
+	~System();
+
+	[[nodiscard]] Main::Session *findSession(uint64 sessionId) const;
 
 	void createManager();
+	void setManager(std::unique_ptr<Manager> manager);
+	[[nodiscard]] std::optional<ManagerType> managerType() const;
 
 	void checkDelayed();
 	void schedule(not_null<HistoryItem*> item);
 	void clearFromHistory(not_null<History*> history);
 	void clearIncomingFromHistory(not_null<History*> history);
+	void clearFromSession(not_null<Main::Session*> session);
 	void clearFromItem(not_null<HistoryItem*> item);
 	void clearAll();
 	void clearAllFast();
 	void updateAll();
 
-	base::Observable<ChangeType> &settingsChanged() {
-		return _settingsChanged;
-	}
+	[[nodiscard]] rpl::producer<ChangeType> settingsChanged() const;
+	void notifySettingsChanged(ChangeType type);
 
-	Main::Session &session() const {
-		return *_session;
+	[[nodiscard]] rpl::lifetime &lifetime() {
+		return _lifetime;
 	}
-
-	~System();
 
 private:
 	struct SkipState {
@@ -92,48 +110,60 @@ private:
 		Value value = Value::Unknown;
 		bool silent = false;
 	};
+	struct Waiter {
+		MsgId msg;
+		crl::time when;
+		PeerData *notifyBy = nullptr;
+	};
 
-	SkipState skipNotification(not_null<HistoryItem*> item) const;
+	[[nodiscard]] SkipState skipNotification(
+		not_null<HistoryItem*> item) const;
 
 	void showNext();
 	void showGrouped();
 	void ensureSoundCreated();
 
-	not_null<Main::Session*> _session;
+	base::flat_map<
+		not_null<History*>,
+		base::flat_map<MsgId, crl::time>> _whenMaps;
 
-	QMap<History*, QMap<MsgId, crl::time>> _whenMaps;
-
-	struct Waiter {
-		Waiter(MsgId msg, crl::time when, PeerData *notifyBy)
-		: msg(msg)
-		, when(when)
-		, notifyBy(notifyBy) {
-		}
-		MsgId msg;
-		crl::time when;
-		PeerData *notifyBy;
-	};
-	using Waiters = QMap<History*, Waiter>;
-	Waiters _waiters;
-	Waiters _settingWaiters;
+	base::flat_map<not_null<History*>, Waiter> _waiters;
+	base::flat_map<not_null<History*>, Waiter> _settingWaiters;
 	base::Timer _waitTimer;
 	base::Timer _waitForAllGroupedTimer;
 
-	QMap<History*, QMap<crl::time, PeerData*>> _whenAlerts;
+	base::flat_map<not_null<History*>, base::flat_map<crl::time, PeerData*>> _whenAlerts;
 
 	std::unique_ptr<Manager> _manager;
 
-	base::Observable<ChangeType> _settingsChanged;
+	rpl::event_stream<ChangeType> _settingsChanged;
 
 	std::unique_ptr<Media::Audio::Track> _soundTrack;
 
 	int _lastForwardedCount = 0;
+	uint64 _lastHistorySessionId = 0;
 	FullMsgId _lastHistoryItemId;
+
+	rpl::lifetime _lifetime;
 
 };
 
 class Manager {
 public:
+	struct FullPeer {
+		uint64 sessionId = 0;
+		PeerId peerId = 0;
+
+		friend inline bool operator<(const FullPeer &a, const FullPeer &b) {
+			return std::tie(a.sessionId, a.peerId)
+				< std::tie(b.sessionId, b.peerId);
+		}
+	};
+	struct NotificationId {
+		FullPeer full;
+		MsgId msgId = 0;
+	};
+
 	explicit Manager(not_null<System*> system) : _system(system) {
 	}
 
@@ -157,19 +187,36 @@ public:
 	void clearFromHistory(not_null<History*> history) {
 		doClearFromHistory(history);
 	}
+	void clearFromSession(not_null<Main::Session*> session) {
+		doClearFromSession(session);
+	}
 
-	void notificationActivated(PeerId peerId, MsgId msgId);
-	void notificationReplied(
-		PeerId peerId,
-		MsgId msgId,
-		const TextWithTags &reply);
+	void notificationActivated(NotificationId id);
+	void notificationReplied(NotificationId id, const TextWithTags &reply);
 
 	struct DisplayOptions {
-		bool hideNameAndPhoto;
-		bool hideMessageText;
-		bool hideReplyButton;
+		bool hideNameAndPhoto = false;
+		bool hideMessageText = false;
+		bool hideReplyButton = false;
 	};
-	static DisplayOptions getNotificationOptions(HistoryItem *item);
+	[[nodiscard]] DisplayOptions getNotificationOptions(
+		HistoryItem *item) const;
+
+	[[nodiscard]] QString addTargetAccountName(
+		const QString &title,
+		not_null<Main::Session*> session);
+
+	[[nodiscard]] virtual ManagerType type() const = 0;
+
+	[[nodiscard]] bool skipAudio() const {
+		return doSkipAudio();
+	}
+	[[nodiscard]] bool skipToast() const {
+		return doSkipToast();
+	}
+	[[nodiscard]] bool skipFlashBounce() const {
+		return doSkipFlashBounce();
+	}
 
 	virtual ~Manager() = default;
 
@@ -186,10 +233,20 @@ protected:
 	virtual void doClearAllFast() = 0;
 	virtual void doClearFromItem(not_null<HistoryItem*> item) = 0;
 	virtual void doClearFromHistory(not_null<History*> history) = 0;
-	virtual void onBeforeNotificationActivated(PeerId peerId, MsgId msgId) {
+	virtual void doClearFromSession(not_null<Main::Session*> session) = 0;
+	virtual bool doSkipAudio() const = 0;
+	virtual bool doSkipToast() const = 0;
+	virtual bool doSkipFlashBounce() const = 0;
+	[[nodiscard]] virtual bool forceHideDetails() const {
+		return false;
 	}
-	virtual void onAfterNotificationActivated(PeerId peerId, MsgId msgId) {
+	virtual void onBeforeNotificationActivated(NotificationId id) {
 	}
+	virtual void onAfterNotificationActivated(
+		NotificationId id,
+		not_null<SessionController*> window) {
+	}
+	[[nodiscard]] virtual QString accountNameSeparator();
 
 private:
 	void openNotificationMessage(
@@ -201,6 +258,11 @@ private:
 };
 
 class NativeManager : public Manager {
+public:
+	[[nodiscard]] ManagerType type() const override {
+		return ManagerType::Native;
+	}
+
 protected:
 	using Manager::Manager;
 
@@ -216,14 +278,54 @@ protected:
 		not_null<HistoryItem*> item,
 		int forwardedCount) override;
 
+	bool forceHideDetails() const override;
+
 	virtual void doShowNativeNotification(
 		not_null<PeerData*> peer,
+		std::shared_ptr<Data::CloudImageView> &userpicView,
 		MsgId msgId,
 		const QString &title,
 		const QString &subtitle,
 		const QString &msg,
 		bool hideNameAndPhoto,
 		bool hideReplyButton) = 0;
+
+};
+
+class DummyManager : public NativeManager {
+public:
+	using NativeManager::NativeManager;
+
+	[[nodiscard]] ManagerType type() const override {
+		return ManagerType::Dummy;
+	}
+
+protected:
+	void doShowNativeNotification(
+		not_null<PeerData*> peer,
+		std::shared_ptr<Data::CloudImageView> &userpicView,
+		MsgId msgId,
+		const QString &title,
+		const QString &subtitle,
+		const QString &msg,
+		bool hideNameAndPhoto,
+		bool hideReplyButton) override {
+	}
+	void doClearAllFast() override {
+	}
+	void doClearFromHistory(not_null<History*> history) override {
+	}
+	void doClearFromSession(not_null<Main::Session*> session) override {
+	}
+	bool doSkipAudio() const override {
+		return false;
+	}
+	bool doSkipToast() const override {
+		return false;
+	}
+	bool doSkipFlashBounce() const override {
+		return false;
+	}
 
 };
 

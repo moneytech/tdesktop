@@ -13,14 +13,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_photo.h"
 #include "data/data_document.h"
 #include "data/data_session.h"
+#include "data/data_file_click_handler.h"
 #include "data/data_file_origin.h"
 #include "history/history_item.h"
 #include "history/history.h"
 #include "history/view/history_view_cursor_state.h"
-#include "window/themes/window_theme.h"
+#include "history/view/history_view_service_message.h"
 #include "window/window_session_controller.h"
 #include "window/window_peer_menu.h"
 #include "ui/widgets/popup_menu.h"
+#include "ui/controls/delete_message_context_action.h"
 #include "ui/ui_utility.h"
 #include "ui/inactive_press.h"
 #include "lang/lang_keys.h"
@@ -45,6 +47,7 @@ namespace Info {
 namespace Media {
 namespace {
 
+constexpr auto kFloatingHeaderAlpha = 0.9;
 constexpr auto kPreloadedScreensCount = 4;
 constexpr auto kPreloadIfLessThanScreens = 2;
 constexpr auto kPreloadedScreensCountFull
@@ -65,6 +68,21 @@ UniversalMsgId GetUniversalId(not_null<const BaseLayout*> layout) {
 	return GetUniversalId(layout->getItem()->fullId());
 }
 
+bool HasFloatingHeader(Type type) {
+	switch (type) {
+	case Type::Photo:
+	case Type::Video:
+	case Type::RoundFile:
+	case Type::RoundVoiceFile:
+	case Type::MusicFile:
+		return false;
+	case Type::File:
+	case Type::Link:
+		return true;
+	}
+	Unexpected("Type in HasFloatingHeader()");
+}
+
 } // namespace
 
 struct ListWidget::Context {
@@ -76,7 +94,9 @@ struct ListWidget::Context {
 
 class ListWidget::Section {
 public:
-	Section(Type type) : _type(type) {
+	Section(Type type)
+	: _type(type)
+	, _hasFloatingHeader(HasFloatingHeader(type)) {
 	}
 
 	bool addItem(not_null<BaseLayout*> item);
@@ -112,6 +132,7 @@ public:
 
 	bool removeItem(UniversalMsgId universalId);
 	FoundItem findItemNearId(UniversalMsgId universalId) const;
+	FoundItem findItemDetails(not_null<BaseLayout*> item) const;
 	FoundItem findItemByPoint(QPoint point) const;
 
 	void paint(
@@ -119,6 +140,8 @@ public:
 		const Context &context,
 		QRect clip,
 		int outerWidth) const;
+
+	void paintFloatingHeader(Painter &p, int visibleTop, int outerWidth);
 
 	static int MinItemHeight(Type type, int width);
 
@@ -148,6 +171,7 @@ private:
 	void refreshHeight();
 
 	Type _type = Type::Photo;
+	bool _hasFloatingHeader = false;
 	Ui::Text::String _header;
 	Items _items;
 	int _itemsLeft = 0;
@@ -189,6 +213,11 @@ bool ListWidget::SkipSelectTillItem(const MouseState &state) {
 ListWidget::CachedItem::CachedItem(std::unique_ptr<BaseLayout> item)
 : item(std::move(item)) {
 }
+
+ListWidget::CachedItem::CachedItem(CachedItem &&other) = default;
+
+ListWidget::CachedItem &ListWidget::CachedItem::operator=(
+	CachedItem && other) = default;
 
 ListWidget::CachedItem::~CachedItem() = default;
 
@@ -306,9 +335,10 @@ auto ListWidget::Section::findItemByPoint(
 	return { item, rect, rect.contains(point) };
 }
 
-auto ListWidget::Section::findItemNearId(
-		UniversalMsgId universalId) const -> FoundItem {
+auto ListWidget::Section::findItemNearId(UniversalMsgId universalId) const
+-> FoundItem {
 	Expects(!_items.empty());
+
 	auto itemIt = ranges::lower_bound(
 		_items,
 		universalId,
@@ -320,6 +350,11 @@ auto ListWidget::Section::findItemNearId(
 	auto item = itemIt->second;
 	auto exact = (GetUniversalId(item) == universalId);
 	return { item, findItemRect(item), exact };
+}
+
+auto ListWidget::Section::findItemDetails(not_null<BaseLayout*> item) const
+-> FoundItem {
+	return { item, findItemRect(item), true };
 }
 
 auto ListWidget::Section::findItemAfterTop(
@@ -365,7 +400,6 @@ void ListWidget::Section::paint(
 		const Context &context,
 		QRect clip,
 		int outerWidth) const {
-	auto baseIndex = 0;
 	auto header = headerHeight();
 	if (QRect(0, 0, outerWidth, header).intersects(clip)) {
 		p.setPen(st::infoMediaHeaderFg);
@@ -376,17 +410,6 @@ void ListWidget::Section::paint(
 			outerWidth - 2 * st::infoMediaHeaderPosition.x(),
 			outerWidth);
 	}
-	auto top = header + _itemsTop;
-	auto fromcol = floorclamp(
-		clip.x() - _itemsLeft,
-		_itemWidth,
-		0,
-		_itemsInRow);
-	auto tillcol = ceilclamp(
-		clip.x() + clip.width() - _itemsLeft,
-		_itemWidth,
-		0,
-		_itemsInRow);
 	auto localContext = context.layoutContext;
 	localContext.isAfterDate = (header > 0);
 
@@ -409,6 +432,37 @@ void ListWidget::Section::paint(
 			p.translate(-rect.topLeft());
 		}
 	}
+}
+
+void ListWidget::Section::paintFloatingHeader(
+		Painter &p,
+		int visibleTop,
+		int outerWidth) {
+	if (!_hasFloatingHeader) {
+		return;
+	}
+	const auto headerTop = st::infoMediaHeaderPosition.y() / 2;
+	if (visibleTop <= (_top + headerTop)) {
+		return;
+	}
+	const auto header = headerHeight();
+	const auto headerLeft = st::infoMediaHeaderPosition.x();
+	const auto floatingTop = std::min(
+		visibleTop,
+		bottom() - header + headerTop);
+	p.save();
+	p.resetTransform();
+	p.setOpacity(kFloatingHeaderAlpha);
+	p.fillRect(QRect(0, floatingTop, outerWidth, header), st::boxBg);
+	p.setOpacity(1.0);
+	p.setPen(st::infoMediaHeaderFg);
+	_header.drawLeftElided(
+		p,
+		headerLeft,
+		floatingTop + headerTop,
+		outerWidth - 2 * headerLeft,
+		outerWidth);
+	p.restore();
 }
 
 TextSelection ListWidget::Section::itemSelection(
@@ -555,7 +609,12 @@ ListWidget::ListWidget(
 , _peer(_controller->key().peer())
 , _migrated(_controller->migrated())
 , _type(_controller->section().mediaType())
-, _slice(sliceKey(_universalAroundId)) {
+, _slice(sliceKey(_universalAroundId))
+, _dateBadge(DateBadge{
+	.check = SingleQueuedInvokation([=] { scrollDateCheck(); }),
+	.hideTimer = base::Timer([=] { scrollDateHide(); }),
+	.goodType = (_type == Type::Photo || _type == Type::Video),
+}) {
 	setMouseTracking(true);
 	start();
 }
@@ -566,28 +625,31 @@ Main::Session &ListWidget::session() const {
 
 void ListWidget::start() {
 	_controller->setSearchEnabledByContent(false);
-	ObservableViewer(
-		*Window::Theme::Background()
-	) | rpl::start_with_next([this](const auto &update) {
-		if (update.paletteChanged()) {
-			invalidatePaletteCache();
-		}
+	style::PaletteChanged(
+	) | rpl::start_with_next([=] {
+		invalidatePaletteCache();
 	}, lifetime());
-	ObservableViewer(
-		session().downloaderTaskFinished()
-	) | rpl::start_with_next([this] { update(); }, lifetime());
+
+	session().downloaderTaskFinished(
+	) | rpl::start_with_next([=] {
+		update();
+	}, lifetime());
+
 	session().data().itemLayoutChanged(
 	) | rpl::start_with_next([this](auto item) {
 		itemLayoutChanged(item);
 	}, lifetime());
+
 	session().data().itemRemoved(
 	) | rpl::start_with_next([this](auto item) {
 		itemRemoved(item);
 	}, lifetime());
+
 	session().data().itemRepaintRequest(
 	) | rpl::start_with_next([this](auto item) {
 		repaintItem(item);
 	}, lifetime());
+
 	_controller->mediaSourceQueryValue(
 	) | rpl::start_with_next([this]{
 		restart();
@@ -621,6 +683,7 @@ void ListWidget::restart() {
 	_overLayout = nullptr;
 	_sections.clear();
 	_layouts.clear();
+	_heavyLayouts.clear();
 
 	_universalAroundId = kDefaultAroundId;
 	_idsLimit = kMinimalIdsLimit;
@@ -630,44 +693,48 @@ void ListWidget::restart() {
 }
 
 void ListWidget::itemRemoved(not_null<const HistoryItem*> item) {
-	if (isMyItem(item)) {
-		auto universalId = GetUniversalId(item);
-
-		auto sectionIt = findSectionByItem(universalId);
-		if (sectionIt != _sections.end()) {
-			if (sectionIt->removeItem(universalId)) {
-				auto top = sectionIt->top();
-				if (sectionIt->empty()) {
-					_sections.erase(sectionIt);
-				}
-				refreshHeight();
-			}
-		}
-
-		if (isItemLayout(item, _overLayout)) {
-			_overLayout = nullptr;
-		}
-
-		_layouts.erase(universalId);
-		_dragSelected.remove(universalId);
-
-		auto i = _selected.find(universalId);
-		if (i != _selected.cend()) {
-			removeItemSelection(i);
-		}
-
-		mouseActionUpdate(_mousePosition);
+	if (!isMyItem(item)) {
+		return;
 	}
+	auto id = GetUniversalId(item);
+
+	auto needHeightRefresh = false;
+	auto sectionIt = findSectionByItem(id);
+	if (sectionIt != _sections.end()) {
+		if (sectionIt->removeItem(id)) {
+			if (sectionIt->empty()) {
+				_sections.erase(sectionIt);
+			}
+			needHeightRefresh = true;
+		}
+	}
+
+	if (isItemLayout(item, _overLayout)) {
+		_overLayout = nullptr;
+	}
+
+	if (const auto i = _layouts.find(id); i != _layouts.end()) {
+		_heavyLayouts.remove(i->second.item.get());
+		_layouts.erase(i);
+	}
+	_dragSelected.remove(id);
+
+	if (const auto i = _selected.find(id); i != _selected.cend()) {
+		removeItemSelection(i);
+	}
+
+	if (needHeightRefresh) {
+		refreshHeight();
+	}
+	mouseActionUpdate(_mousePosition);
 }
 
 FullMsgId ListWidget::computeFullId(
 		UniversalMsgId universalId) const {
 	Expects(universalId != 0);
-	auto peerChannel = [&] {
-		return _peer->isChannel() ? _peer->bareId() : NoChannel;
-	};
+
 	return (universalId > 0)
-		? FullMsgId(peerChannel(), universalId)
+		? FullMsgId(peerToChannel(_peer->id), universalId)
 		: FullMsgId(NoChannel, ServerMaxMsgId + universalId);
 }
 
@@ -697,9 +764,9 @@ auto ListWidget::collectSelectedItems() const -> SelectedItems {
 
 MessageIdsList ListWidget::collectSelectedIds() const {
 	const auto selected = collectSelectedItems();
-	return ranges::view::all(
+	return ranges::views::all(
 		selected.list
-	) | ranges::view::transform([](const SelectedItem &item) {
+	) | ranges::views::transform([](const SelectedItem &item) {
 		return item.msgId;
 	}) | ranges::to_vector;
 }
@@ -772,8 +839,8 @@ bool ListWidget::isMyItem(not_null<const HistoryItem*> item) const {
 }
 
 bool ListWidget::isPossiblyMyId(FullMsgId fullId) const {
-	return (fullId.channel != 0)
-		? (_peer->isChannel() && _peer->bareId() == fullId.channel)
+	return fullId.channel
+		? (_peer->isChannel() && peerToChannel(_peer->id) == fullId.channel)
 		: (!_peer->isChannel() || _migrated);
 }
 
@@ -787,6 +854,31 @@ void ListWidget::invalidatePaletteCache() {
 	for (auto &layout : _layouts) {
 		layout.second.item->invalidateCache();
 	}
+}
+
+void ListWidget::registerHeavyItem(not_null<const BaseLayout*> item) {
+	if (!_heavyLayouts.contains(item)) {
+		_heavyLayouts.emplace(item);
+		_heavyLayoutsInvalidated = true;
+	}
+}
+
+void ListWidget::unregisterHeavyItem(not_null<const BaseLayout*> item) {
+	const auto i = _heavyLayouts.find(item);
+	if (i != _heavyLayouts.end()) {
+		_heavyLayouts.erase(i);
+		_heavyLayoutsInvalidated = true;
+	}
+}
+
+void ListWidget::openPhoto(not_null<PhotoData*> photo, FullMsgId id) {
+	_controller->parentController()->openPhoto(photo, id);
+}
+
+void ListWidget::openDocument(
+		not_null<DocumentData*> document,
+		FullMsgId id) {
+	_controller->parentController()->openDocument(document, id);
 }
 
 SparseIdsMergedSlice::Key ListWidget::sliceKey(
@@ -804,7 +896,7 @@ SparseIdsMergedSlice::Key ListWidget::sliceKey(
 
 void ListWidget::refreshViewer() {
 	_viewerLifetime.destroy();
-	auto idForViewer = sliceKey(_universalAroundId).universalId;
+	const auto idForViewer = sliceKey(_universalAroundId).universalId;
 	_controller->mediaSource(
 		idForViewer,
 		_idsLimit,
@@ -871,31 +963,31 @@ std::unique_ptr<BaseLayout> ListWidget::createLayout(
 	switch (type) {
 	case Type::Photo:
 		if (const auto photo = getPhoto()) {
-			return std::make_unique<Photo>(item, photo);
+			return std::make_unique<Photo>(this, item, photo);
 		}
 		return nullptr;
 	case Type::Video:
 		if (const auto file = getFile()) {
-			return std::make_unique<Video>(item, file);
+			return std::make_unique<Video>(this, item, file);
 		}
 		return nullptr;
 	case Type::File:
 		if (const auto file = getFile()) {
-			return std::make_unique<Document>(item, file, songSt);
+			return std::make_unique<Document>(this, item, file, songSt);
 		}
 		return nullptr;
 	case Type::MusicFile:
 		if (const auto file = getFile()) {
-			return std::make_unique<Document>(item, file, songSt);
+			return std::make_unique<Document>(this, item, file, songSt);
 		}
 		return nullptr;
 	case Type::RoundVoiceFile:
 		if (const auto file = getFile()) {
-			return std::make_unique<Voice>(item, file, songSt);
+			return std::make_unique<Voice>(this, item, file, songSt);
 		}
 		return nullptr;
 	case Type::Link:
-		return std::make_unique<Link>(item, item->media());
+		return std::make_unique<Link>(this, item, item->media());
 	case Type::RoundFile:
 		return nullptr;
 	}
@@ -1005,16 +1097,17 @@ auto ListWidget::findItemById(
 	return std::nullopt;
 }
 
-auto ListWidget::findItemDetails(
-		BaseLayout *item) -> std::optional<FoundItem> {
-	return item
-		? findItemById(GetUniversalId(item))
-		: std::nullopt;
+auto ListWidget::findItemDetails(not_null<BaseLayout*> item)
+-> FoundItem {
+	const auto sectionIt = findSectionByItem(GetUniversalId(item));
+	Assert(sectionIt != _sections.end());
+	return foundItemInSection(sectionIt->findItemDetails(item), *sectionIt);
 }
 
 auto ListWidget::foundItemInSection(
-		const FoundItem &item,
-		const Section &section) const -> FoundItem {
+	const FoundItem &item,
+	const Section &section) const
+-> FoundItem {
 	return {
 		item.layout,
 		item.geometry.translated(0, section.top()),
@@ -1028,6 +1121,56 @@ void ListWidget::visibleTopBottomUpdated(
 	_visibleBottom = visibleBottom;
 
 	checkMoveToOtherViewer();
+	clearHeavyItems();
+
+	if (_dateBadge.goodType) {
+		updateDateBadgeFor(_visibleTop);
+		if (!_visibleTop) {
+			if (_dateBadge.shown) {
+				scrollDateHide();
+			} else {
+				update(_dateBadge.rect);
+			}
+		} else {
+			_dateBadge.check.call();
+		}
+	}
+}
+
+void ListWidget::updateDateBadgeFor(int top) {
+	if (_sections.empty()) {
+		return;
+	}
+	const auto layout = findItemByPoint({ st::infoMediaSkip, top }).layout;
+	const auto rectHeight = st::msgServiceMargin.top()
+		+ st::msgServicePadding.top()
+		+ st::msgServiceFont->height
+		+ st::msgServicePadding.bottom();
+
+	_dateBadge.text = ItemDateText(layout->getItem(), false);
+	_dateBadge.rect = QRect(0, top, width(), rectHeight);
+}
+
+void ListWidget::scrollDateCheck() {
+	if (!_dateBadge.shown) {
+		toggleScrollDateShown();
+	}
+	_dateBadge.hideTimer.callOnce(st::infoScrollDateHideTimeout);
+}
+
+void ListWidget::scrollDateHide() {
+	if (_dateBadge.shown) {
+		toggleScrollDateShown();
+	}
+}
+
+void ListWidget::toggleScrollDateShown() {
+	_dateBadge.shown = !_dateBadge.shown;
+	_dateBadge.opacity.start(
+		[=] { update(_dateBadge.rect); },
+		_dateBadge.shown ? 0. : 1.,
+		_dateBadge.shown ? 1. : 0.,
+		st::infoDateFadeDuration);
 }
 
 void ListWidget::checkMoveToOtherViewer() {
@@ -1085,6 +1228,32 @@ void ListWidget::checkMoveToOtherViewer() {
 		preloadAroundItem(topItem);
 	} else if (preloadBottom && !bottomLoaded) {
 		preloadAroundItem(bottomItem);
+	}
+}
+
+void ListWidget::clearHeavyItems() {
+	const auto visibleHeight = _visibleBottom - _visibleTop;
+	if (!visibleHeight) {
+		return;
+	}
+	_heavyLayoutsInvalidated = false;
+	const auto above = _visibleTop - visibleHeight;
+	const auto below = _visibleBottom + visibleHeight;
+	for (auto i = _heavyLayouts.begin(); i != _heavyLayouts.end();) {
+		const auto item = const_cast<BaseLayout*>(i->get());
+		const auto rect = findItemDetails(item).geometry;
+		if (rect.top() + rect.height() <= above || rect.top() >= below) {
+			i = _heavyLayouts.erase(i);
+			item->clearHeavyPart();
+			if (_heavyLayoutsInvalidated) {
+				break;
+			}
+		} else {
+			++i;
+		}
+	}
+	if (_heavyLayoutsInvalidated) {
+		clearHeavyItems();
 	}
 }
 
@@ -1148,6 +1317,25 @@ void ListWidget::paintEvent(QPaintEvent *e) {
 		p.translate(0, top);
 		it->paint(p, context, clip.translated(0, -top), outerWidth);
 		p.translate(0, -top);
+	}
+	if (fromSectionIt != _sections.end()) {
+		fromSectionIt->paintFloatingHeader(p, _visibleTop, outerWidth);
+	}
+
+	if (_dateBadge.goodType && clip.intersects(_dateBadge.rect)) {
+		const auto scrollDateOpacity =
+			_dateBadge.opacity.value(_dateBadge.shown ? 1. : 0.);
+		if (scrollDateOpacity > 0.) {
+			p.setOpacity(scrollDateOpacity);
+			HistoryView::ServiceMessagePainter::paintDate(
+				p,
+				_dateBadge.text,
+				_visibleTop,
+				outerWidth,
+				false,
+				st::roundedBg,
+				st::roundedFg);
+		}
 	}
 }
 
@@ -1222,14 +1410,14 @@ void ListWidget::showContextMenu(
 	}
 
 	auto canDeleteAll = [&] {
-		return ranges::find_if(_selected, [](auto &&item) {
+		return ranges::none_of(_selected, [](auto &&item) {
 			return !item.second.canDelete;
-		}) == _selected.end();
+		});
 	};
 	auto canForwardAll = [&] {
-		return ranges::find_if(_selected, [](auto &&item) {
+		return ranges::none_of(_selected, [](auto &&item) {
 			return !item.second.canForward;
-		}) == _selected.end();
+		});
 	};
 
 	auto link = ClickHandler::getActive();
@@ -1241,7 +1429,7 @@ void ListWidget::showContextMenu(
 		tr::lng_context_to_msg(tr::now),
 		[=] {
 			if (const auto item = owner->message(itemFullId)) {
-				Ui::showPeerHistoryAtItem(item);
+				_controller->parentController()->showPeerHistoryAtItem(item);
 			}
 		});
 
@@ -1270,7 +1458,7 @@ void ListWidget::showContextMenu(
 							document->cancel();
 						});
 				} else {
-					auto filepath = document->filepath(DocumentData::FilePathResolve::Checked);
+					auto filepath = document->filepath(true);
 					if (!filepath.isEmpty()) {
 						auto handler = App::LambdaDelayed(
 							st::defaultDropdownMenu.menu.ripple.hideDuration,
@@ -1345,11 +1533,11 @@ void ListWidget::showContextMenu(
 					}));
 			}
 			if (item->canDelete()) {
-				_contextMenu->addAction(
-					tr::lng_context_delete_msg(tr::now),
-					crl::guard(this, [this, universalId] {
-						deleteItem(universalId);
-					}));
+				_contextMenu->addAction(Ui::DeleteMessageContextAction(
+					_contextMenu->menu(),
+					[=] { deleteItem(universalId); },
+					item->ttlDestroyAt(),
+					[=] { _contextMenu = nullptr; }));
 			}
 		}
 		_contextMenu->addAction(
@@ -1647,7 +1835,6 @@ void ListWidget::mouseActionUpdate(const QPoint &globalPosition) {
 		point - geometry.topLeft(),
 		inside
 	};
-	auto item = layout ? layout->getItem() : nullptr;
 	if (_overLayout != layout) {
 		repaintItem(_overLayout);
 		_overLayout = layout;
@@ -1767,7 +1954,6 @@ void ListWidget::updateDragSelection() {
 	}
 	for (auto &layoutItem : _layouts) {
 		auto &&universalId = layoutItem.first;
-		auto &&layout = layoutItem.second;
 		if (universalId <= fromId && universalId > tillId) {
 			changeItemSelection(
 				_dragSelected,
@@ -1934,7 +2120,7 @@ void ListWidget::performDrag() {
 	}
 
 	TextWithEntities sel;
-	QList<QUrl> urls;
+	//QList<QUrl> urls;
 	if (uponSelected) {
 //		sel = getSelectedText();
 	} else if (pressedHandler) {
@@ -1979,7 +2165,7 @@ void ListWidget::performDrag() {
 	//		auto mimeData = std::make_unique<QMimeData>();
 	//		mimeData->setData(forwardMimeType, "1");
 	//		if (auto document = (pressedMedia ? pressedMedia->getDocument() : nullptr)) {
-	//			auto filepath = document->filepath(DocumentData::FilePathResolve::Checked);
+	//			auto filepath = document->filepath(true);
 	//			if (!filepath.isEmpty()) {
 	//				QList<QUrl> urls;
 	//				urls.push_back(QUrl::fromLocalFile(filepath));
@@ -2049,11 +2235,9 @@ void ListWidget::mouseActionFinish(
 	//_widget->noSelectingScroll(); // #TODO scroll by drag
 	//_widget->updateTopBarSelection();
 
-#if defined Q_OS_LINUX32 || defined Q_OS_LINUX64
-	//if (hasSelectedText()) { // #TODO linux clipboard
+	//if (QGuiApplication::clipboard()->supportsSelection() && hasSelectedText()) { // #TODO linux clipboard
 	//	TextUtilities::SetClipboardText(_selected.cbegin()->first->selectedText(_selected.cbegin()->second), QClipboard::Selection);
 	//}
-#endif // Q_OS_LINUX32 || Q_OS_LINUX64
 }
 
 void ListWidget::applyDragSelection() {
@@ -2105,6 +2289,7 @@ void ListWidget::clearStaleLayouts() {
 			if (i->second.item.get() == _overLayout) {
 				_overLayout = nullptr;
 			}
+			_heavyLayouts.erase(i->second.item.get());
 			i = _layouts.erase(i);
 		} else {
 			++i;

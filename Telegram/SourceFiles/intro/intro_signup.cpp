@@ -9,7 +9,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "intro/intro_widget.h"
 #include "core/file_utilities.h"
-#include "boxes/photo_crop_box.h"
 #include "boxes/confirm_box.h"
 #include "lang/lang_keys.h"
 #include "ui/widgets/buttons.h"
@@ -29,13 +28,18 @@ SignupWidget::SignupWidget(
 : Step(parent, account, data)
 , _photo(
 	this,
+	data->controller,
 	tr::lng_settings_crop_profile(tr::now),
 	Ui::UserpicButton::Role::ChangePhoto,
 	st::defaultUserpicButton)
 , _first(this, st::introName, tr::lng_signup_firstname())
 , _last(this, st::introName, tr::lng_signup_lastname())
 , _invertOrder(langFirstNameGoesSecond()) {
-	subscribe(Lang::Current().updated(), [this] { refreshLang(); });
+	Lang::Updated(
+	) | rpl::start_with_next([=] {
+		refreshLang();
+	}, lifetime());
+
 	if (_invertOrder) {
 		setTabOrder(_last, _first);
 	} else {
@@ -101,7 +105,7 @@ void SignupWidget::activate() {
 }
 
 void SignupWidget::cancelled() {
-	MTP::cancel(base::take(_sentRequest));
+	api().request(base::take(_sentRequest)).cancel();
 }
 
 void SignupWidget::nameSubmitDone(const MTPauth_Authorization &result) {
@@ -113,22 +117,20 @@ void SignupWidget::nameSubmitDone(const MTPauth_Authorization &result) {
 	finish(d.vuser(), _photo->takeResultImage());
 }
 
-bool SignupWidget::nameSubmitFail(const RPCError &error) {
-	if (MTP::isFloodError(error)) {
+void SignupWidget::nameSubmitFail(const MTP::Error &error) {
+	if (MTP::IsFloodError(error)) {
 		showError(tr::lng_flood_error());
 		if (_invertOrder) {
 			_first->setFocus();
 		} else {
 			_last->setFocus();
 		}
-		return true;
+		return;
 	}
-	if (MTP::isDefaultHandledError(error)) return false;
 
 	auto &err = error.type();
 	if (err == qstr("PHONE_NUMBER_FLOOD")) {
 		Ui::show(Box<InformBox>(tr::lng_error_phone_flood(tr::now)));
-		return true;
 	} else if (err == qstr("PHONE_NUMBER_INVALID")
 		|| err == qstr("PHONE_NUMBER_BANNED")
 		|| err == qstr("PHONE_CODE_EXPIRED")
@@ -136,27 +138,24 @@ bool SignupWidget::nameSubmitFail(const RPCError &error) {
 		|| err == qstr("PHONE_CODE_INVALID")
 		|| err == qstr("PHONE_NUMBER_OCCUPIED")) {
 		goBack();
-		return true;
 	} else if (err == "FIRSTNAME_INVALID") {
 		showError(tr::lng_bad_name());
 		_first->setFocus();
-		return true;
 	} else if (err == "LASTNAME_INVALID") {
 		showError(tr::lng_bad_name());
 		_last->setFocus();
-		return true;
-	}
-	if (Logs::DebugEnabled()) { // internal server error
-		showError(rpl::single(err + ": " + error.description()));
 	} else {
-		showError(rpl::single(Lang::Hard::ServerError()));
+		if (Logs::DebugEnabled()) { // internal server error
+			showError(rpl::single(err + ": " + error.description()));
+		} else {
+			showError(rpl::single(Lang::Hard::ServerError()));
+		}
+		if (_invertOrder) {
+			_last->setFocus();
+		} else {
+			_first->setFocus();
+		}
 	}
-	if (_invertOrder) {
-		_last->setFocus();
-	} else {
-		_first->setFocus();
-	}
-	return false;
 }
 
 void SignupWidget::submit() {
@@ -186,14 +185,16 @@ void SignupWidget::submit() {
 
 		_firstName = _first->getLastText().trimmed();
 		_lastName = _last->getLastText().trimmed();
-		_sentRequest = MTP::send(
-			MTPauth_SignUp(
-				MTP_string(getData()->phone),
-				MTP_bytes(getData()->phoneHash),
-				MTP_string(_firstName),
-				MTP_string(_lastName)),
-			rpcDone(&SignupWidget::nameSubmitDone),
-			rpcFail(&SignupWidget::nameSubmitFail));
+		_sentRequest = api().request(MTPauth_SignUp(
+			MTP_string(getData()->phone),
+			MTP_bytes(getData()->phoneHash),
+			MTP_string(_firstName),
+			MTP_string(_lastName)
+		)).done([=](const MTPauth_Authorization &result) {
+			nameSubmitDone(result);
+		}).fail([=](const MTP::Error &error) {
+			nameSubmitFail(error);
+		}).handleFloodErrors().send();
 	};
 	if (_termsAccepted
 		|| getData()->termsLock.text.text.isEmpty()

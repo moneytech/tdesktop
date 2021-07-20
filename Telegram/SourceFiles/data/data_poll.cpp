@@ -13,7 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/call_delayed.h"
 #include "main/main_session.h"
 #include "api/api_text_entities.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
 
 namespace {
 
@@ -45,6 +45,14 @@ PollData::PollData(not_null<Data::Session*> owner, PollId id)
 , _owner(owner) {
 }
 
+Data::Session &PollData::owner() const {
+	return *_owner;
+}
+
+Main::Session &PollData::session() const {
+	return _owner->session();
+}
+
 bool PollData::closeByTimer() {
 	if (closed()) {
 		return false;
@@ -69,16 +77,16 @@ bool PollData::applyChanges(const MTPDpoll &poll) {
 		| (poll.is_quiz() ? Flag::Quiz : Flag(0));
 	const auto newCloseDate = poll.vclose_date().value_or_empty();
 	const auto newClosePeriod = poll.vclose_period().value_or_empty();
-	auto newAnswers = ranges::view::all(
+	auto newAnswers = ranges::views::all(
 		poll.vanswers().v
-	) | ranges::view::transform([](const MTPPollAnswer &data) {
+	) | ranges::views::transform([](const MTPPollAnswer &data) {
 		return data.match([](const MTPDpollAnswer &answer) {
 			auto result = PollAnswer();
 			result.option = answer.voption().v;
 			result.text = qs(answer.vtext());
 			return result;
 		});
-	}) | ranges::view::take(
+	}) | ranges::views::take(
 		kMaxOptions
 	) | ranges::to_vector;
 
@@ -125,24 +133,25 @@ bool PollData::applyResults(const MTPPollResults &results) {
 			}
 		}
 		if (const auto recent = results.vrecent_voters()) {
+			const auto bareProj = [](not_null<UserData*> user) {
+				return peerToUser(user->id).bare;
+			};
 			const auto recentChanged = !ranges::equal(
 				recentVoters,
 				recent->v,
 				ranges::equal_to(),
-				&UserData::id,
-				&MTPint::v);
+				bareProj,
+				&MTPint::v); // #TODO ids
 			if (recentChanged) {
 				changed = true;
-				recentVoters = ranges::view::all(
+				recentVoters = ranges::views::all(
 					recent->v
-				) | ranges::view::transform([&](MTPint userId) {
+				) | ranges::views::transform([&](MTPint userId) {
 					const auto user = _owner->user(userId.v);
-					return (user->loadedStatus != PeerData::NotLoaded)
-						? user.get()
-						: nullptr;
-				}) | ranges::view::filter([](UserData *user) {
+					return user->isMinimalLoaded() ? user.get() : nullptr;
+				}) | ranges::views::filter([](UserData *user) {
 					return user != nullptr;
-				}) | ranges::view::transform([](UserData *user) {
+				}) | ranges::views::transform([](UserData *user) {
 					return not_null<UserData*>(user);
 				}) | ranges::to_vector;
 			}
@@ -151,6 +160,7 @@ bool PollData::applyResults(const MTPPollResults &results) {
 			auto newSolution = TextWithEntities{
 				results.vsolution().value_or_empty(),
 				Api::EntitiesFromMTP(
+					&_owner->session(),
 					results.vsolution_entities().value_or_empty())
 			};
 			if (solution != newSolution) {
@@ -227,7 +237,7 @@ PollData::Flags PollData::flags() const {
 }
 
 bool PollData::voted() const {
-	return ranges::find(answers, true, &PollAnswer::chosen) != end(answers);
+	return ranges::contains(answers, true, &PollAnswer::chosen);
 }
 
 bool PollData::closed() const {
@@ -293,6 +303,7 @@ MTPInputMedia PollDataToInputMedia(
 	TextUtilities::PrepareForSending(solution, prepareFlags);
 	TextUtilities::Trim(solution);
 	const auto sentEntities = Api::EntitiesToMTP(
+		&poll->session(),
 		solution.entities,
 		Api::ConvertOption::SkipLocal);
 	if (!solution.text.isEmpty()) {

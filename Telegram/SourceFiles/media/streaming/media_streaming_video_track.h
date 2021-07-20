@@ -58,6 +58,8 @@ public:
 	[[nodiscard]] QImage frame(
 		const FrameRequest &request,
 		const Instance *instance);
+	[[nodiscard]] FrameWithInfo frameWithInfo(const Instance *instance);
+	[[nodiscard]] QImage currentFrameImage();
 	void unregisterInstance(not_null<const Instance*> instance);
 	[[nodiscard]] rpl::producer<> checkNextFrame() const;
 	[[nodiscard]] rpl::producer<> waitingForData() const;
@@ -78,20 +80,27 @@ private:
 	struct Frame {
 		FFmpeg::FramePointer decoded = FFmpeg::MakeFramePointer();
 		QImage original;
+		FrameYUV420 yuv420;
 		crl::time position = kTimeUnknown;
 		crl::time displayed = kTimeUnknown;
 		crl::time display = kTimeUnknown;
+		FrameFormat format = FrameFormat::None;
 
 		base::flat_map<const Instance*, Prepared> prepared;
 
 		bool alpha = false;
+	};
+	struct FrameWithIndex {
+		not_null<Frame*> frame;
+		int index = -1;
 	};
 
 	class Shared {
 	public:
 		using PrepareFrame = not_null<Frame*>;
 		using PrepareNextCheck = crl::time;
-		using PrepareState = base::optional_variant<
+		using PrepareState = std::variant<
+			v::null_t,
 			PrepareFrame,
 			PrepareNextCheck>;
 		struct PresentFrame {
@@ -108,13 +117,11 @@ private:
 			crl::time trackTime,
 			bool dropStaleFrames);
 
-		// RasterizeCallback(not_null<Frame*>).
-		template <typename RasterizeCallback>
 		[[nodiscard]] PresentFrame presentFrame(
+			not_null<VideoTrackObject*> object,
 			TimePoint trackTime,
 			float64 playbackSpeed,
-			bool dropStaleFrames,
-			RasterizeCallback &&rasterize);
+			bool dropStaleFrames);
 		[[nodiscard]] bool firstPresentHappened() const;
 
 		// Called from the main thread.
@@ -124,6 +131,7 @@ private:
 		bool markFrameShown();
 		[[nodiscard]] crl::time nextFrameDisplayTime() const;
 		[[nodiscard]] not_null<Frame*> frameForPaint();
+		[[nodiscard]] FrameWithIndex frameForPaintWithIndex();
 
 	private:
 		[[nodiscard]] not_null<Frame*> getFrame(int index);
@@ -132,6 +140,9 @@ private:
 
 		static constexpr auto kCounterUninitialized = -1;
 		std::atomic<int> _counter = kCounterUninitialized;
+
+		// Main thread.
+		int _counterCycle = 0;
 
 		static constexpr auto kFramesCount = 4;
 		std::array<Frame, kFramesCount> _frames;

@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "ui/rp_widget.h"
 #include "dialogs/dialogs_key.h"
+#include "media/player/media_player_float.h" // FloatSectionDelegate
 #include "base/object_ptr.h"
 
 namespace Main {
@@ -34,40 +35,33 @@ enum class Column {
 
 class AbstractSectionWidget
 	: public Ui::RpWidget
+	, public Media::Player::FloatSectionDelegate
 	, protected base::Subscriber {
 public:
 	AbstractSectionWidget(
 		QWidget *parent,
-		not_null<Window::SessionController*> controller)
+		not_null<SessionController*> controller)
 	: RpWidget(parent)
 	, _controller(controller) {
 	}
 
 	[[nodiscard]] Main::Session &session() const;
+	[[nodiscard]] not_null<SessionController*> controller() const {
+		return _controller;
+	}
 
 	// Tabbed selector management.
-	virtual void pushTabbedSelectorToThirdSection(
-		const Window::SectionShow &params) {
+	virtual bool pushTabbedSelectorToThirdSection(
+			not_null<PeerData*> peer,
+			const SectionShow &params) {
+		return false;
 	}
 	virtual bool returnTabbedSelector() {
 		return false;
 	}
 
-	// Float player interface.
-	virtual bool wheelEventFromFloatPlayer(QEvent *e) {
-		return false;
-	}
-	[[nodiscard]] virtual QRect rectForFloatPlayer() const {
-		return mapToGlobal(rect());
-	}
-
-protected:
-	[[nodiscard]] not_null<Window::SessionController*> controller() const {
-		return _controller;
-	}
-
 private:
-	const not_null<Window::SessionController*> _controller;
+	const not_null<SessionController*> _controller;
 
 };
 
@@ -86,7 +80,9 @@ struct SectionSlideParams {
 
 class SectionWidget : public AbstractSectionWidget {
 public:
-	SectionWidget(QWidget *parent, not_null<Window::SessionController*> controller);
+	SectionWidget(
+		QWidget *parent,
+		not_null<SessionController*> controller);
 
 	virtual Dialogs::RowDescriptor activeChat() const {
 		return {};
@@ -122,9 +118,24 @@ public:
 		not_null<SectionMemento*> memento,
 		const SectionShow &params) = 0;
 
+	virtual bool showMessage(
+			PeerId peerId,
+			const SectionShow &params,
+			MsgId messageId) {
+		return false;
+	}
+
+	virtual bool replyToMessage(not_null<HistoryItem*> item) {
+		return false;
+	}
+
+	virtual bool preventsClose(Fn<void()> &&continueCallback) const {
+		return false;
+	}
+
 	// Create a memento of that section to store it in the history stack.
 	// This method may modify the section ("take" heavy items).
-	virtual std::unique_ptr<SectionMemento> createMemento();
+	virtual std::shared_ptr<SectionMemento> createMemento();
 
 	void setInnerFocus() {
 		doSetInnerFocus();
@@ -138,7 +149,10 @@ public:
 		return nullptr;
 	}
 
-	static void PaintBackground(not_null<QWidget*> widget, QRect clip);
+	static void PaintBackground(
+		not_null<SessionController*> controller,
+		not_null<QWidget*> widget,
+		QRect clip);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -151,7 +165,7 @@ protected:
 
 	// Called after the hideChildren() call in showAnimated().
 	virtual void showAnimatedHook(
-		const Window::SectionSlideParams &params) {
+		const SectionSlideParams &params) {
 	}
 
 	// Called after the showChildren() call in showFinished().

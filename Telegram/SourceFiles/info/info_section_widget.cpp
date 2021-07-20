@@ -7,7 +7,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "info/info_section_widget.h"
 
+#include "window/window_adaptive.h"
 #include "window/window_connecting_widget.h"
+#include "window/window_session_controller.h"
+#include "main/main_session.h"
 #include "info/info_content_widget.h"
 #include "info/info_wrap_widget.h"
 #include "info/info_layer_widget.h"
@@ -48,7 +51,8 @@ void SectionWidget::init() {
 
 	_connecting = std::make_unique<Window::ConnectionState>(
 		_content.data(),
-		Window::AdaptiveIsOneColumn());
+		&controller()->session().account(),
+		controller()->adaptive().oneColumnValue());
 
 	_content->contentChanged(
 	) | rpl::start_with_next([=] {
@@ -89,7 +93,7 @@ bool SectionWidget::showInternal(
 	return _content->showInternal(memento, params);
 }
 
-std::unique_ptr<Window::SectionMemento> SectionWidget::createMemento() {
+std::shared_ptr<Window::SectionMemento> SectionWidget::createMemento() {
 	return _content->createMemento();
 }
 
@@ -105,12 +109,12 @@ object_ptr<Ui::LayerWidget> SectionWidget::moveContentToLayer(
 			bodyGeometry);
 }
 
-bool SectionWidget::wheelEventFromFloatPlayer(QEvent *e) {
-	return _content->wheelEventFromFloatPlayer(e);
+bool SectionWidget::floatPlayerHandleWheelEvent(QEvent *e) {
+	return _content->floatPlayerHandleWheelEvent(e);
 }
 
-QRect SectionWidget::rectForFloatPlayer() const {
-	return _content->rectForFloatPlayer();
+QRect SectionWidget::floatPlayerAvailableRect() {
+	return _content->floatPlayerAvailableRect();
 }
 
 } // namespace Info

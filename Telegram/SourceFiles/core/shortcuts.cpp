@@ -13,8 +13,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/application.h"
 #include "media/player/media_player_instance.h"
 #include "base/platform/base_platform_info.h"
+#include "platform/platform_specific.h"
 #include "base/parse_helper.h"
-#include "facades.h"
 
 #include <QtWidgets/QShortcut>
 #include <QtCore/QJsonDocument>
@@ -74,11 +74,11 @@ const auto CommandByName = base::flat_map<QString, Command>{
 	{ qsl("first_chat")        , Command::ChatFirst },
 	{ qsl("last_chat")         , Command::ChatLast },
 	{ qsl("self_chat")         , Command::ChatSelf },
-	
+
 	{ qsl("previous_folder")   , Command::FolderPrevious },
 	{ qsl("next_folder")       , Command::FolderNext },
 	{ qsl("all_chats")         , Command::ShowAllChats },
-	
+
 	{ qsl("folder1")           , Command::ShowFolder1 },
 	{ qsl("folder2")           , Command::ShowFolder2 },
 	{ qsl("folder3")           , Command::ShowFolder3 },
@@ -88,6 +88,9 @@ const auto CommandByName = base::flat_map<QString, Command>{
 	{ qsl("last_folder")       , Command::ShowFolderLast },
 
 	{ qsl("show_archive")      , Command::ShowArchive },
+	{ qsl("show_contacts")     , Command::ShowContacts },
+
+	{ qsl("read_chat")         , Command::ReadChat },
 
 	// Shortcuts that have no default values.
 	{ qsl("message")           , Command::JustSendMessage },
@@ -116,11 +119,11 @@ const auto CommandNames = base::flat_map<Command, QString>{
 	{ Command::ChatFirst      , qsl("first_chat") },
 	{ Command::ChatLast       , qsl("last_chat") },
 	{ Command::ChatSelf       , qsl("self_chat") },
-	
+
 	{ Command::FolderPrevious , qsl("previous_folder") },
 	{ Command::FolderNext     , qsl("next_folder") },
 	{ Command::ShowAllChats   , qsl("all_chats") },
-	                                                   
+
 	{ Command::ShowFolder1    , qsl("folder1") },
 	{ Command::ShowFolder2    , qsl("folder2") },
 	{ Command::ShowFolder3    , qsl("folder3") },
@@ -130,6 +133,9 @@ const auto CommandNames = base::flat_map<Command, QString>{
 	{ Command::ShowFolderLast , qsl("last_folder") },
 
 	{ Command::ShowArchive    , qsl("show_archive") },
+	{ Command::ShowContacts   , qsl("show_contacts") },
+
+	{ Command::ReadChat       , qsl("read_chat") },
 };
 
 class Manager {
@@ -365,9 +371,9 @@ void Manager::fillDefaults() {
 	set(qsl("ctrl+4"), Command::ChatPinned4);
 	set(qsl("ctrl+5"), Command::ChatPinned5);
 
-	auto &&folders = ranges::view::zip(
+	auto &&folders = ranges::views::zip(
 		kShowFolder,
-		ranges::view::ints(1, ranges::unreachable));
+		ranges::views::ints(1, ranges::unreachable));
 
 	for (const auto [command, index] : folders) {
 		set(qsl("%1+%2").arg(ctrl).arg(index), command);
@@ -379,6 +385,9 @@ void Manager::fillDefaults() {
 	set(qsl("ctrl+0"), Command::ChatSelf);
 
 	set(qsl("ctrl+9"), Command::ShowArchive);
+	set(qsl("ctrl+j"), Command::ShowContacts);
+
+	set(qsl("ctrl+r"), Command::ReadChat);
 }
 
 void Manager::writeDefaultFile() {
@@ -543,8 +552,6 @@ rpl::producer<not_null<Request*>> Requests() {
 }
 
 void Start() {
-	Assert(Global::started());
-
 	Data.fill();
 }
 
@@ -558,8 +565,6 @@ bool HandleEvent(not_null<QShortcutEvent*> event) {
 
 void ToggleMediaShortcuts(bool toggled) {
 	Data.toggleMedia(toggled);
-	Platform::SetWatchingMediaKeys(toggled);
-	Media::Player::instance()->playerWidgetToggledNotify(toggled);
 }
 
 void ToggleSupportShortcuts(bool toggled) {

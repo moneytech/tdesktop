@@ -11,6 +11,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_folder.h"
 #include "data/data_channel.h"
+#include "data/data_changes.h"
 #include "data/data_user.h"
 #include "ui/wrap/vertical_layout.h"
 #include "ui/wrap/padding_wrap.h"
@@ -19,16 +20,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/labels.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/box_content_divider.h"
+#include "ui/boxes/report_box.h"
 #include "ui/layers/generic_box.h"
 #include "ui/toast/toast.h"
 #include "ui/text/text_utilities.h" // Ui::Text::ToUpper
 #include "history/history_location_manager.h" // LocationClickHandler.
+#include "history/view/history_view_context_menu.h" // HistoryView::ShowReportPeerBox
 #include "boxes/abstract_box.h"
 #include "boxes/confirm_box.h"
 #include "boxes/peer_list_box.h"
 #include "boxes/peer_list_controllers.h"
 #include "boxes/add_contact_box.h"
-#include "boxes/report_box.h"
 #include "boxes/peers/edit_contact_box.h"
 #include "lang/lang_keys.h"
 #include "info/info_controller.h"
@@ -176,37 +178,6 @@ private:
 	object_ptr<Ui::VerticalLayout> _wrap = { nullptr };
 
 };
-// // #feed
-//class FeedDetailsFiller {
-//public:
-//	FeedDetailsFiller(
-//		not_null<Controller*> controller,
-//		not_null<Ui::RpWidget*> parent,
-//		not_null<Data::Feed*> feed);
-//
-//	object_ptr<Ui::RpWidget> fill();
-//
-//private:
-//	object_ptr<Ui::RpWidget> setupDefaultToggle();
-//
-//	template <
-//		typename Widget,
-//		typename = std::enable_if_t<
-//		std::is_base_of_v<Ui::RpWidget, Widget>>>
-//	Widget *add(
-//			object_ptr<Widget> &&child,
-//			const style::margins &margin = style::margins()) {
-//		return _wrap->add(
-//			std::move(child),
-//			margin);
-//	}
-//
-//	not_null<Controller*> _controller;
-//	not_null<Ui::RpWidget*> _parent;
-//	not_null<Data::Feed*> _feed;
-//	object_ptr<Ui::VerticalLayout> _wrap;
-//
-//};
 
 DetailsFiller::DetailsFiller(
 	not_null<Controller*> controller,
@@ -266,22 +237,21 @@ object_ptr<Ui::RpWidget> DetailsFiller::setupInfo() {
 			tr::lng_info_mobile_label(),
 			PhoneOrHiddenValue(user),
 			tr::lng_profile_copy_phone(tr::now));
-		if (user->isBot()) {
-			addInfoLine(tr::lng_info_about_label(), AboutValue(user));
-		} else {
-			addInfoLine(tr::lng_info_bio_label(), BioValue(user));
-		}
+		auto label = user->isBot()
+			? tr::lng_info_about_label()
+			: tr::lng_info_bio_label();
+		addInfoLine(std::move(label), AboutValue(user));
 		addInfoOneLine(
 			tr::lng_info_username_label(),
 			UsernameValue(user),
 			tr::lng_context_copy_mention(tr::now));
 
-		const auto window = &_controller->parentController()->window();
+		const auto controller = _controller->parentController();
 		AddMainButton(
 			result,
 			tr::lng_info_add_as_contact(),
 			CanAddContactValue(user),
-			[=] { window->show(Box(EditContactBox, window, user)); },
+			[=] { controller->window().show(Box(EditContactBox, controller, user)); },
 			tracker);
 	} else {
 		auto linkText = LinkValue(
@@ -300,7 +270,7 @@ object_ptr<Ui::RpWidget> DetailsFiller::setupInfo() {
 			std::move(linkText),
 			QString());
 		link->setClickHandlerFilter([peer = _peer](auto&&...) {
-			const auto link = Core::App().createInternalLinkFull(
+			const auto link = peer->session().createInternalLinkFull(
 				peer->userName());
 			if (!link.isEmpty()) {
 				QGuiApplication::clipboard()->setText(link);
@@ -488,12 +458,11 @@ ActionsFiller::ActionsFiller(
 
 void ActionsFiller::addInviteToGroupAction(
 		not_null<UserData*> user) {
-	const auto controller = _controller;
 	AddActionButton(
 		_wrap,
 		tr::lng_profile_invite_to_group(),
 		CanInviteBotToGroupValue(user),
-		[=] { AddBotToGroupBoxController::Start(controller, user); });
+		[=] { AddBotToGroupBoxController::Start(user); });
 }
 
 void ActionsFiller::addShareContactAction(not_null<UserData*> user) {
@@ -506,12 +475,12 @@ void ActionsFiller::addShareContactAction(not_null<UserData*> user) {
 }
 
 void ActionsFiller::addEditContactAction(not_null<UserData*> user) {
-	const auto window = &_controller->parentController()->window();
+	const auto controller = _controller->parentController();
 	AddActionButton(
 		_wrap,
 		tr::lng_info_edit_contact(),
 		IsContactValue(user),
-		[=] { window->show(Box(EditContactBox, window, user)); });
+		[=] { controller->window().show(Box(EditContactBox, controller, user)); });
 }
 
 void ActionsFiller::addDeleteContactAction(
@@ -528,7 +497,7 @@ void ActionsFiller::addClearHistoryAction(not_null<UserData*> user) {
 		_wrap,
 		tr::lng_profile_clear_history(),
 		rpl::single(true),
-		 Window::ClearHistoryHandler(user));
+		Window::ClearHistoryHandler(user));
 }
 
 void ActionsFiller::addDeleteConversationAction(
@@ -545,10 +514,10 @@ void ActionsFiller::addBotCommandActions(not_null<UserData*> user) {
 		if (!user->isBot()) {
 			return QString();
 		}
-		for_const (auto &data, user->botInfo->commands) {
-			auto isSame = data.command.compare(
+		for (const auto &data : user->botInfo->commands) {
+			const auto isSame = !data.command.compare(
 				command,
-				Qt::CaseInsensitive) == 0;
+				Qt::CaseInsensitive);
 			if (isSame) {
 				return data.command;
 			}
@@ -556,9 +525,9 @@ void ActionsFiller::addBotCommandActions(not_null<UserData*> user) {
 		return QString();
 	};
 	auto hasBotCommandValue = [=](const QString &command) {
-		return Notify::PeerUpdateValue(
+		return user->session().changes().peerFlagsValue(
 			user,
-			Notify::PeerUpdate::Flag::BotCommandsChanged
+			Data::PeerUpdate::Flag::BotCommands
 		) | rpl::map([=] {
 			return !findBotCommand(command).isEmpty();
 		});
@@ -586,21 +555,25 @@ void ActionsFiller::addBotCommandActions(not_null<UserData*> user) {
 
 void ActionsFiller::addReportAction() {
 	const auto peer = _peer;
+	const auto controller = _controller->parentController();
+	const auto report = [=] {
+		HistoryView::ShowReportPeerBox(controller, peer);
+	};
 	AddActionButton(
 		_wrap,
 		tr::lng_profile_report(),
 		rpl::single(true),
-		[=] { Ui::show(Box<ReportBox>(peer)); },
+		report,
 		st::infoBlockButton);
 }
 
 void ActionsFiller::addBlockAction(not_null<UserData*> user) {
 	const auto window = &_controller->parentController()->window();
 
-	auto text = Notify::PeerUpdateValue(
+	auto text = user->session().changes().peerFlagsValue(
 		user,
-		Notify::PeerUpdate::Flag::UserIsBlocked
-	) | rpl::map([user] {
+		Data::PeerUpdate::Flag::IsBlocked
+	) | rpl::map([=] {
 		switch (user->blockStatus()) {
 		case UserData::BlockStatus::Blocked:
 			return ((user->isBot() && !user->isSupport())
@@ -627,10 +600,14 @@ void ActionsFiller::addBlockAction(not_null<UserData*> user) {
 				Ui::showPeerHistory(user, ShowAtUnreadMsgId);
 			}
 		} else if (user->isBot()) {
-			user->session().api().blockUser(user);
+			user->session().api().blockPeer(user);
 		} else {
-			window->show(
-				Box(Window::PeerMenuBlockUserBox, window, user, false));
+			window->show(Box(
+				Window::PeerMenuBlockUserBox,
+				window,
+				user,
+				v::null,
+				v::null));
 		}
 	};
 	AddActionButton(
@@ -735,48 +712,6 @@ object_ptr<Ui::RpWidget> ActionsFiller::fill() {
 	}
 	return { nullptr };
 }
-// // #feed
-//FeedDetailsFiller::FeedDetailsFiller(
-//	not_null<Controller*> controller,
-//	not_null<Ui::RpWidget*> parent,
-//	not_null<Data::Feed*> feed)
-//: _controller(controller)
-//, _parent(parent)
-//, _feed(feed)
-//, _wrap(_parent) {
-//}
-//
-//object_ptr<Ui::RpWidget> FeedDetailsFiller::fill() {
-//	add(object_ptr<Ui::BoxContentDivider>(_wrap));
-//	add(CreateSkipWidget(_wrap));
-//	add(setupDefaultToggle());
-//	add(CreateSkipWidget(_wrap));
-//	return std::move(_wrap);
-//}
-//
-//object_ptr<Ui::RpWidget> FeedDetailsFiller::setupDefaultToggle() {
-//	using namespace rpl::mappers;
-//	const auto feed = _feed;
-//	const auto feedId = feed->id();
-//	auto result = object_ptr<Ui::SettingsButton>(
-//		_wrap,
-//		tr::lng_info_feed_is_default(),
-//		st::infoNotificationsButton);
-//	result->toggleOn(
-//		feed->owner().defaultFeedIdValue(
-//		) | rpl::map(_1 == feedId)
-//	)->addClickHandler([=] {
-//		const auto makeDefault = (feed->owner().defaultFeedId() != feedId);
-//		const auto defaultFeedId = makeDefault ? feedId : 0;
-//		feed->owner().setDefaultFeedId(defaultFeedId);
-////		feed->session().api().saveDefaultFeedId(feedId, makeDefault); // #feed
-//	});
-//	object_ptr<FloatingIcon>(
-//		result,
-//		st::infoIconNotifications,
-//		st::infoNotificationsIconPosition);
-//	return result;
-//}
 
 } // namespace
 
@@ -831,16 +766,16 @@ object_ptr<Ui::RpWidget> SetupChannelMembers(
 
 	auto membersShown = rpl::combine(
 		MembersCountValue(channel),
-		Data::PeerFullFlagValue(
+		Data::PeerFlagValue(
 			channel,
-			MTPDchannelFull::Flag::f_can_view_participants),
+			ChannelDataFlag::CanViewParticipants),
 			(_1 > 0) && _2);
 	auto membersText = tr::lng_chat_status_subscribers(
 		lt_count_decimal,
 		MembersCountValue(channel) | tr::to_count());
 	auto membersCallback = [=] {
-		controller->showSection(Info::Memento(
-			channel->id,
+		controller->showSection(std::make_shared<Info::Memento>(
+			channel,
 			Section::Type::Members));
 	};
 
@@ -872,14 +807,6 @@ object_ptr<Ui::RpWidget> SetupChannelMembers(
 
 	return result;
 }
-// // #feed
-//object_ptr<Ui::RpWidget> SetupFeedDetails(
-//		not_null<Controller*> controller,
-//		not_null<Ui::RpWidget*> parent,
-//		not_null<Data::Feed*> feed) {
-//	FeedDetailsFiller filler(controller, parent, feed);
-//	return filler.fill();
-//}
 
 } // namespace Profile
 } // namespace Info

@@ -32,7 +32,13 @@ public:
 		[[nodiscard]] virtual DocumentData *document() {
 			return nullptr;
 		}
-		virtual void clearStickerLoopPlayed() {
+		virtual void stickerClearLoopPlayed() {
+		}
+		virtual std::unique_ptr<Lottie::SinglePlayer> stickerTakeLottie(
+			not_null<DocumentData*> data,
+			const Lottie::ColorReplacements *replacements);
+		virtual bool hasHeavyPart() const {
+			return false;
 		}
 		virtual void unloadHeavyPart() {
 		}
@@ -44,7 +50,7 @@ public:
 		[[nodiscard]] virtual bool alwaysShowOutTimestamp() {
 			return false;
 		}
-		virtual ~Content() = 0;
+		virtual ~Content() = default;
 	};
 
 	UnwrappedMedia(
@@ -78,10 +84,16 @@ public:
 	bool hidesForwardedInfo() const override {
 		return _content->hidesForwardedInfo();
 	}
-	void clearStickerLoopPlayed() override {
-		_content->clearStickerLoopPlayed();
+	void stickerClearLoopPlayed() override {
+		_content->stickerClearLoopPlayed();
 	}
+	std::unique_ptr<Lottie::SinglePlayer> stickerTakeLottie(
+		not_null<DocumentData*> data,
+		const Lottie::ColorReplacements *replacements) override;
 
+	bool hasHeavyPart() const override {
+		return _content->hasHeavyPart();
+	}
 	void unloadHeavyPart() override {
 		_content->unloadHeavyPart();
 	}
@@ -118,11 +130,12 @@ private:
 		const HistoryMessageReply *reply,
 		const HistoryMessageForwarded *forwarded) const;
 
-	inline int calculateFullRight(const QRect &inner) const;
-	inline QPoint calculateFastActionPosition(
+	int calculateFullRight(const QRect &inner) const;
+	QPoint calculateFastActionPosition(
 		int fullBottom,
 		int replyRight,
-		int fullRight) const;
+		int fullRight,
+		QSize size) const;
 
 	const HistoryMessageForwarded *getDisplayedForwardedInfo() const;
 

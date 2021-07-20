@@ -43,7 +43,7 @@ struct ParsedTheme {
 	const QByteArray &value);
 [[nodiscard]] QByteArray WriteCloudToText(const Data::CloudTheme &cloud);
 [[nodiscard]] Data::CloudTheme ReadCloudFromText(const QByteArray &text);
-[[nodisacrd]] QByteArray StripCloudTextFields(const QByteArray &text);
+[[nodiscard]] QByteArray StripCloudTextFields(const QByteArray &text);
 
 class Editor : public TWidget {
 public:
@@ -80,7 +80,7 @@ private:
 	QPointer<Inner> _inner;
 	object_ptr<Ui::CrossButton> _close;
 	object_ptr<Ui::IconButton> _menuToggle;
-	object_ptr<Ui::DropdownMenu> _menu = { nullptr };
+	base::unique_qptr<Ui::DropdownMenu> _menu;
 	object_ptr<Ui::MultiSelect> _select;
 	object_ptr<Ui::PlainShadow> _leftShadow;
 	object_ptr<Ui::PlainShadow> _topShadow;

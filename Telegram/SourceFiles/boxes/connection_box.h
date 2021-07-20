@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/timer.h"
 #include "base/object_ptr.h"
+#include "core/core_settings.h"
 #include "mtproto/connection_abstract.h"
 #include "mtproto/mtproto_proxy_data.h"
 
@@ -24,18 +25,23 @@ template <typename Enum>
 class Radioenum;
 } // namespace Ui
 
-class ProxiesBoxController : public base::Subscriber {
+namespace Main {
+class Account;
+} // namespace Main
+
+class ProxiesBoxController {
 public:
 	using ProxyData = MTP::ProxyData;
 	using Type = ProxyData::Type;
 
-	ProxiesBoxController();
+	explicit ProxiesBoxController(not_null<Main::Account*> account);
 
 	static void ShowApplyConfirmation(
 		Type type,
 		const QMap<QString, QString> &fields);
 
-	static object_ptr<Ui::BoxContent> CreateOwningBox();
+	static object_ptr<Ui::BoxContent> CreateOwningBox(
+		not_null<Main::Account*> account);
 	object_ptr<Ui::BoxContent> create();
 
 	enum class ItemState {
@@ -104,6 +110,8 @@ private:
 		const ProxyData &proxy);
 	void addNewItem(const ProxyData &proxy);
 
+	const not_null<Main::Account*> _account;
+	Core::SettingsProxy &_settings;
 	int _idCounter = 0;
 	std::vector<Item> _list;
 	rpl::event_stream<ItemView> _views;
@@ -112,5 +120,7 @@ private:
 
 	ProxyData _lastSelectedProxy;
 	bool _lastSelectedProxyUsed = false;
+
+	rpl::lifetime _lifetime;
 
 };

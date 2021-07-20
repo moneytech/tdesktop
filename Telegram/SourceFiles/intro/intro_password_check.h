@@ -49,9 +49,9 @@ private:
 	void updateControlsGeometry();
 
 	void pwdSubmitDone(bool recover, const MTPauth_Authorization &result);
-	void pwdSubmitFail(const RPCError &error);
-	void codeSubmitFail(const RPCError &error);
-	void recoverStartFail(const RPCError &error);
+	void pwdSubmitFail(const MTP::Error &error);
+	void codeSubmitFail(const MTP::Error &error);
+	void recoverStartFail(const MTP::Error &error);
 
 	void recoverStarted(const MTPauth_PasswordRecovery &result);
 
@@ -62,7 +62,6 @@ private:
 	void passwordChecked();
 	void serverError();
 
-	MTP::Sender _api;
 	Core::CloudPasswordCheckRequest _request;
 	crl::time _lastSrpIdInvalidTime = 0;
 	bytes::vector _passwordHash;

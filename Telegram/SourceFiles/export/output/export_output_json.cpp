@@ -150,9 +150,9 @@ QByteArray SerializeText(
 
 	context.nesting.push_back(Context::kArray);
 
-	const auto text = ranges::view::all(
+	const auto text = ranges::views::all(
 		data
-	) | ranges::view::transform([&](const Data::TextPart &part) {
+	) | ranges::views::transform([&](const Data::TextPart &part) {
 		if (part.type == Type::Text) {
 			return SerializeString(part.text);
 		}
@@ -217,11 +217,11 @@ QByteArray FormatFilePath(const Data::File &file) {
 QByteArray SerializeMessage(
 		Context &context,
 		const Data::Message &message,
-		const std::map<Data::PeerId, Data::Peer> &peers,
+		const std::map<PeerId, Data::Peer> &peers,
 		const QString &internalLinksDomain) {
 	using namespace Data;
 
-	if (message.media.content.is<UnsupportedMedia>()) {
+	if (v::is<UnsupportedMedia>(message.media.content)) {
 		return SerializeObject(context, {
 			{ "id", Data::NumberToString(message.id) },
 			{ "type", SerializeString("unsupported") }
@@ -235,18 +235,11 @@ QByteArray SerializeMessage(
 		static auto empty = Peer{ User() };
 		return empty;
 	};
-	const auto user = [&](int32 userId) -> const User& {
-		if (const auto result = peer(UserPeerId(userId)).user()) {
+	const auto user = [&](UserId userId) -> const User& {
+		if (const auto result = peer(userId).user()) {
 			return *result;
 		}
 		static auto empty = User();
-		return empty;
-	};
-	const auto chat = [&](int32 chatId) -> const Chat& {
-		if (const auto result = peer(ChatPeerId(chatId)).chat()) {
-			return *result;
-		}
-		static auto empty = Chat();
 		return empty;
 	};
 
@@ -254,12 +247,12 @@ QByteArray SerializeMessage(
 	{ "id", NumberToString(message.id) },
 	{
 		"type",
-		SerializeString(message.action.content ? "service" : "message")
+		SerializeString(!v::is_null(message.action.content)
+			? "service"
+			: "message")
 	},
 	{ "date", SerializeDate(message.date) },
-	{ "edited", SerializeDate(message.edited) },
 	};
-
 	context.nesting.push_back(Context::kObject);
 	const auto serialized = [&] {
 		context.nesting.pop_back();
@@ -273,9 +266,32 @@ QByteArray SerializeMessage(
 			values.emplace_back(key, value);
 		}
 	};
+	if (message.edited) {
+		pushBare("edited", SerializeDate(message.edited));
+	}
+
 	const auto push = [&](const QByteArray &key, const auto &value) {
 		if constexpr (std::is_arithmetic_v<std::decay_t<decltype(value)>>) {
 			pushBare(key, Data::NumberToString(value));
+		} else if constexpr (std::is_same_v<
+				std::decay_t<decltype(value)>,
+				PeerId>) {
+			if (const auto chat = peerToChat(value)) {
+				pushBare(
+					key,
+					SerializeString("chat"
+						+ Data::NumberToString(chat.bare)));
+			} else if (const auto channel = peerToChannel(value)) {
+				pushBare(
+					key,
+					SerializeString("channel"
+						+ Data::NumberToString(channel.bare)));
+			} else {
+				pushBare(
+					key,
+					SerializeString("user"
+						+ Data::NumberToString(peerToUser(value).bare)));
+			}
 		} else {
 			const auto wrapped = QByteArray(value);
 			if (!wrapped.isEmpty()) {
@@ -286,23 +302,26 @@ QByteArray SerializeMessage(
 	const auto wrapPeerName = [&](PeerId peerId) {
 		return StringAllowNull(peer(peerId).name());
 	};
-	const auto wrapUserName = [&](int32 userId) {
+	const auto wrapUserName = [&](UserId userId) {
 		return StringAllowNull(user(userId).name());
 	};
 	const auto pushFrom = [&](const QByteArray &label = "from") {
 		if (message.fromId) {
-			pushBare(label, wrapUserName(message.fromId));
-			pushBare(label+"_id", Data::NumberToString(message.fromId));
+			pushBare(label, wrapPeerName(message.fromId));
+			push(label + "_id", message.fromId);
 		}
 	};
 	const auto pushReplyToMsgId = [&](
 			const QByteArray &label = "reply_to_message_id") {
 		if (message.replyToMsgId) {
 			push(label, message.replyToMsgId);
+			if (message.replyToPeerId) {
+				push("reply_to_peer_id", message.replyToPeerId);
+			}
 		}
 	};
 	const auto pushUserNames = [&](
-			const std::vector<int32> &data,
+			const std::vector<UserId> &data,
 			const QByteArray &label = "members") {
 		auto list = std::vector<QByteArray>();
 		for (const auto userId : data) {
@@ -355,7 +374,7 @@ QByteArray SerializeMessage(
 		}
 	};
 
-	message.action.content.match([&](const ActionChatCreate &data) {
+	v::match(message.action.content, [&](const ActionChatCreate &data) {
 		pushActor();
 		pushAction("create_group");
 		push("title", data.title);
@@ -466,12 +485,41 @@ QByteArray SerializeMessage(
 	}, [&](const ActionContactSignUp &data) {
 		pushActor();
 		pushAction("joined_telegram");
+	}, [&](const ActionGeoProximityReached &data) {
+		pushAction("proximity_reached");
+		if (data.fromId) {
+			pushBare("from", wrapPeerName(data.fromId));
+			push("from_id", data.fromId);
+		}
+		if (data.toId) {
+			pushBare("to", wrapPeerName(data.toId));
+			push("to_id", data.toId);
+		}
+		push("distance", data.distance);
 	}, [&](const ActionPhoneNumberRequest &data) {
 		pushActor();
 		pushAction("requested_phone_number");
-	}, [](std::nullopt_t) {});
+	}, [&](const ActionGroupCall &data) {
+		pushActor();
+		pushAction("group_call");
+		if (data.duration) {
+			push("duration", data.duration);
+		}
+	}, [&](const ActionInviteToGroupCall &data) {
+		pushActor();
+		pushAction("invite_to_group_call");
+		pushUserNames(data.userIds);
+	}, [&](const ActionSetMessagesTTL &data) {
+		pushActor();
+		pushAction("set_messages_ttl");
+		push("period", data.period);
+	}, [&](const ActionGroupCallScheduled &data) {
+		pushActor();
+		pushAction("group_call_scheduled");
+		push("schedule_date", data.date);
+	}, [](v::null_t) {});
 
-	if (!message.action.content) {
+	if (v::is_null(message.action.content)) {
 		pushFrom();
 		push("author", message.signature);
 		if (message.forwardedFromId) {
@@ -496,7 +544,7 @@ QByteArray SerializeMessage(
 		}
 	}
 
-	message.media.content.match([&](const Photo &photo) {
+	v::match(message.media.content, [&](const Photo &photo) {
 		pushPhoto(photo.image);
 		pushTTL();
 	}, [&](const Document &data) {
@@ -587,9 +635,9 @@ QByteArray SerializeMessage(
 		}));
 	}, [&](const Poll &data) {
 		context.nesting.push_back(Context::kObject);
-		const auto answers = ranges::view::all(
+		const auto answers = ranges::views::all(
 			data.answers
-		) | ranges::view::transform([&](const Poll::Answer &answer) {
+		) | ranges::views::transform([&](const Poll::Answer &answer) {
 			context.nesting.push_back(Context::kArray);
 			auto result = SerializeObject(context, {
 				{ "text", SerializeString(answer.text) },
@@ -610,7 +658,7 @@ QByteArray SerializeMessage(
 		}));
 	}, [](const UnsupportedMedia &data) {
 		Unexpected("Unsupported message.");
-	}, [](std::nullopt_t) {});
+	}, [](v::null_t) {});
 
 	pushBare("text", SerializeText(context, message.text));
 
@@ -630,7 +678,9 @@ Result JsonWriter::start(
 	_environment = environment;
 	_stats = stats;
 	_output = fileWithRelativePath(mainFileRelativePath());
-
+	if (_settings.onlySinglePeer()) {
+		return Result::Success();
+	}
 	auto block = pushNesting(Context::kObject);
 	block.append(prepareObjectItemStart("about"));
 	block.append(SerializeString(_environment.aboutTelegram));
@@ -678,7 +728,7 @@ Result JsonWriter::writePersonal(const Data::PersonalInfo &data) {
 	return _output->writeBlock(
 		prepareObjectItemStart("personal_information")
 		+ SerializeObject(_context, {
-		{ "user_id", Data::NumberToString(data.user.id) },
+		{ "user_id", Data::NumberToString(data.user.bareId) },
 		{ "first_name", SerializeString(info.firstName) },
 		{ "last_name", SerializeString(info.lastName) },
 		{
@@ -784,7 +834,12 @@ Result JsonWriter::writeSavedContacts(const Data::ContactsList &data) {
 			}));
 		} else {
 			block.append(SerializeObject(_context, {
-				{ "user_id", Data::NumberToString(contact.userId) },
+				{
+					"user_id",
+					(contact.userId
+						? Data::NumberToString(contact.userId.bare)
+						: QByteArray())
+				},
 				{ "first_name", SerializeString(contact.firstName) },
 				{ "last_name", SerializeString(contact.lastName) },
 				{
@@ -829,7 +884,7 @@ Result JsonWriter::writeFrequentContacts(const Data::ContactsList &data) {
 			}();
 			block.append(prepareArrayItemStart());
 			block.append(SerializeObject(_context, {
-				{ "id", Data::NumberToString(top.peer.id()) },
+				{ "id", Data::NumberToString(Data::PeerToBareId(top.peer.id())) },
 				{ "category", SerializeString(category) },
 				{ "type", SerializeString(type) },
 				{ "name",  StringAllowNull(top.peer.name()) },
@@ -993,9 +1048,11 @@ Result JsonWriter::writeDialogsStart(const Data::DialogsInfo &data) {
 Result JsonWriter::writeDialogStart(const Data::DialogInfo &data) {
 	Expects(_output != nullptr);
 
-	const auto result = validateDialogsMode(data.isLeftChannel);
-	if (!result) {
-		return result;
+	if (!_settings.onlySinglePeer()) {
+		const auto result = validateDialogsMode(data.isLeftChannel);
+		if (!result) {
+			return result;
+		}
 	}
 
 	using Type = Data::DialogInfo::Type;
@@ -1003,6 +1060,7 @@ Result JsonWriter::writeDialogStart(const Data::DialogInfo &data) {
 		switch (type) {
 		case Type::Unknown: return "";
 		case Type::Self: return "saved_messages";
+		case Type::Replies: return "replies";
 		case Type::Personal: return "personal_chat";
 		case Type::Bot: return "bot_chat";
 		case Type::PrivateGroup: return "private_group";
@@ -1014,16 +1072,18 @@ Result JsonWriter::writeDialogStart(const Data::DialogInfo &data) {
 		Unexpected("Dialog type in TypeString.");
 	};
 
-	auto block = prepareArrayItemStart();
+	auto block = _settings.onlySinglePeer()
+		? QByteArray()
+		: prepareArrayItemStart();
 	block.append(pushNesting(Context::kObject));
-	if (data.type != Type::Self) {
+	if (data.type != Type::Self && data.type != Type::Replies) {
 		block.append(prepareObjectItemStart("name")
 			+ StringAllowNull(data.name));
 	}
 	block.append(prepareObjectItemStart("type")
 		+ StringAllowNull(TypeString(data.type)));
 	block.append(prepareObjectItemStart("id")
-		+ Data::NumberToString(data.peerId));
+		+ Data::NumberToString(Data::PeerToBareId(data.peerId)));
 	block.append(prepareObjectItemStart("messages"));
 	block.append(pushNesting(Context::kArray));
 	return _output->writeBlock(block);
@@ -1073,6 +1133,9 @@ Result JsonWriter::writeDialogEnd() {
 }
 
 Result JsonWriter::writeDialogsEnd() {
+	if (_settings.onlySinglePeer()) {
+		return Result::Success();
+	}
 	return writeChatsEnd();
 }
 
@@ -1099,6 +1162,10 @@ Result JsonWriter::writeChatsEnd() {
 Result JsonWriter::finish() {
 	Expects(_output != nullptr);
 
+	if (_settings.onlySinglePeer()) {
+		Assert(_context.nesting.empty());
+		return Result::Success();
+	}
 	auto block = popNesting();
 	Assert(_context.nesting.empty());
 	return _output->writeBlock(block);

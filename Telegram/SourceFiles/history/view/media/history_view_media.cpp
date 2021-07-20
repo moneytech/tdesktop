@@ -7,13 +7,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/media/history_view_media.h"
 
+#include "history/history.h"
 #include "history/history_item.h"
 #include "history/view/history_view_element.h"
 #include "history/view/history_view_cursor_state.h"
+#include "lottie/lottie_single_player.h"
 #include "storage/storage_shared_media.h"
 #include "data/data_document.h"
-#include "ui/text_options.h"
-#include "styles/style_history.h"
+#include "ui/item_text_options.h"
+#include "core/ui_integration.h"
+#include "styles/style_chat.h"
 
 namespace HistoryView {
 namespace {
@@ -44,7 +47,7 @@ QString DocumentTimestampLinkBase(
 		FullMsgId context) {
 	return QString(
 		"doc%1_%2_%3"
-	).arg(document->id).arg(context.channel).arg(context.msg);
+	).arg(document->id).arg(context.channel.bare).arg(context.msg);
 }
 
 TextWithEntities AddTimestampLinks(
@@ -136,6 +139,9 @@ Ui::Text::String Media::createCaption(
 		- st::msgPadding.left()
 		- st::msgPadding.right();
 	auto result = Ui::Text::String(minResizeWidth);
+	const auto context = Core::MarkedTextContext{
+		.session = &history()->session()
+	};
 	result.setMarkedText(
 		st::messageTextStyle,
 		(timestampLinksDuration
@@ -144,7 +150,8 @@ Ui::Text::String Media::createCaption(
 				timestampLinksDuration,
 				timestampLinkBase)
 			: item->originalText()),
-		Ui::ItemTextOptions(item));
+		Ui::ItemTextOptions(item),
+		context);
 	if (const auto width = _parent->skipBlockWidth()) {
 		result.updateSkipBlock(width, _parent->skipBlockHeight());
 	}
@@ -165,12 +172,24 @@ PointState Media::pointState(QPoint point) const {
 		: PointState::Outside;
 }
 
+std::unique_ptr<Lottie::SinglePlayer> Media::stickerTakeLottie(
+		not_null<DocumentData*> data,
+		const Lottie::ColorReplacements *replacements) {
+	return nullptr;
+}
+
 TextState Media::getStateGrouped(
 		const QRect &geometry,
 		RectParts sides,
 		QPoint point,
 		StateRequest request) const {
 	Unexpected("Grouping method call.");
+}
+
+bool Media::isRoundedInBubbleBottom() const {
+	return isBubbleBottom()
+		&& !_parent->data()->repliesAreComments()
+		&& !_parent->data()->externalReply();
 }
 
 } // namespace HistoryView

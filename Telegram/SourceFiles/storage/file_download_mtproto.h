@@ -15,27 +15,34 @@ class mtpFileLoader final
 	, private Storage::DownloadMtprotoTask {
 public:
 	mtpFileLoader(
+		not_null<Main::Session*> session,
 		const StorageFileLocation &location,
 		Data::FileOrigin origin,
 		LocationType type,
 		const QString &toFile,
-		int32 size,
+		int loadSize,
+		int fullSize,
 		LoadToCacheSetting toCache,
 		LoadFromCloudSetting fromCloud,
 		bool autoLoading,
 		uint8 cacheTag);
 	mtpFileLoader(
+		not_null<Main::Session*> session,
 		const WebFileLocation &location,
-		int32 size,
+		int loadSize,
+		int fullSize,
 		LoadFromCloudSetting fromCloud,
 		bool autoLoading,
 		uint8 cacheTag);
 	mtpFileLoader(
+		not_null<Main::Session*> session,
 		const GeoPointLocation &location,
-		int32 size,
+		int loadSize,
+		int fullSize,
 		LoadFromCloudSetting fromCloud,
 		bool autoLoading,
 		uint8 cacheTag);
+	~mtpFileLoader();
 
 	Data::FileOrigin fileOrigin() const override;
 	uint64 objId() const override;
@@ -44,6 +51,7 @@ private:
 	Storage::Cache::Key cacheKey() const override;
 	std::optional<MediaKey> fileLocationKey() const override;
 	void startLoading() override;
+	void startLoadingWithPartial(const QByteArray &data) override;
 	void cancelHook() override;
 
 	bool readyToRequest() const override;

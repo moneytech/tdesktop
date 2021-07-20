@@ -10,11 +10,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mainwindow.h"
 #include "storage/localstorage.h"
 #include "platform/win/windows_dlls.h"
-#include "base/platform/base_platform_file_utilities.h"
 #include "lang/lang_keys.h"
 #include "core/application.h"
 #include "core/crash_reports.h"
-#include "app.h"
+#include "window/window_controller.h"
+#include "ui/ui_utility.h"
 
 #include <QtWidgets/QFileDialog>
 #include <QtGui/QDesktopServices>
@@ -90,7 +90,14 @@ HBITMAP IconToBitmap(LPWSTR icon, int iconindex) {
 		if (!iconindex) { // try to read image
 			QImage img(QString::fromWCharArray(icon));
 			if (!img.isNull()) {
-				return qt_pixmapToWinHBITMAP(App::pixmapFromImageInPlace(img.scaled(w, h, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)), /* HBitmapAlpha */ 2);
+				return qt_pixmapToWinHBITMAP(
+					Ui::PixmapFromImage(
+						img.scaled(
+							w,
+							h,
+							Qt::IgnoreAspectRatio,
+							Qt::SmoothTransformation)),
+					/* HBitmapAlpha */ 2);
 			}
 		}
 		return 0;
@@ -117,7 +124,13 @@ void UnsafeOpenEmailLink(const QString &email) {
 		auto wstringUrl = url.toString(QUrl::FullyEncoded).toStdWString();
 		if (Dlls::SHOpenWithDialog) {
 			OPENASINFO info;
-			info.oaifInFlags = OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC | OAIF_FILE_IS_URI | OAIF_URL_PROTOCOL;
+			info.oaifInFlags = OAIF_ALLOW_REGISTRATION
+				| OAIF_REGISTER_EXT
+				| OAIF_EXEC
+#if WINVER >= 0x0602
+				| OAIF_FILE_IS_URI
+#endif // WINVER >= 0x602
+				| OAIF_URL_PROTOCOL;
 			info.pcszClass = NULL;
 			info.pcszFile = wstringUrl.c_str();
 			Dlls::SHOpenWithDialog(0, &info);
@@ -134,12 +147,12 @@ bool UnsafeShowOpenWithDropdown(const QString &filepath, QPoint menuPosition) {
 		return false;
 	}
 
-	auto window = App::wnd();
+	auto window = Core::App().activeWindow();
 	if (!window) {
 		return false;
 	}
 
-	auto parentHWND = window->psHwnd();
+	auto parentHWND = window->widget()->psHwnd();
 	auto wstringPath = QDir::toNativeSeparators(filepath).toStdWString();
 
 	auto result = false;
@@ -260,10 +273,6 @@ void UnsafeLaunch(const QString &filepath) {
 	ShellExecute(0, L"open", wstringPath.c_str(), 0, 0, SW_SHOWNORMAL);
 }
 
-void UnsafeShowInFolder(const QString &filepath) {
-	base::Platform::ShowInFolder(filepath);
-}
-
 void PostprocessDownloaded(const QString &filepath) {
 	auto wstringZoneFile = QDir::toNativeSeparators(filepath).toStdWString() + L":Zone.Identifier";
 	auto f = CreateFile(wstringZoneFile.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
@@ -357,11 +366,7 @@ bool Get(
 		dialog.setAcceptMode(QFileDialog::AcceptOpen);
 	} else if (type == Type::ReadFolder) { // save dir
 		dialog.setAcceptMode(QFileDialog::AcceptOpen);
-
-		// We use "obsolete" value ::DirectoryOnly instead of ::Directory + ::ShowDirsOnly
-		// because in Windows XP native dialog this one works, while the "preferred" one
-		// shows a native file choose dialog where you can't choose a directory, only open one.
-		dialog.setFileMode(QFileDialog::DirectoryOnly);
+		dialog.setFileMode(QFileDialog::Directory);
 		dialog.setOption(QFileDialog::ShowDirsOnly);
 	} else { // save file
 		dialog.setFileMode(QFileDialog::AnyFile);
@@ -411,7 +416,7 @@ bool Get(
 		const auto path = dialog.directory().absolutePath();
 		if (path != cDialogLastPath()) {
 			cSetDialogLastPath(path);
-			Local::writeUserSettings();
+			Local::writeSettings();
 		}
 	}
 

@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/effects/animations.h"
 #include "window/window_lock_widgets.h"
 #include "core/core_cloud_password.h"
+#include "media/player/media_player_float.h"
 
 namespace Main {
 class Account;
@@ -28,6 +29,7 @@ class FadeWrap;
 
 namespace Window {
 class ConnectionState;
+class Controller;
 } // namespace Window
 
 namespace Intro {
@@ -41,6 +43,9 @@ enum class CallStatus {
 };
 
 struct Data {
+	// Required for the UserpicButton.
+	const not_null<Window::Controller*> controller;
+
 	QString country;
 	QString phone;
 	QByteArray phoneHash;
@@ -58,27 +63,47 @@ struct Data {
 
 	Window::TermsLock termsLock;
 
-	base::Observable<void> updated;
+	rpl::event_stream<> updated;
 
 };
 
-enum class Direction {
+enum class StackAction {
 	Back,
 	Forward,
 	Replace,
+};
+
+enum class Animate {
+	Back,
+	Forward,
 };
 
 class Step;
 
 } // namespace details
 
-class Widget : public Ui::RpWidget, private base::Subscriber {
+enum class EnterPoint : uchar {
+	Start,
+	Phone,
+	Qr,
+};
+
+class Widget
+	: public Ui::RpWidget
+	, private Media::Player::FloatDelegate
+	, private Media::Player::FloatSectionDelegate {
 public:
-	Widget(QWidget *parent, not_null<Main::Account*> account);
+	Widget(
+		QWidget *parent,
+		not_null<Window::Controller*> controller,
+		not_null<Main::Account*> account,
+		EnterPoint point);
 
 	void showAnimated(const QPixmap &bgAnimCache, bool back = false);
 
 	void setInnerFocus();
+
+	[[nodiscard]] rpl::producer<> showSettingsRequested() const;
 
 	~Widget();
 
@@ -95,6 +120,7 @@ private:
 	void setupNextButton();
 	void handleUpdates(const MTPUpdates &updates);
 	void handleUpdate(const MTPUpdate &update);
+	void backRequested();
 
 	void updateControlsGeometry();
 	[[nodiscard]] not_null<details::Data*> getData() {
@@ -118,15 +144,38 @@ private:
 
 		return _stepHistory[_stepHistory.size() - skip - 1];
 	}
-	void historyMove(details::Direction direction);
-	void moveToStep(details::Step *step, details::Direction direction);
+	void historyMove(details::StackAction action, details::Animate animate);
+	void moveToStep(
+		details::Step *step,
+		details::StackAction action,
+		details::Animate animate);
 	void appendStep(details::Step *step);
 
 	void getNearestDC();
 	void showTerms(Fn<void()> callback);
 
+	// FloatDelegate
+	[[nodiscard]] auto floatPlayerDelegate()
+		-> not_null<Media::Player::FloatDelegate*>;
+	[[nodiscard]] auto floatPlayerSectionDelegate()
+		-> not_null<Media::Player::FloatSectionDelegate*>;
+	not_null<Ui::RpWidget*> floatPlayerWidget() override;
+	not_null<Media::Player::FloatSectionDelegate*> floatPlayerGetSection(
+		Window::Column column) override;
+	void floatPlayerEnumerateSections(Fn<void(
+		not_null<Media::Player::FloatSectionDelegate*> widget,
+		Window::Column widgetColumn)> callback) override;
+	bool floatPlayerIsVisible(not_null<HistoryItem*> item) override;
+	void floatPlayerDoubleClickEvent(
+		not_null<const HistoryItem*> item) override;
+
+	// FloatSectionDelegate
+	QRect floatPlayerAvailableRect() override;
+	bool floatPlayerHandleWheelEvent(QEvent *e) override;
+
 	const not_null<Main::Account*> _account;
 	std::optional<MTP::Sender> _api;
+	mtpRequestId _nearestDcRequestId = 0;
 
 	Ui::Animations::Simple _a_show;
 	bool _showBack = false;

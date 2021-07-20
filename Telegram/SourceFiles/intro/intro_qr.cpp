@@ -32,26 +32,8 @@ namespace Intro {
 namespace details {
 namespace {
 
-[[nodiscard]] QImage TelegramLogoImage() {
-	const auto size = QSize(st::introQrCenterSize, st::introQrCenterSize);
-	auto result = QImage(
-		size * style::DevicePixelRatio(),
-		QImage::Format_ARGB32_Premultiplied);
-	result.fill(Qt::transparent);
-	result.setDevicePixelRatio(style::DevicePixelRatio());
-	{
-		auto p = QPainter(&result);
-		auto hq = PainterHighQualityEnabler(p);
-		p.setBrush(st::activeButtonBg);
-		p.setPen(Qt::NoPen);
-		p.drawEllipse(QRect(QPoint(), size));
-		st::introQrPlane.paintInCenter(p, QRect(QPoint(), size));
-	}
-	return result;
-}
-
 [[nodiscard]] QImage TelegramQrExact(const Qr::Data &data, int pixel) {
-	return Qr::Generate(data, pixel, st::windowFg->c);
+	return Qr::Generate(data, pixel, Qt::black);
 }
 
 [[nodiscard]] QImage TelegramQr(const Qr::Data &data, int pixel, int max = 0) {
@@ -62,12 +44,16 @@ namespace {
 	}
 	const auto qr = TelegramQrExact(data, pixel * style::DevicePixelRatio());
 	auto result = QImage(qr.size(), QImage::Format_ARGB32_Premultiplied);
-	result.fill(st::windowBg->c);
+	result.fill(Qt::white);
 	{
 		auto p = QPainter(&result);
 		p.drawImage(QRect(QPoint(), qr.size()), qr);
 	}
 	return result;
+}
+
+[[nodiscard]] QColor QrActiveColor() {
+	return QColor(0x40, 0xA7, 0xE3); // Default windowBgActive.
 }
 
 [[nodiscard]] not_null<Ui::RpWidget*> PrepareQrWidget(
@@ -98,7 +84,8 @@ namespace {
 	const auto state = result->lifetime().make_state<State>(
 		[=] { result->update(); });
 	state->waiting.start();
-	result->resize(st::introQrMaxSize, st::introQrMaxSize);
+	const auto size = st::introQrMaxSize + 2 * st::introQrBackgroundSkip;
+	result->resize(size, size);
 	rpl::combine(
 		std::move(qrs),
 		rpl::duplicate(palettes)
@@ -125,14 +112,31 @@ namespace {
 	result->paintRequest(
 	) | rpl::start_with_next([=](QRect clip) {
 		auto p = QPainter(result);
-		const auto shown = state->qr.isNull() ? 0. : state->shown.value(1.);
+		const auto has = !state->qr.isNull();
+		const auto shown = has ? state->shown.value(1.) : 0.;
+		const auto usualSize = 41;
+		const auto pixel = std::clamp(
+			st::introQrMaxSize / usualSize,
+			1,
+			st::introQrPixel);
+		const auto size = has
+			? (state->qr.size() / cIntRetinaFactor())
+			: QSize(usualSize * pixel, usualSize * pixel);
+		const auto qr = QRect(
+			(result->width() - size.width()) / 2,
+			(result->height() - size.height()) / 2,
+			size.width(),
+			size.height());
+		const auto radius = st::introQrBackgroundRadius;
+		const auto skip = st::introQrBackgroundSkip;
+		auto hq = PainterHighQualityEnabler(p);
+		p.setPen(Qt::NoPen);
+		p.setBrush(Qt::white);
+		p.drawRoundedRect(
+			qr.marginsAdded({ skip, skip, skip, skip }),
+			radius,
+			radius);
 		if (!state->qr.isNull()) {
-			const auto size = state->qr.size() / cIntRetinaFactor();
-			const auto qr = QRect(
-				(result->width() - size.width()) / 2,
-				(result->height() - size.height()) / 2,
-				size.width(),
-				size.height());
 			if (shown == 1.) {
 				state->previous = QImage();
 			} else if (!state->previous.isNull()) {
@@ -152,7 +156,7 @@ namespace {
 			auto hq = PainterHighQualityEnabler(p);
 			const auto line = st::radialLine;
 			const auto radial = state->waiting.computeState();
-			auto pen = st::activeButtonBg->p;
+			auto pen = QPen(QrActiveColor());
 			pen.setWidth(line);
 			pen.setCapStyle(Qt::RoundCap);
 			p.setOpacity(radial.shown * (1. - shown));
@@ -174,11 +178,12 @@ QrWidget::QrWidget(
 	not_null<Main::Account*> account,
 	not_null<Data*> data)
 : Step(parent, account, data)
-, _api(account->mtp())
 , _refreshTimer([=] { refreshCode(); }) {
 	setTitleText(rpl::single(QString()));
 	setDescriptionText(rpl::single(QString()));
 	setErrorCentered(true);
+
+	cancelNearestDcRequest();
 
 	account->mtpUpdates(
 	) | rpl::start_with_next([=](const MTPUpdates &updates) {
@@ -219,7 +224,7 @@ void QrWidget::checkForTokenUpdate(const MTPUpdate &update) {
 }
 
 void QrWidget::submit() {
-	goReplace<PhoneWidget>();
+	goReplace<PhoneWidget>(Animate::Forward);
 }
 
 rpl::producer<QString> QrWidget::nextButtonText() const {
@@ -269,7 +274,7 @@ void QrWidget::setupControls() {
 			st::introQrStepMargins);
 		const auto number = Ui::CreateChild<Ui::FlatLabel>(
 			steps,
-			rpl::single(Ui::Text::Bold(QString::number(++index) + ".")),
+			rpl::single(Ui::Text::Semibold(QString::number(++index) + ".")),
 			st::defaultFlatLabel);
 		rpl::combine(
 			number->widthValue(),
@@ -309,13 +314,13 @@ void QrWidget::refreshCode() {
 	if (_requestId) {
 		return;
 	}
-	_requestId = _api.request(MTPauth_ExportLoginToken(
+	_requestId = api().request(MTPauth_ExportLoginToken(
 		MTP_int(ApiId),
 		MTP_string(ApiHash),
 		MTP_vector<MTPint>(0)
 	)).done([=](const MTPauth_LoginToken &result) {
 		handleTokenResult(result);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		showTokenError(error);
 	}).send();
 }
@@ -338,7 +343,7 @@ void QrWidget::handleTokenResult(const MTPauth_LoginToken &result) {
 	});
 }
 
-void QrWidget::showTokenError(const RPCError &error) {
+void QrWidget::showTokenError(const MTP::Error &error) {
 	_requestId = 0;
 	if (error.type() == qstr("SESSION_PASSWORD_NEEDED")) {
 		sendCheckPasswordRequest();
@@ -357,12 +362,12 @@ void QrWidget::showToken(const QByteArray &token) {
 void QrWidget::importTo(MTP::DcId dcId, const QByteArray &token) {
 	Expects(_requestId != 0);
 
-	_api.instance()->setMainDcId(dcId);
-	_requestId = _api.request(MTPauth_ImportLoginToken(
+	api().instance().setMainDcId(dcId);
+	_requestId = api().request(MTPauth_ImportLoginToken(
 		MTP_bytes(token)
 	)).done([=](const MTPauth_LoginToken &result) {
 		handleTokenResult(result);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		showTokenError(error);
 	}).toDC(dcId).send();
 }
@@ -374,8 +379,6 @@ void QrWidget::done(const MTPauth_Authorization &authorization) {
 			showError(rpl::single(Lang::Hard::ServerError()));
 			return;
 		}
-		const auto phone = data.vuser().c_user().vphone().value_or_empty();
-		cSetLoggedPhoneNumber(phone);
 		finish(data.vuser());
 	}, [&](const MTPDauth_authorizationSignUpRequired &data) {
 		_requestId = 0;
@@ -385,22 +388,21 @@ void QrWidget::done(const MTPauth_Authorization &authorization) {
 }
 
 void QrWidget::sendCheckPasswordRequest() {
-	_requestId = _api.request(MTPaccount_GetPassword(
+	_requestId = api().request(MTPaccount_GetPassword(
 	)).done([=](const MTPaccount_Password &result) {
 		result.match([&](const MTPDaccount_password &data) {
 			getData()->pwdRequest = Core::ParseCloudPasswordCheckRequest(
 				data);
 			if (!data.vcurrent_algo() || !data.vsrp_id() || !data.vsrp_B()) {
 				LOG(("API Error: No current password received on login."));
-				goReplace<QrWidget>();
+				goReplace<QrWidget>(Animate::Forward);
 				return;
 			} else if (!getData()->pwdRequest) {
-				const auto box = std::make_shared<QPointer<Ui::BoxContent>>();
-				const auto callback = [=] {
+				const auto callback = [=](Fn<void()> &&close) {
 					Core::UpdateApplication();
-					if (*box) (*box)->closeBox();
+					close();
 				};
-				*box = Ui::show(Box<ConfirmBox>(
+				Ui::show(Box<ConfirmBox>(
 					tr::lng_passport_app_out_of_date(tr::now),
 					tr::lng_menu_update(tr::now),
 					callback));
@@ -409,9 +411,9 @@ void QrWidget::sendCheckPasswordRequest() {
 			getData()->hasRecovery = data.is_has_recovery();
 			getData()->pwdHint = qs(data.vhint().value_or_empty());
 			getData()->pwdNotEmptyPassport = data.is_has_secure_values();
-			goReplace<PasswordCheckWidget>();
+			goReplace<PasswordCheckWidget>(Animate::Forward);
 		});
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		showTokenError(error);
 	}).send();
 }
@@ -424,12 +426,30 @@ void QrWidget::activate() {
 void QrWidget::finished() {
 	Step::finished();
 	_refreshTimer.cancel();
-	rpcInvalidate();
+	apiClear();
 	cancelled();
 }
 
 void QrWidget::cancelled() {
-	_api.request(base::take(_requestId)).cancel();
+	api().request(base::take(_requestId)).cancel();
+}
+
+QImage TelegramLogoImage() {
+	const auto size = QSize(st::introQrCenterSize, st::introQrCenterSize);
+	auto result = QImage(
+		size * style::DevicePixelRatio(),
+		QImage::Format_ARGB32_Premultiplied);
+	result.fill(Qt::transparent);
+	result.setDevicePixelRatio(style::DevicePixelRatio());
+	{
+		auto p = QPainter(&result);
+		auto hq = PainterHighQualityEnabler(p);
+		p.setBrush(QrActiveColor());
+		p.setPen(Qt::NoPen);
+		p.drawEllipse(QRect(QPoint(), size));
+		st::introQrPlane.paintInCenter(p, QRect(QPoint(), size));
+	}
+	return result;
 }
 
 } // namespace details

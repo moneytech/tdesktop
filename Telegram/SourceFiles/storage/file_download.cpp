@@ -13,37 +13,112 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mainwidget.h"
 #include "mainwindow.h"
 #include "core/application.h"
-#include "storage/localstorage.h"
+#include "core/file_location.h"
+#include "storage/storage_account.h"
+#include "storage/file_download_mtproto.h"
+#include "storage/file_download_web.h"
 #include "platform/platform_file_utilities.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
 #include "core/crash_reports.h"
 #include "base/bytes.h"
 #include "base/openssl_help.h"
-#include "facades.h"
 #include "app.h"
 
-FileLoader::FileLoader(
+namespace {
+
+class FromMemoryLoader final : public FileLoader {
+public:
+	FromMemoryLoader(
+		not_null<Main::Session*> session,
+		const QByteArray &data,
+		const QString &toFile,
+		int loadSize,
+		int fullSize,
+		LocationType locationType,
+		LoadToCacheSetting toCache,
+		LoadFromCloudSetting fromCloud,
+		bool autoLoading,
+		uint8 cacheTag);
+
+private:
+	Storage::Cache::Key cacheKey() const override;
+	std::optional<MediaKey> fileLocationKey() const override;
+	void cancelHook() override;
+	void startLoading() override;
+
+	QByteArray _data;
+
+};
+
+FromMemoryLoader::FromMemoryLoader(
+	not_null<Main::Session*> session,
+	const QByteArray &data,
 	const QString &toFile,
-	int32 size,
+	int loadSize,
+	int fullSize,
+	LocationType locationType,
+	LoadToCacheSetting toCache,
+	LoadFromCloudSetting fromCloud,
+	bool autoLoading,
+	uint8 cacheTag
+) : FileLoader(
+	session,
+	toFile,
+	loadSize,
+	fullSize,
+	locationType,
+	toCache,
+	fromCloud,
+	autoLoading,
+	cacheTag)
+, _data(data) {
+}
+
+Storage::Cache::Key FromMemoryLoader::cacheKey() const {
+	return {};
+}
+
+std::optional<MediaKey> FromMemoryLoader::fileLocationKey() const {
+	return std::nullopt;
+}
+
+void FromMemoryLoader::cancelHook() {
+}
+
+void FromMemoryLoader::startLoading() {
+	finishWithBytes(_data);
+}
+
+} // namespace
+
+FileLoader::FileLoader(
+	not_null<Main::Session*> session,
+	const QString &toFile,
+	int loadSize,
+	int fullSize,
 	LocationType locationType,
 	LoadToCacheSetting toCache,
 	LoadFromCloudSetting fromCloud,
 	bool autoLoading,
 	uint8 cacheTag)
-: _session(&Auth())
+: _session(session)
 , _autoLoading(autoLoading)
 , _cacheTag(cacheTag)
 , _filename(toFile)
 , _file(_filename)
 , _toCache(toCache)
 , _fromCloud(fromCloud)
-, _size(size)
+, _loadSize(loadSize)
+, _fullSize(fullSize)
 , _locationType(locationType) {
-	Expects(!_filename.isEmpty() || (_size <= Storage::kMaxFileInMemory));
+	Expects(_loadSize <= _fullSize);
+	Expects(!_filename.isEmpty() || (_fullSize <= Storage::kMaxFileInMemory));
 }
 
-FileLoader::~FileLoader() = default;
+FileLoader::~FileLoader() {
+	Expects(_finished);
+}
 
 Main::Session &FileLoader::session() const {
 	return *_session;
@@ -72,32 +147,26 @@ void FileLoader::finishWithBytes(const QByteArray &data) {
 		Platform::File::PostprocessDownloaded(
 			QFileInfo(_file).absoluteFilePath());
 	}
-	Auth().downloaderTaskFinished().notify();
+	const auto session = _session;
+	_updates.fire_done();
+	session->notifyDownloaderTaskFinished();
 }
 
-QByteArray FileLoader::imageFormat(const QSize &shrinkBox) const {
-	if (_imageFormat.isEmpty() && _locationType == UnknownFileLocation) {
-		readImage(shrinkBox);
-	}
-	return _imageFormat;
-}
-
-QImage FileLoader::imageData(const QSize &shrinkBox) const {
+QImage FileLoader::imageData(int progressiveSizeLimit) const {
 	if (_imageData.isNull() && _locationType == UnknownFileLocation) {
-		readImage(shrinkBox);
+		readImage(progressiveSizeLimit);
 	}
 	return _imageData;
 }
 
-void FileLoader::readImage(const QSize &shrinkBox) const {
+void FileLoader::readImage(int progressiveSizeLimit) const {
+	const auto buffer = progressiveSizeLimit
+		? QByteArray::fromRawData(_data.data(), progressiveSizeLimit)
+		: _data;
 	auto format = QByteArray();
-	auto image = App::readImage(_data, &format, false);
+	auto image = App::readImage(buffer, &format, false);
 	if (!image.isNull()) {
-		if (!shrinkBox.isEmpty() && (image.width() > shrinkBox.width() || image.height() > shrinkBox.height())) {
-			_imageData = image.scaled(shrinkBox, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-		} else {
-			_imageData = std::move(image);
-		}
+		_imageData = std::move(image);
 		_imageFormat = format;
 	}
 }
@@ -107,13 +176,11 @@ Data::FileOrigin FileLoader::fileOrigin() const {
 }
 
 float64 FileLoader::currentProgress() const {
-	if (_finished) return 1.;
-	if (!fullSize()) return 0.;
-	return snap(float64(currentOffset()) / fullSize(), 0., 1.);
-}
-
-int FileLoader::fullSize() const {
-	return _size;
+	return _finished
+		? 1.
+		: !_loadSize
+		? 0.
+		: std::clamp(float64(currentOffset()) / _loadSize, 0., 1.);
 }
 
 bool FileLoader::setFileName(const QString &fileName) {
@@ -129,8 +196,16 @@ void FileLoader::permitLoadFromCloud() {
 	_fromCloud = LoadFromCloudOrLocal;
 }
 
+void FileLoader::increaseLoadSize(int size, bool autoLoading) {
+	Expects(size > _loadSize);
+	Expects(size <= _fullSize);
+
+	_loadSize = size;
+	_autoLoading = autoLoading;
+}
+
 void FileLoader::notifyAboutProgress() {
-	emit progress(this);
+	_updates.fire({});
 }
 
 void FileLoader::localLoaded(
@@ -143,12 +218,24 @@ void FileLoader::localLoaded(
 		start();
 		return;
 	}
+	const auto partial = result.data.startsWith("partial:");
+	constexpr auto kPrefix = 8;
+	if (partial	&& result.data.size() < _loadSize + kPrefix) {
+		_localStatus = LocalStatus::NotFound;
+		if (checkForOpen()) {
+			startLoadingWithPartial(result.data);
+		}
+		return;
+	}
 	if (!imageData.isNull()) {
 		_imageFormat = imageFormat;
 		_imageData = imageData;
 	}
-	finishWithBytes(result.data);
-	notifyAboutProgress();
+	finishWithBytes(partial
+		? QByteArray::fromRawData(
+			result.data.data() + kPrefix,
+			result.data.size() - kPrefix)
+		: result.data);
 }
 
 void FileLoader::start() {
@@ -159,13 +246,23 @@ void FileLoader::start() {
 		return;
 	}
 
-	if (!_filename.isEmpty() && _toCache == LoadToFileOnly && !_fileIsOpen) {
-		_fileIsOpen = _file.open(QIODevice::WriteOnly);
-		if (!_fileIsOpen) {
-			return cancel(true);
-		}
+	if (checkForOpen()) {
+		startLoading();
 	}
-	startLoading();
+}
+
+bool FileLoader::checkForOpen() {
+	if (_filename.isEmpty()
+		|| (_toCache != LoadToFileOnly)
+		|| _fileIsOpen) {
+		return true;
+	}
+	_fileIsOpen = _file.open(QIODevice::WriteOnly);
+	if (_fileIsOpen) {
+		return true;
+	}
+	cancel(true);
+	return false;
 }
 
 void FileLoader::loadLocal(const Storage::Cache::Key &key) {
@@ -186,9 +283,9 @@ void FileLoader::loadLocal(const Storage::Cache::Key &key) {
 				std::move(image));
 		});
 	};
-	session().data().cache().get(key, [=, callback = std::move(done)](
+	_session->data().cache().get(key, [=, callback = std::move(done)](
 			QByteArray &&value) mutable {
-		if (readImage) {
+		if (readImage && !value.startsWith("partial:")) {
 			crl::async([
 				value = std::move(value),
 				done = std::move(callback)
@@ -218,14 +315,14 @@ bool FileLoader::tryLoadLocal() {
 		return true;
 	}
 
-	const auto weak = QPointer<FileLoader>(this);
 	if (_toCache == LoadToCacheAsWell) {
-		loadLocal(cacheKey());
-		emit progress(this);
+		const auto key = cacheKey();
+		if (key.low || key.high) {
+			loadLocal(key);
+			notifyAboutProgress();
+		}
 	}
-	if (!weak) {
-		return false;
-	} else if (_localStatus != LocalStatus::NotTried) {
+	if (_localStatus != LocalStatus::NotTried) {
 		return _finished;
 	} else if (_localLoading) {
 		_localStatus = LocalStatus::Loading;
@@ -253,11 +350,11 @@ void FileLoader::cancel(bool fail) {
 	}
 	_data = QByteArray();
 
-	const auto weak = QPointer<FileLoader>(this);
+	const auto weak = base::make_weak(this);
 	if (fail) {
-		emit failed(this, started);
+		_updates.fire_error_copy(started);
 	} else {
-		emit progress(this);
+		_updates.fire_done();
 	}
 	if (weak) {
 		_filename = QString();
@@ -356,18 +453,96 @@ bool FileLoader::finalizeResult() {
 	if (_localStatus == LocalStatus::NotFound) {
 		if (const auto key = fileLocationKey()) {
 			if (!_filename.isEmpty()) {
-				Local::writeFileLocation(*key, FileLocation(_filename));
+				_session->local().writeFileLocation(
+					*key,
+					Core::FileLocation(_filename));
 			}
 		}
+		const auto key = cacheKey();
 		if ((_toCache == LoadToCacheAsWell)
-			&& (_data.size() <= Storage::kMaxFileInMemory)) {
-			session().data().cache().put(
+			&& (_data.size() <= Storage::kMaxFileInMemory)
+			&& (key.low || key.high)) {
+			_session->data().cache().put(
 				cacheKey(),
 				Storage::Cache::Database::TaggedValue(
-					base::duplicate(_data),
+					base::duplicate((!_fullSize || _data.size() == _fullSize)
+						? _data
+						: ("partial:" + _data)),
 					_cacheTag));
 		}
 	}
-	Auth().downloaderTaskFinished().notify();
+	const auto session = _session;
+	_updates.fire_done();
+	session->notifyDownloaderTaskFinished();
 	return true;
+}
+
+std::unique_ptr<FileLoader> CreateFileLoader(
+		not_null<Main::Session*> session,
+		const DownloadLocation &location,
+		Data::FileOrigin origin,
+		const QString &toFile,
+		int loadSize,
+		int fullSize,
+		LocationType locationType,
+		LoadToCacheSetting toCache,
+		LoadFromCloudSetting fromCloud,
+		bool autoLoading,
+		uint8 cacheTag) {
+	auto result = std::unique_ptr<FileLoader>();
+	v::match(location.data, [&](const StorageFileLocation &data) {
+		result = std::make_unique<mtpFileLoader>(
+			session,
+			data,
+			origin,
+			locationType,
+			toFile,
+			loadSize,
+			fullSize,
+			toCache,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const WebFileLocation &data) {
+		result = std::make_unique<mtpFileLoader>(
+			session,
+			data,
+			loadSize,
+			fullSize,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const GeoPointLocation &data) {
+		result = std::make_unique<mtpFileLoader>(
+			session,
+			data,
+			loadSize,
+			fullSize,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const PlainUrlLocation &data) {
+		result = std::make_unique<webFileLoader>(
+			session,
+			data.url,
+			toFile,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const InMemoryLocation &data) {
+		result = std::make_unique<FromMemoryLoader>(
+			session,
+			data.bytes,
+			toFile,
+			loadSize,
+			fullSize,
+			locationType,
+			toCache,
+			LoadFromCloudOrLocal,
+			autoLoading,
+			cacheTag);
+	});
+
+	Ensures(result != nullptr);
+	return result;
 }

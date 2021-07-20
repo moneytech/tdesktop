@@ -20,7 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/wrap/slide_wrap.h"
 #include "ui/effects/ripple_animation.h"
 #include "ui/toast/toast.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
 #include "storage/localstorage.h"
 #include "boxes/confirm_box.h"
 #include "mainwidget.h"
@@ -105,7 +105,7 @@ private:
 			return (index == other.index);
 		}
 	};
-	using Selection = base::optional_variant<RowSelection, MenuSelection>;
+	using Selection = std::variant<v::null_t, RowSelection, MenuSelection>;
 
 	void updateSelected(Selection selected);
 	void updatePressed(Selection pressed);
@@ -115,12 +115,12 @@ private:
 	const Rows::Row &rowBySelection(Selection selected) const;
 	std::unique_ptr<Ui::RippleAnimation> &rippleBySelection(
 		Selection selected);
-	const std::unique_ptr<Ui::RippleAnimation> &rippleBySelection(
+	[[maybe_unused]] const std::unique_ptr<Ui::RippleAnimation> &rippleBySelection(
 		Selection selected) const;
 	std::unique_ptr<Ui::RippleAnimation> &rippleBySelection(
 		not_null<Row*> row,
 		Selection selected);
-	const std::unique_ptr<Ui::RippleAnimation> &rippleBySelection(
+	[[maybe_unused]] const std::unique_ptr<Ui::RippleAnimation> &rippleBySelection(
 		not_null<const Row*> row,
 		Selection selected) const;
 	void addRipple(Selection selected, QPoint position);
@@ -196,7 +196,7 @@ std::pair<Languages, Languages> PrepareLists() {
 	const auto projId = [](const Language &language) {
 		return language.id;
 	};
-	const auto current = Lang::LanguageIdOrDefault(Lang::Current().id());
+	const auto current = Lang::LanguageIdOrDefault(Lang::Id());
 	auto official = Lang::CurrentCloudManager().languageList();
 	auto recent = Local::readRecentLanguages();
 	ranges::stable_partition(recent, [&](const Language &language) {
@@ -207,16 +207,15 @@ std::pair<Languages, Languages> PrepareLists() {
 			const auto generate = [&] {
 				const auto name = (current == "#custom")
 					? "Custom lang pack"
-					: Lang::Current().name();
+					: Lang::GetInstance().name();
 				return Language{
 					current,
 					QString(),
 					QString(),
 					name,
-					Lang::Current().nativeName()
+					Lang::GetInstance().nativeName()
 				};
 			};
-			const auto i = ranges::find(official, current, projId);
 			recent.insert(begin(recent), generate());
 		}
 	}
@@ -327,7 +326,7 @@ void Rows::mouseMoveEvent(QMouseEvent *e) {
 
 void Rows::mousePressEvent(QMouseEvent *e) {
 	updatePressed(_selected);
-	if (_pressed.has_value()
+	if (!v::is_null(_pressed)
 		&& !rowBySelection(_pressed).menuToggleForceRippled) {
 		addRipple(_pressed, e->pos());
 	}
@@ -348,11 +347,11 @@ QRect Rows::menuToggleArea(not_null<const Row*> row) const {
 }
 
 void Rows::addRipple(Selection selected, QPoint position) {
-	Expects(selected.has_value());
+	Expects(!v::is_null(selected));
 
 	ensureRippleBySelection(selected);
 
-	const auto menu = selected.is<MenuSelection>();
+	const auto menu = v::is<MenuSelection>(selected);
 	const auto &row = rowBySelection(selected);
 	const auto menuArea = menuToggleArea(&row);
 	auto &ripple = rippleBySelection(&row, selected);
@@ -369,7 +368,7 @@ void Rows::ensureRippleBySelection(not_null<Row*> row, Selection selected) {
 	if (ripple) {
 		return;
 	}
-	const auto menu = selected.is<MenuSelection>();
+	const auto menu = v::is<MenuSelection>(selected);
 	const auto menuArea = menuToggleArea(row);
 	auto mask = menu
 		? Ui::RippleAnimation::ellipseMask(menuArea.size())
@@ -391,11 +390,11 @@ void Rows::mouseReleaseEvent(QMouseEvent *e) {
 	const auto pressed = _pressed;
 	updatePressed({});
 	if (pressed == _selected) {
-		pressed.match([&](RowSelection data) {
+		v::match(pressed, [&](RowSelection data) {
 			activateByIndex(data.index);
 		}, [&](MenuSelection data) {
 			showMenu(data.index);
-		}, [](std::nullopt_t) {});
+		}, [](v::null_t) {});
 	}
 }
 
@@ -424,11 +423,11 @@ void Rows::remove(not_null<Row*> row) {
 
 void Rows::restore(not_null<Row*> row) {
 	row->removed = false;
-	Local::saveRecentLanguages(ranges::view::all(
+	Local::saveRecentLanguages(ranges::views::all(
 		_rows
-	) | ranges::view::filter([](const Row &row) {
+	) | ranges::views::filter([](const Row &row) {
 		return !row.removed;
-	}) | ranges::view::transform([](const Row &row) {
+	}) | ranges::views::transform([](const Row &row) {
 		return row.data;
 	}) | ranges::to_vector);
 }
@@ -464,7 +463,6 @@ void Rows::showMenu(int index) {
 			Fn<void()> callback) {
 		return _menu->addAction(text, std::move(callback));
 	};
-	const auto id = row->data.id;
 	if (canShare(row)) {
 		addAction(tr::lng_proxy_edit_share(tr::now), [=] { share(row); });
 	}
@@ -597,11 +595,11 @@ int Rows::count() const {
 }
 
 int Rows::indexFromSelection(Selection selected) const {
-	return selected.match([&](RowSelection data) {
+	return v::match(selected, [&](RowSelection data) {
 		return data.index;
 	}, [&](MenuSelection data) {
 		return data.index;
-	}, [](std::nullopt_t) {
+	}, [](v::null_t) {
 		return -1;
 	});
 }
@@ -648,7 +646,7 @@ rpl::producer<bool> Rows::isEmpty() const {
 }
 
 void Rows::repaint(Selection selected) {
-	selected.match([](std::nullopt_t) {
+	v::match(selected, [](v::null_t) {
 	}, [&](const auto &data) {
 		repaint(data.index);
 	});
@@ -672,17 +670,17 @@ void Rows::repaintChecked(not_null<const Row*> row) {
 }
 
 void Rows::updateSelected(Selection selected) {
-	const auto changed = (_selected.has_value() != selected.has_value());
+	const auto changed = (v::is_null(_selected) != v::is_null(selected));
 	repaint(_selected);
 	_selected = selected;
 	repaint(_selected);
 	if (changed) {
-		_hasSelection.fire(_selected.has_value());
+		_hasSelection.fire(!v::is_null(_selected));
 	}
 }
 
 void Rows::updatePressed(Selection pressed) {
-	if (_pressed.has_value()) {
+	if (!v::is_null(_pressed)) {
 		if (!rowBySelection(_pressed).menuToggleForceRippled) {
 			if (const auto ripple = rippleBySelection(_pressed).get()) {
 				ripple->lastStop();
@@ -725,7 +723,7 @@ const std::unique_ptr<Ui::RippleAnimation> &Rows::rippleBySelection(
 std::unique_ptr<Ui::RippleAnimation> &Rows::rippleBySelection(
 		not_null<Row*> row,
 		Selection selected) {
-	return selected.is<MenuSelection>()
+	return v::is<MenuSelection>(selected)
 		? row->menuToggleRipple
 		: row->ripple;
 }
@@ -796,7 +794,7 @@ void Rows::paintEvent(QPaintEvent *e) {
 	const auto menu = menuToggleArea();
 	const auto selectedIndex = (_menuShownIndex >= 0)
 		? _menuShownIndex
-		: indexFromSelection(_pressed.has_value() ? _pressed : _selected);
+		: indexFromSelection(!v::is_null(_pressed) ? _pressed : _selected);
 	for (auto i = 0, till = count(); i != till; ++i) {
 		const auto &row = rowByIndex(i);
 		if (row.top + row.height <= clip.y()) {
@@ -867,7 +865,7 @@ void Content::setupContent(
 		const Languages &official) {
 	using namespace rpl::mappers;
 
-	const auto current = Lang::LanguageIdOrDefault(Lang::Current().id());
+	const auto current = Lang::LanguageIdOrDefault(Lang::Id());
 	const auto content = Ui::CreateChild<Ui::VerticalLayout>(this);
 	const auto add = [&](const Languages &list, bool areOfficial) {
 		if (list.empty()) {
@@ -880,7 +878,7 @@ void Content::setupContent(
 		const auto inner = wrap->entity();
 		inner->add(object_ptr<Ui::FixedHeightWidget>(
 			inner,
-			st::boxVerticalMargin));
+			st::defaultBox.margin.top()));
 		const auto rows = inner->add(object_ptr<Rows>(
 			inner,
 			list,
@@ -888,7 +886,7 @@ void Content::setupContent(
 			areOfficial));
 		inner->add(object_ptr<Ui::FixedHeightWidget>(
 			inner,
-			st::boxVerticalMargin));
+			st::defaultBox.margin.top()));
 
 		rows->isEmpty() | rpl::start_with_next([=](bool empty) {
 			wrap->toggle(!empty, anim::type::instant);
@@ -1100,10 +1098,13 @@ void LanguageBox::prepare() {
 	) | rpl::start_with_next([=](const Language &language) {
 		// "#custom" is applied each time it's passed to switchToLanguage().
 		// So we check that the language really has changed.
-		if (language.id != Lang::Current().id()) {
+		const auto currentId = [] {
+			return Lang::LanguageIdOrDefault(Lang::Id());
+		};
+		if (language.id != currentId()) {
 			Lang::CurrentCloudManager().switchToLanguage(language);
 			if (inner) {
-				inner->changeChosen(Lang::Current().id());
+				inner->changeChosen(currentId());
 			}
 		}
 	}, inner->lifetime());
@@ -1150,7 +1151,7 @@ void LanguageBox::setInnerFocus() {
 not_null<Ui::MultiSelect*> LanguageBox::createMultiSelect() {
 	const auto result = Ui::CreateChild<Ui::MultiSelect>(
 		this,
-		st::contactsMultiSelect,
+		st::defaultMultiSelect,
 		tr::lng_participant_filter());
 	result->resizeToWidth(st::boxWidth);
 	result->moveToLeft(0, 0);
@@ -1164,15 +1165,19 @@ base::binary_guard LanguageBox::Show() {
 	if (manager.languageList().empty()) {
 		auto guard = std::make_shared<base::binary_guard>(
 			result.make_guard());
-		auto alive = std::make_shared<std::unique_ptr<base::Subscription>>(
-			std::make_unique<base::Subscription>());
-		**alive = manager.languageListChanged().add_subscription([=] {
+		auto lifetime = std::make_shared<rpl::lifetime>();
+		manager.languageListChanged(
+		) | rpl::take(
+			1
+		) | rpl::start_with_next([=]() mutable {
 			const auto show = guard->alive();
-			*alive = nullptr;
+			if (lifetime) {
+				base::take(lifetime)->destroy();
+			}
 			if (show) {
 				Ui::show(Box<LanguageBox>());
 			}
-		});
+		}, *lifetime);
 	} else {
 		Ui::show(Box<LanguageBox>());
 	}

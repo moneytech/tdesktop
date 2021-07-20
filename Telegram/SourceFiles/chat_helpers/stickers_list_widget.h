@@ -8,7 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "chat_helpers/tabbed_selector.h"
-#include "chat_helpers/stickers.h"
+#include "data/stickers/data_stickers.h"
 #include "base/variant.h"
 #include "base/timer.h"
 
@@ -22,8 +22,10 @@ class SessionController;
 
 namespace Ui {
 class LinkButton;
+class PopupMenu;
 class RippleAnimation;
 class BoxContent;
+class PathShiftGradient;
 } // namespace Ui
 
 namespace Lottie {
@@ -32,21 +34,25 @@ class MultiPlayer;
 class FrameRenderer;
 } // namespace Lottie
 
+namespace Data {
+class DocumentMedia;
+class StickersSet;
+} // namespace Data
+
 namespace ChatHelpers {
 
 struct StickerIcon;
 
-class StickersListWidget
-	: public TabbedSelector::Inner
-	, private base::Subscriber {
+class StickersListWidget final : public TabbedSelector::Inner {
 public:
 	StickersListWidget(
 		QWidget *parent,
-		not_null<Window::SessionController*> controller);
+		not_null<Window::SessionController*> controller,
+		bool masks = false);
 
 	Main::Session &session() const;
 
-	rpl::producer<not_null<DocumentData*>> chosen() const;
+	rpl::producer<TabbedSelector::FileChosen> chosen() const;
 	rpl::producer<> scrollUpdated() const;
 	rpl::producer<> checkForHide() const;
 
@@ -63,7 +69,7 @@ public:
 
 	void refreshStickers();
 
-	void fillIcons(QList<StickerIcon> &icons);
+	std::vector<StickerIcon> fillIcons();
 	bool preventAutoHide();
 
 	uint64 currentSet(int yOffset) const;
@@ -76,6 +82,12 @@ public:
 	void searchForSets(const QString &query);
 
 	std::shared_ptr<Lottie::FrameRenderer> getLottieRenderer();
+
+	void fillContextMenu(
+		not_null<Ui::PopupMenu*> menu,
+		SendMenu::Type type) override;
+
+	bool mySetsEmpty() const;
 
 	~StickersListWidget();
 
@@ -111,30 +123,46 @@ private:
 		int section = 0;
 		int index = 0;
 		bool overDelete = false;
+
+		inline bool operator==(OverSticker other) const {
+			return (section == other.section)
+				&& (index == other.index)
+				&& (overDelete == other.overDelete);
+		}
+		inline bool operator!=(OverSticker other) const {
+			return !(*this == other);
+		}
 	};
 	struct OverSet {
 		int section = 0;
+
+		inline bool operator==(OverSet other) const {
+			return (section == other.section);
+		}
+		inline bool operator!=(OverSet other) const {
+			return !(*this == other);
+		}
 	};
 	struct OverButton {
 		int section = 0;
+
+		inline bool operator==(OverButton other) const {
+			return (section == other.section);
+		}
+		inline bool operator!=(OverButton other) const {
+			return !(*this == other);
+		}
 	};
 	struct OverGroupAdd {
+		inline bool operator==(OverGroupAdd other) const {
+			return true;
+		}
+		inline bool operator!=(OverGroupAdd other) const {
+			return !(*this == other);
+		}
 	};
-	friend inline bool operator==(OverSticker a, OverSticker b) {
-		return (a.section == b.section)
-			&& (a.index == b.index)
-			&& (a.overDelete == b.overDelete);
-	}
-	friend inline bool operator==(OverSet a, OverSet b) {
-		return (a.section == b.section);
-	}
-	friend inline bool operator==(OverButton a, OverButton b) {
-		return (a.section == b.section);
-	}
-	friend inline bool operator==(OverGroupAdd a, OverGroupAdd b) {
-		return true;
-	}
-	using OverState = base::optional_variant<
+	using OverState = std::variant<
+		v::null_t,
 		OverSticker,
 		OverSet,
 		OverButton,
@@ -151,51 +179,49 @@ private:
 
 	struct Sticker {
 		not_null<DocumentData*> document;
+		std::shared_ptr<Data::DocumentMedia> documentMedia;
 		Lottie::Animation *animated = nullptr;
+		QPixmap savedFrame;
+
+		void ensureMediaCreated();
 	};
 
 	struct Set {
 		Set(
 			uint64 id,
-			MTPDstickerSet::Flags flags,
+			Data::StickersSet *set,
+			Data::StickersSetFlags flags,
 			const QString &title,
 			const QString &shortName,
-			ImagePtr thumbnail,
-			bool externalLayout,
 			int count,
+			bool externalLayout,
 			std::vector<Sticker> &&stickers = {});
 		Set(Set &&other);
 		Set &operator=(Set &&other);
 		~Set();
 
 		uint64 id = 0;
-		MTPDstickerSet::Flags flags = MTPDstickerSet::Flags();
+		Data::StickersSet *set = nullptr;
+		Data::StickersSetFlags flags;
 		QString title;
 		QString shortName;
-		ImagePtr thumbnail;
 		std::vector<Sticker> stickers;
 		std::unique_ptr<Ui::RippleAnimation> ripple;
-		Lottie::MultiPlayer *lottiePlayer = nullptr;
-		bool externalLayout = false;
+
+		std::unique_ptr<Lottie::MultiPlayer> lottiePlayer;
+		rpl::lifetime lottieLifetime;
+
 		int count = 0;
+		bool externalLayout = false;
 	};
 	struct FeaturedSet {
 		uint64 id = 0;
-		MTPDstickerSet::Flags flags = MTPDstickerSet::Flags();
+		Data::StickersSetFlags flags;
 		std::vector<Sticker> stickers;
 	};
-	struct LottieSet {
-		struct Item {
-			not_null<Lottie::Animation*> animation;
-			bool stale = false;
-		};
-		std::unique_ptr<Lottie::MultiPlayer> player;
-		base::flat_map<DocumentId, Item> items;
-		bool stale = false;
-		rpl::lifetime lifetime;
-	};
 
-	static std::vector<Sticker> PrepareStickers(const Stickers::Pack &pack);
+	static std::vector<Sticker> PrepareStickers(
+		const QVector<DocumentData*> &pack);
 
 	void preloadMoreOfficial();
 	QSize boundingBoxSize() const;
@@ -260,10 +286,11 @@ private:
 	void markLottieFrameShown(Set &set);
 	void checkVisibleLottie();
 	void pauseInvisibleLottieIn(const SectionInfo &info);
-	void destroyLottieIn(Set &set);
-	void refillLottieData();
-	void refillLottieData(Set &set);
-	void clearLottieData();
+	void takeHeavyData(std::vector<Set> &to, std::vector<Set> &from);
+	void takeHeavyData(Set &to, Set &from);
+	void takeHeavyData(Sticker &to, Sticker &from);
+	void clearHeavyIn(Set &set, bool clearSavedFrames = true);
+	void clearHeavyData();
 
 	int stickersRight() const;
 	bool featuredHasAddButton(int index) const;
@@ -273,6 +300,9 @@ private:
 	int megagroupSetInfoLeft() const;
 	void refreshMegagroupSetGeometry();
 	QRect megagroupSetButtonRectFinal() const;
+
+	const Data::StickersSetsOrder &defaultSetsOrder() const;
+	Data::StickersSetsOrder &defaultSetsOrderRef();
 
 	enum class AppendSkip {
 		None,
@@ -294,6 +324,8 @@ private:
 	void setColumnCount(int count);
 	void refreshFooterIcons();
 
+	void showStickerSetBox(not_null<DocumentData*> document);
+
 	void cancelSetsSearch();
 	void showSearchResults();
 	void searchResultsDone(const MTPmessages_FoundStickerSets &result);
@@ -301,7 +333,7 @@ private:
 	void refreshSearchRows(const std::vector<uint64> *cloudSets);
 	void fillLocalSearchRows(const QString &query);
 	void fillCloudSearchRows(const std::vector<uint64> &cloudSets);
-	void addSearchRow(not_null<const Stickers::Set*> set);
+	void addSearchRow(not_null<Data::StickersSet*> set);
 
 	void showPreview();
 
@@ -321,6 +353,7 @@ private:
 	int _officialOffset = 0;
 
 	Section _section = Section::Stickers;
+	const bool _isMasks;
 
 	bool _displayingSet = false;
 	uint64 _removingSetId = 0;
@@ -333,6 +366,8 @@ private:
 	OverState _selected;
 	OverState _pressed;
 	QPoint _lastMousePosition;
+
+	const std::unique_ptr<Ui::PathShiftGradient> _pathGradient;
 
 	Ui::Text::String _megagroupSetAbout;
 	QString _megagroupSetButtonText;
@@ -354,9 +389,7 @@ private:
 	QString _searchQuery, _searchNextQuery;
 	mtpRequestId _searchRequestId = 0;
 
-	base::flat_map<uint64, LottieSet> _lottieData;
-
-	rpl::event_stream<not_null<DocumentData*>> _chosen;
+	rpl::event_stream<TabbedSelector::FileChosen> _chosen;
 	rpl::event_stream<> _scrollUpdated;
 	rpl::event_stream<> _checkForHide;
 

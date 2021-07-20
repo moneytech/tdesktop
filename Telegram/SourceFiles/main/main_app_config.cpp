@@ -20,16 +20,17 @@ constexpr auto kRefreshTimeout = 3600 * crl::time(1000);
 
 AppConfig::AppConfig(not_null<Account*> account) : _account(account) {
 	account->mtpValue(
-	) | rpl::start_with_next([=](MTP::Instance *instance) {
-		if (instance) {
-			_api.emplace(instance);
-			refresh();
-		} else {
-			_api.reset();
-			_requestId = 0;
-		}
+	) | rpl::start_with_next([=](not_null<MTP::Instance*> instance) {
+		_api.emplace(instance);
+		refresh();
 	}, _lifetime);
-	refresh();
+
+	account->sessionChanges(
+	) | rpl::filter([=](Session *session) {
+		return (session != nullptr);
+	}) | rpl::start_with_next([=] {
+		refresh();
+	}, _lifetime);
 }
 
 void AppConfig::refresh() {
@@ -50,7 +51,7 @@ void AppConfig::refresh() {
 			DEBUG_LOG(("getAppConfig result handled."));
 		}
 		_refreshed.fire({});
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_requestId = 0;
 		refreshDelayed();
 	}).send();
@@ -64,6 +65,10 @@ void AppConfig::refreshDelayed() {
 
 rpl::producer<> AppConfig::refreshed() const {
 	return _refreshed.events();
+}
+
+rpl::producer<> AppConfig::value() const {
+	return _refreshed.events_starting_with({});
 }
 
 template <typename Extractor>
@@ -112,6 +117,7 @@ std::vector<QString> AppConfig::getStringArray(
 	return getValue(key, [&](const MTPJSONValue &value) {
 		return value.match([&](const MTPDjsonArray &data) {
 			auto result = std::vector<QString>();
+			result.reserve(data.vvalue().v.size());
 			for (const auto &entry : data.vvalue().v) {
 				if (entry.type() != mtpc_jsonString) {
 					return std::move(fallback);
@@ -123,6 +129,62 @@ std::vector<QString> AppConfig::getStringArray(
 			return std::move(fallback);
 		});
 	});
+}
+
+std::vector<std::map<QString, QString>> AppConfig::getStringMapArray(
+		const QString &key,
+		std::vector<std::map<QString, QString>> &&fallback) const {
+	return getValue(key, [&](const MTPJSONValue &value) {
+		return value.match([&](const MTPDjsonArray &data) {
+			auto result = std::vector<std::map<QString, QString>>();
+			result.reserve(data.vvalue().v.size());
+			for (const auto &entry : data.vvalue().v) {
+				if (entry.type() != mtpc_jsonObject) {
+					return std::move(fallback);
+				}
+				auto element = std::map<QString, QString>();
+				for (const auto &field : entry.c_jsonObject().vvalue().v) {
+					const auto &data = field.c_jsonObjectValue();
+					if (data.vvalue().type() != mtpc_jsonString) {
+						return std::move(fallback);
+					}
+					element.emplace(
+						qs(data.vkey()),
+						qs(data.vvalue().c_jsonString().vvalue()));
+				}
+				result.push_back(std::move(element));
+			}
+			return result;
+		}, [&](const auto &data) {
+			return std::move(fallback);
+		});
+	});
+}
+
+bool AppConfig::suggestionCurrent(const QString &key) const {
+	return !_dismissedSuggestions.contains(key)
+		&& ranges::contains(
+			get<std::vector<QString>>(
+				u"pending_suggestions"_q,
+				std::vector<QString>()),
+			key);
+}
+
+rpl::producer<> AppConfig::suggestionRequested(const QString &key) const {
+	return value(
+	) | rpl::filter([=] {
+		return suggestionCurrent(key);
+	});
+}
+
+void AppConfig::dismissSuggestion(const QString &key) {
+	if (!_dismissedSuggestions.emplace(key).second) {
+		return;
+	}
+	_api->request(MTPhelp_DismissSuggestion(
+		MTP_inputPeerEmpty(),
+		MTP_string(key)
+	)).send();
 }
 
 } // namespace Main

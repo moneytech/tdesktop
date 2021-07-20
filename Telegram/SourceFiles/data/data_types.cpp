@@ -8,9 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_types.h"
 
 #include "data/data_document.h"
-#include "data/data_file_origin.h"
 #include "data/data_session.h"
-#include "ui/image/image_source.h"
 #include "ui/widgets/input_fields.h"
 #include "storage/cache/storage_cache_types.h"
 #include "base/openssl_help.h"
@@ -23,30 +21,11 @@ constexpr auto kDocumentCacheTag = 0x0000000000000100ULL;
 constexpr auto kDocumentCacheMask = 0x00000000000000FFULL;
 constexpr auto kDocumentThumbCacheTag = 0x0000000000000200ULL;
 constexpr auto kDocumentThumbCacheMask = 0x00000000000000FFULL;
-constexpr auto kStorageCacheTag = 0x0000010000000000ULL;
-constexpr auto kStorageCacheMask = 0x000000FFFFFFFFFFULL;
 constexpr auto kWebDocumentCacheTag = 0x0000020000000000ULL;
-constexpr auto kWebDocumentCacheMask = 0x000000FFFFFFFFFFULL;
 constexpr auto kUrlCacheTag = 0x0000030000000000ULL;
-constexpr auto kUrlCacheMask = 0x000000FFFFFFFFFFULL;
 constexpr auto kGeoPointCacheTag = 0x0000040000000000ULL;
-constexpr auto kGeoPointCacheMask = 0x000000FFFFFFFFFFULL;
 
 } // namespace
-
-struct ReplyPreview::Data {
-	Data(std::unique_ptr<Images::Source> &&source, bool good);
-
-	Image image;
-	bool good = false;
-};
-
-ReplyPreview::Data::Data(
-	std::unique_ptr<Images::Source> &&source,
-	bool good)
-: image(std::move(source))
-, good(good) {
-}
 
 Storage::Cache::Key DocumentCacheKey(int32 dcId, uint64 id) {
 	return Storage::Cache::Key{
@@ -64,7 +43,7 @@ Storage::Cache::Key DocumentThumbCacheKey(int32 dcId, uint64 id) {
 }
 
 Storage::Cache::Key WebDocumentCacheKey(const WebFileLocation &location) {
-	const auto CacheDcId = cTestMode() ? 2 : 4;
+	const auto CacheDcId = 4; // The default production value. Doesn't matter.
 	const auto dcId = uint64(CacheDcId) & 0xFFULL;
 	const auto &url = location.url();
 	const auto hash = openssl::Sha256(bytes::make_span(url));
@@ -109,63 +88,6 @@ Storage::Cache::Key GeoPointCacheKey(const GeoPointLocation &location) {
 	};
 }
 
-ReplyPreview::ReplyPreview() = default;
-
-ReplyPreview::ReplyPreview(ReplyPreview &&other) = default;
-
-ReplyPreview &ReplyPreview::operator=(ReplyPreview &&other) = default;
-
-ReplyPreview::~ReplyPreview() = default;
-
-void ReplyPreview::prepare(
-		not_null<Image*> image,
-		FileOrigin origin,
-		Images::Options options) {
-	int w = image->width(), h = image->height();
-	if (w <= 0) w = 1;
-	if (h <= 0) h = 1;
-	auto thumbSize = (w > h)
-		? QSize(
-			w * st::msgReplyBarSize.height() / h,
-			st::msgReplyBarSize.height())
-		: QSize(
-			st::msgReplyBarSize.height(),
-			h * st::msgReplyBarSize.height() / w);
-	thumbSize *= cIntRetinaFactor();
-	const auto prepareOptions = Images::Option::Smooth
-		| Images::Option::TransparentBackground
-		| options;
-	auto outerSize = st::msgReplyBarSize.height();
-	auto bitmap = image->pixNoCache(
-		origin,
-		thumbSize.width(),
-		thumbSize.height(),
-		prepareOptions,
-		outerSize,
-		outerSize);
-	_data = std::make_unique<ReplyPreview::Data>(
-		std::make_unique<Images::ImageSource>(
-			bitmap.toImage(),
-			"PNG"),
-		((options & Images::Option::Blurred) == 0));
-}
-
-void ReplyPreview::clear() {
-	_data = nullptr;
-}
-
-Image *ReplyPreview::image() const {
-	return _data ? &_data->image : nullptr;
-}
-
-bool ReplyPreview::good() const {
-	return !empty() && _data->good;
-}
-
-bool ReplyPreview::empty() const {
-	return !_data;
-}
-
 } // namespace Data
 
 uint32 AudioMsgId::CreateExternalPlayId() {
@@ -208,36 +130,27 @@ void MessageCursor::applyTo(not_null<Ui::InputField*> field) {
 	field->scrollTo(scroll);
 }
 
-HistoryItem *FileClickHandler::getActionItem() const {
-	return Auth().data().message(context());
-}
-
 PeerId PeerFromMessage(const MTPmessage &message) {
 	return message.match([](const MTPDmessageEmpty &) {
 		return PeerId(0);
-	}, [](const auto &message) {
-		const auto fromId = message.vfrom_id();
-		const auto toId = peerFromMTP(message.vto_id());
-		const auto out = message.is_out();
-		return (out || !fromId || !peerIsUser(toId))
-			? toId
-			: peerFromUser(*fromId);
+	}, [](const auto &data) {
+		return peerFromMTP(data.vpeer_id());
 	});
 }
 
 MTPDmessage::Flags FlagsFromMessage(const MTPmessage &message) {
 	return message.match([](const MTPDmessageEmpty &) {
 		return MTPDmessage::Flags(0);
-	}, [](const MTPDmessage &message) {
-		return message.vflags().v;
-	}, [](const MTPDmessageService &message) {
-		return mtpCastFlags(message.vflags().v);
+	}, [](const MTPDmessage &data) {
+		return data.vflags().v;
+	}, [](const MTPDmessageService &data) {
+		return mtpCastFlags(data.vflags().v);
 	});
 }
 
 MsgId IdFromMessage(const MTPmessage &message) {
-	return message.match([](const auto &message) {
-		return message.vid().v;
+	return message.match([](const auto &data) {
+		return data.vid().v;
 	});
 }
 
@@ -247,4 +160,13 @@ TimeId DateFromMessage(const MTPmessage &message) {
 	}, [](const auto &message) {
 		return message.vdate().v;
 	});
+}
+
+bool GoodStickerDimensions(int width, int height) {
+	// Show all .webp (except very large ones) as stickers,
+	// allow to open them in media viewer to see details.
+	constexpr auto kLargetsStickerSide = 2560;
+	return (width > 0)
+		&& (height > 0)
+		&& (width * height <= kLargetsStickerSide * kLargetsStickerSide);
 }

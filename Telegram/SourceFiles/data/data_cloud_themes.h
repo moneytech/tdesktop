@@ -15,7 +15,13 @@ namespace Main {
 class Session;
 } // namespace Main
 
+namespace Window {
+class Controller;
+} // namespace Window
+
 namespace Data {
+
+class DocumentMedia;
 
 struct CloudTheme {
 	uint64 id = 0;
@@ -45,17 +51,25 @@ public:
 
 	void applyUpdate(const MTPTheme &theme);
 
-	void resolve(const QString &slug, const FullMsgId &clickFromMessageId);
-	void showPreview(const MTPTheme &data);
-	void showPreview(const CloudTheme &cloud);
+	void resolve(
+		not_null<Window::Controller*> controller,
+		const QString &slug,
+		const FullMsgId &clickFromMessageId);
+	void showPreview(
+		not_null<Window::Controller*> controller,
+		const MTPTheme &data);
+	void showPreview(
+		not_null<Window::Controller*> controller,
+		const CloudTheme &cloud);
 	void applyFromDocument(const CloudTheme &cloud);
 
 private:
 	struct LoadingDocument {
 		CloudTheme theme;
 		DocumentData *document = nullptr;
+		std::shared_ptr<Data::DocumentMedia> documentMedia;
 		rpl::lifetime subscription;
-		Fn<void()> callback;
+		Fn<void(std::shared_ptr<Data::DocumentMedia>)> callback;
 	};
 
 	void parseThemes(const QVector<MTPTheme> &list);
@@ -66,12 +80,14 @@ private:
 	[[nodiscard]] bool needReload() const;
 	void scheduleReload();
 	void reloadCurrent();
-	void previewFromDocument(const CloudTheme &cloud);
+	void previewFromDocument(
+		not_null<Window::Controller*> controller,
+		const CloudTheme &cloud);
 	void loadDocumentAndInvoke(
 		LoadingDocument &value,
 		const CloudTheme &cloud,
 		not_null<DocumentData*> document,
-		Fn<void()> callback);
+		Fn<void(std::shared_ptr<Data::DocumentMedia>)> callback);
 	void invokeForLoaded(LoadingDocument &value);
 
 	const not_null<Main::Session*> _session;

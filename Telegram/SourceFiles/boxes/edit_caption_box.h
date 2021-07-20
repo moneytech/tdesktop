@@ -8,10 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "boxes/abstract_box.h"
-#include "storage/storage_media_prepare.h"
-#include "ui/wrap/slide_wrap.h"
-#include "media/clip/media_clip_reader.h"
-#include "mtproto/mtproto_rpc_sender.h"
+#include "ui/chat/attach/attach_prepare.h"
 
 namespace ChatHelpers {
 class TabbedPanel;
@@ -22,29 +19,25 @@ class SessionController;
 } // namespace Window
 
 namespace Data {
-class Media;
+class PhotoMedia;
 } // namespace Data
 
 namespace Ui {
+class AbstractSinglePreview;
 class InputField;
 class EmojiButton;
-class IconButton;
-class Checkbox;
+class VerticalLayout;
+class FadeShadow;
+enum class AlbumType;
 } // namespace Ui
 
-namespace Window {
-class SessionController;
-} // namespace Window
-
-class EditCaptionBox
-	: public Ui::BoxContent
-	, public RPCSender
-	, private base::Subscriber {
+class EditCaptionBox final : public Ui::BoxContent {
 public:
 	EditCaptionBox(
 		QWidget*,
 		not_null<Window::SessionController*> controller,
 		not_null<HistoryItem*> item);
+	~EditCaptionBox();
 
 protected:
 	void prepare() override;
@@ -55,77 +48,60 @@ protected:
 	void keyPressEvent(QKeyEvent *e) override;
 
 private:
+	void rebuildPreview();
+	void setupEditEventHandler();
+	void setupPhotoEditorEventHandler();
+	void setupShadows();
+	void setupField();
+	void setupControls();
+
 	void updateBoxSize();
-	void prepareGifPreview(DocumentData* document = nullptr);
-	void clipCallback(Media::Clip::Notification notification);
+	void captionResized();
 
 	void setupEmojiPanel();
 	void updateEmojiPanelGeometry();
 	void emojiFilterForGeometry(not_null<QEvent*> event);
 
+	void setupDragArea();
+
 	void save();
-	void captionResized();
 
-	void saveDone(const MTPUpdates &updates);
-	bool saveFail(const RPCError &error);
-
-	void setName(QString nameString, qint64 size);
 	bool fileFromClipboard(not_null<const QMimeData*> data);
-	void updateEditPreview();
-	void updateEditMediaButton();
 
 	int errorTopSkip() const;
 
-	void createEditMediaButton();
+	bool setPreparedList(Ui::PreparedList &&list);
 
-	inline QString getNewMediaPath() {
-		return _preparedList.files.empty()
-			? QString()
-			: _preparedList.files.front().path;
-	}
+	const not_null<Window::SessionController*> _controller;
+	const not_null<HistoryItem*> _historyItem;
+	const bool _isAllowedEditMedia = false;
+	const Ui::AlbumType _albumType;
 
-	not_null<Window::SessionController*> _controller;
-	FullMsgId _msgId;
-	Image *_thumbnailImage = nullptr;
-	bool _thumbnailImageLoaded = false;
-	Fn<void()> _refreshThumbnail;
-	bool _animated = false;
-	bool _photo = false;
-	bool _doc = false;
+	const base::unique_qptr<Ui::VerticalLayout> _controls;
+	const base::unique_qptr<Ui::ScrollArea> _scroll;
+	const base::unique_qptr<Ui::InputField> _field;
+	const base::unique_qptr<Ui::EmojiButton> _emojiToggle;
+	const base::unique_qptr<Ui::FadeShadow> _topShadow,_bottomShadow;
 
-	QPixmap _thumb;
-	Media::Clip::ReaderPointer _gifPreview;
-
-	object_ptr<Ui::InputField> _field = { nullptr };
-	object_ptr<Ui::EmojiButton> _emojiToggle = { nullptr };
+	base::unique_qptr<Ui::AbstractSinglePreview> _content;
 	base::unique_qptr<ChatHelpers::TabbedPanel> _emojiPanel;
 	base::unique_qptr<QObject> _emojiFilter;
 
-	int _thumbx = 0;
-	int _thumbw = 0;
-	int _thumbh = 0;
-	Ui::Text::String _name;
-	QString _status;
-	bool _isAudio = false;
-	bool _isImage = false;
+	std::shared_ptr<Data::PhotoMedia> _photoMedia;
 
-	int _gifw = 0;
-	int _gifh = 0;
-	int _gifx = 0;
+	Ui::PreparedList _preparedList;
 
-	Storage::PreparedList _preparedList;
-
-	bool _previewCancelled = false;
 	mtpRequestId _saveRequestId = 0;
 
-	object_ptr<Ui::IconButton> _editMedia = nullptr;
-	Ui::SlideWrap<Ui::RpWidget> *_wayWrap = nullptr;
-	QString _newMediaPath;
-	bool _isAllowedEditMedia = false;
-	bool _isAlbum = false;
 	bool _asFile = false;
-	rpl::event_stream<> _editMediaClicks;
 
 	QString _error;
+
+	rpl::variable<bool> _isPhoto = false;
+	rpl::variable<int> _footerHeight = 0;
+
+	rpl::event_stream<> _editMediaClicks;
+	rpl::event_stream<> _photoEditorOpens;
+	rpl::event_stream<int> _contentHeight;
 
 };

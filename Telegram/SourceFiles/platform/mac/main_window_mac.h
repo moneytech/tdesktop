@@ -35,11 +35,11 @@ public:
 
 	void updateWindowIcon() override;
 
-	class Private;
-
-public slots:
 	void psShowTrayMenu();
 
+	class Private;
+
+public Q_SLOTS:
 	void psMacUndo();
 	void psMacRedo();
 	void psMacCut();
@@ -65,19 +65,16 @@ protected:
 	void titleVisibilityChangedHook() override;
 	void unreadCounterChangedHook() override;
 
-	QImage psTrayIcon(bool selected = false) const;
 	bool hasTrayIcon() const override {
 		return trayIcon;
 	}
 
 	void updateGlobalMenuHook() override;
 
-	void workmodeUpdated(DBIWorkMode mode) override;
+	void workmodeUpdated(Core::Settings::WorkMode mode) override;
 
 	QSystemTrayIcon *trayIcon = nullptr;
 	QMenu *trayIconMenu = nullptr;
-
-	QImage trayImg, trayImgSel;
 
 	void psTrayMenuUpdated();
 	void psSetupTrayIcon();
@@ -92,10 +89,10 @@ protected:
 private:
 	friend class Private;
 
-	void initTouchBar();
 	void hideAndDeactivate();
 	void updateTitleCounter();
 	void updateIconCounters();
+	[[nodiscard]] QIcon generateIconForTray(int counter, bool muted) const;
 
 	std::unique_ptr<Private> _private;
 
@@ -103,6 +100,8 @@ private:
 	mutable QTimer psIdleTimer;
 
 	base::Timer _hideAfterFullScreenTimer;
+
+	rpl::variable<bool> _canApplyMarkdown;
 
 	QMenuBar psMainMenu;
 	QAction *psLogout = nullptr;

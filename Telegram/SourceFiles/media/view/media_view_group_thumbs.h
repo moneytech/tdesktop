@@ -15,6 +15,10 @@ class SharedMediaWithLastSlice;
 class UserPhotosSlice;
 struct WebPageCollage;
 
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace Media {
 namespace View {
 
@@ -33,19 +37,22 @@ public:
 
 		int size() const;
 	};
-	using Key = base::variant<PhotoId, FullMsgId, CollageKey>;
+	using Key = std::variant<PhotoId, FullMsgId, CollageKey>;
 
 	static void Refresh(
+		not_null<Main::Session*> session,
 		std::unique_ptr<GroupThumbs> &instance,
 		const SharedMediaWithLastSlice &slice,
 		int index,
 		int availableWidth);
 	static void Refresh(
+		not_null<Main::Session*> session,
 		std::unique_ptr<GroupThumbs> &instance,
 		const UserPhotosSlice &slice,
 		int index,
 		int availableWidth);
 	static void Refresh(
+		not_null<Main::Session*> session,
 		std::unique_ptr<GroupThumbs> &instance,
 		const CollageSlice &slice,
 		int index,
@@ -73,12 +80,13 @@ public:
 		return _lifetime;
 	}
 
-	using Context = base::optional_variant<
+	using Context = std::variant<
+		v::null_t,
 		PeerId,
 		MessageGroupId,
 		FullMsgId>;
 
-	GroupThumbs(Context context);
+	GroupThumbs(not_null<Main::Session*> session, Context context);
 	~GroupThumbs();
 
 private:
@@ -86,6 +94,7 @@ private:
 
 	template <typename Slice>
 	static void RefreshFromSlice(
+		not_null<Main::Session*> session,
 		std::unique_ptr<GroupThumbs> &instance,
 		const Slice &slice,
 		int index,
@@ -100,7 +109,11 @@ private:
 		Key key,
 		const WebPageCollage &collage,
 		int index);
-	std::unique_ptr<Thumb> createThumb(Key key, Image *image);
+	std::unique_ptr<Thumb> createThumb(Key key, not_null<PhotoData*> photo);
+	std::unique_ptr<Thumb> createThumb(
+		Key key,
+		not_null<DocumentData*> document);
+	std::unique_ptr<Thumb> createThumb(Key key, std::nullptr_t);
 
 	void update();
 	void countUpdatedRect();
@@ -111,6 +124,7 @@ private:
 	void animatePreviouslyAlive(const std::vector<not_null<Thumb*>> &old);
 	void startDelayedAnimation();
 
+	const not_null<Main::Session*> _session;
 	Context _context;
 	bool _waitingForAnimationStart = true;
 	Ui::Animations::Simple _animation;

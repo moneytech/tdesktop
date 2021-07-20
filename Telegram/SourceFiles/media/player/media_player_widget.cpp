@@ -11,11 +11,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_document.h"
 #include "data/data_session.h"
 #include "data/data_peer.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/continuous_sliders.h"
 #include "ui/widgets/shadow.h"
 #include "ui/widgets/buttons.h"
 #include "ui/effects/ripple_animation.h"
+#include "ui/text/format_values.h"
+#include "ui/text/format_song_document_name.h"
 #include "lang/lang_keys.h"
 #include "media/audio/media_audio.h"
 #include "media/view/media_view_playback_progress.h"
@@ -25,8 +29,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_media_player.h"
 #include "styles/style_media_view.h"
 #include "history/history_item.h"
-#include "storage/localstorage.h"
-#include "layout.h"
+#include "storage/storage_account.h"
 #include "main/main_session.h"
 #include "facades.h"
 
@@ -80,7 +83,9 @@ QPoint Widget::PlayButton::prepareRippleStartPosition() const {
 	return QPoint(mapFromGlobal(QCursor::pos()) - st::mediaPlayerButton.rippleAreaPosition);
 }
 
-Widget::Widget(QWidget *parent) : RpWidget(parent)
+Widget::Widget(QWidget *parent, not_null<Main::Session*> session)
+: RpWidget(parent)
+, _session(session)
 , _nameLabel(this, st::mediaPlayerName)
 , _timeLabel(this, st::mediaPlayerTime)
 , _playPause(this)
@@ -124,11 +129,17 @@ Widget::Widget(QWidget *parent) : RpWidget(parent)
 
 	updateVolumeToggleIcon();
 	_volumeToggle->setClickedCallback([=] {
-		Global::SetSongVolume((Global::SongVolume() > 0) ? 0. : Global::RememberedSongVolume());
-		mixer()->setSongVolume(Global::SongVolume());
-		Global::RefSongVolumeChanged().notify();
+		const auto volume = (Core::App().settings().songVolume() > 0)
+			? 0.
+			: Core::App().settings().rememberedSongVolume();
+		Core::App().settings().setSongVolume(volume);
+		Core::App().saveSettingsDelayed();
+		mixer()->setSongVolume(volume);
 	});
-	subscribe(Global::RefSongVolumeChanged(), [this] { updateVolumeToggleIcon(); });
+	Core::App().settings().songVolumeChanges(
+	) | rpl::start_with_next([=] {
+		updateVolumeToggleIcon();
+	}, lifetime());
 
 	updateRepeatTrackIcon();
 	_repeatTrack->setClickedCallback([=] {
@@ -137,11 +148,11 @@ Widget::Widget(QWidget *parent) : RpWidget(parent)
 
 	updatePlaybackSpeedIcon();
 	_playbackSpeed->setClickedCallback([=] {
-		const auto doubled = !Global::VoiceMsgPlaybackDoubled();
-		Global::SetVoiceMsgPlaybackDoubled(doubled);
+		const auto doubled = !Core::App().settings().voiceMsgPlaybackDoubled();
+		Core::App().settings().setVoiceMsgPlaybackDoubled(doubled);
 		instance()->updateVoicePlaybackSpeed();
 		updatePlaybackSpeedIcon();
-		Local::writeUserSettings();
+		Core::App().saveSettingsDelayed();
 	});
 
 	subscribe(instance()->repeatChangedNotifier(), [this](AudioMsgId::Type type) {
@@ -176,7 +187,7 @@ Widget::Widget(QWidget *parent) : RpWidget(parent)
 
 void Widget::updateVolumeToggleIcon() {
 	auto icon = []() -> const style::icon * {
-		auto volume = Global::SongVolume();
+		auto volume = Core::App().settings().songVolume();
 		if (volume > 0) {
 			if (volume < 1 / 3.) {
 				return &st::mediaPlayerVolumeIcon1;
@@ -193,6 +204,11 @@ void Widget::updateVolumeToggleIcon() {
 void Widget::setCloseCallback(Fn<void()> callback) {
 	_closeCallback = std::move(callback);
 	_close->setClickedCallback([this] { stopAndClose(); });
+}
+
+void Widget::setShowItemCallback(
+		Fn<void(not_null<const HistoryItem*>)> callback) {
+	_showItemCallback = std::move(callback);
 }
 
 void Widget::stopAndClose() {
@@ -240,7 +256,7 @@ Widget::~Widget() = default;
 void Widget::handleSeekProgress(float64 progress) {
 	if (!_lastDurationMs) return;
 
-	const auto positionMs = snap(
+	const auto positionMs = std::clamp(
 		static_cast<crl::time>(progress * _lastDurationMs),
 		crl::time(0),
 		_lastDurationMs);
@@ -255,10 +271,6 @@ void Widget::handleSeekProgress(float64 progress) {
 void Widget::handleSeekFinished(float64 progress) {
 	if (!_lastDurationMs) return;
 
-	const auto positionMs = snap(
-		static_cast<crl::time>(progress * _lastDurationMs),
-		crl::time(0),
-		_lastDurationMs);
 	_seekPositionMs = -1;
 
 	instance()->finishSeeking(_type, progress);
@@ -300,11 +312,16 @@ void Widget::mousePressEvent(QMouseEvent *e) {
 
 void Widget::mouseReleaseEvent(QMouseEvent *e) {
 	if (auto downLabels = base::take(_labelsDown)) {
-		if (_labelsOver == downLabels) {
-			if (_type == AudioMsgId::Type::Voice) {
-				auto current = instance()->current(_type);
-				if (auto item = Auth().data().message(current.contextId())) {
-					Ui::showPeerHistoryAtItem(item);
+		if (_labelsOver != downLabels) {
+			return;
+		}
+		if (_type == AudioMsgId::Type::Voice) {
+			const auto current = instance()->current(_type);
+			const auto document = current.audio();
+			const auto context = current.contextId();
+			if (document && context && _showItemCallback) {
+				if (const auto item = document->owner().message(context)) {
+					_showItemCallback(item);
 				}
 			}
 		}
@@ -379,7 +396,7 @@ void Widget::updateRepeatTrackIcon() {
 }
 
 void Widget::updatePlaybackSpeedIcon() {
-	const auto doubled = Global::VoiceMsgPlaybackDoubled();
+	const auto doubled = Core::App().settings().voiceMsgPlaybackDoubled();
 	const auto isDefaultSpeed = !doubled;
 	_playbackSpeed->setIconOverride(
 		isDefaultSpeed ? &st::mediaPlayerSpeedDisabledIcon : nullptr,
@@ -443,7 +460,6 @@ void Widget::handleSongUpdate(const TrackState &state) {
 		_playbackProgress->updateState(state);
 	}
 
-	auto stopped = IsStoppedOrStopping(state.state);
 	auto showPause = ShowPauseIcon(state.state);
 	if (instance()->isSeeking(_type)) {
 		showPause = true;
@@ -462,13 +478,11 @@ void Widget::handleSongUpdate(const TrackState &state) {
 }
 
 void Widget::updateTimeText(const TrackState &state) {
-	QString time;
-	qint64 position = 0, length = 0, display = 0;
+	qint64 display = 0;
 	const auto frequency = state.frequency;
 	const auto document = state.id.audio();
 	if (!IsStoppedOrStopping(state.state)) {
-		display = position = state.position;
-		length = state.length;
+		display = state.position;
 	} else if (state.length) {
 		display = state.length;
 	} else if (const auto song = document->song()) {
@@ -482,7 +496,7 @@ void Widget::updateTimeText(const TrackState &state) {
 		_playbackSlider->setDisabled(true);
 	} else {
 		display = display / frequency;
-		_time = formatDurationText(display);
+		_time = Ui::FormatDurationText(display);
 		_playbackSlider->setDisabled(false);
 	}
 	if (_seekPositionMs < 0) {
@@ -494,7 +508,7 @@ void Widget::updateTimeLabel() {
 	auto timeLabelWidth = _timeLabel->width();
 	if (_seekPositionMs >= 0) {
 		auto playAlready = _seekPositionMs / 1000LL;
-		_timeLabel->setText(formatDurationText(playAlready));
+		_timeLabel->setText(Ui::FormatDurationText(playAlready));
 	} else {
 		_timeLabel->setText(_time);
 	}
@@ -516,7 +530,7 @@ void Widget::handleSongChange() {
 
 	TextWithEntities textWithEntities;
 	if (document->isVoiceMessage() || document->isVideoMessage()) {
-		if (const auto item = Auth().data().message(current.contextId())) {
+		if (const auto item = document->owner().message(current.contextId())) {
 			const auto name = item->fromOriginal()->name;
 			const auto date = [item] {
 				const auto parsed = ItemDateTime(item);
@@ -544,7 +558,7 @@ void Widget::handleSongChange() {
 
 			textWithEntities.text = name + ' ' + date();
 			textWithEntities.entities.append(EntityInText(
-				EntityType::Bold,
+				EntityType::Semibold,
 				0,
 				name.size(),
 				QString()));
@@ -552,21 +566,8 @@ void Widget::handleSongChange() {
 			textWithEntities.text = tr::lng_media_audio(tr::now);
 		}
 	} else {
-		const auto song = document->song();
-		if (!song || song->performer.isEmpty()) {
-			textWithEntities.text = (!song || song->title.isEmpty())
-				? (document->filename().isEmpty()
-					? qsl("Unknown Track")
-					: document->filename())
-				: song->title;
-		} else {
-			auto title = song->title.isEmpty()
-				? qsl("Unknown Track")
-				: TextUtilities::Clean(song->title);
-			auto dash = QString::fromUtf8(" \xe2\x80\x93 ");
-			textWithEntities.text = song->performer + dash + title;
-			textWithEntities.entities.append({ EntityType::Bold, 0, song->performer.size(), QString() });
-		}
+		textWithEntities = Ui::Text::FormatSongNameFor(document)
+			.textWithEntities(true);
 	}
 	_nameLabel->setMarkedText(textWithEntities);
 

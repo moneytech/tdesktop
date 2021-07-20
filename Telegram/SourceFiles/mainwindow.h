@@ -7,7 +7,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "platform/platform_specific.h"
 #include "platform/platform_main_window.h"
 #include "base/unique_qptr.h"
 #include "ui/layers/layer_widget.h"
@@ -17,11 +16,12 @@ class MainWidget;
 
 namespace Intro {
 class Widget;
+enum class EnterPoint : uchar;
 } // namespace Intro
 
-namespace Local {
-class ClearManager;
-} // namespace Local
+namespace Media {
+class SystemMediaControlsManager;
+} // namespace Media
 
 namespace Window {
 class MediaPreviewWidget;
@@ -43,48 +43,36 @@ class LayerStackWidget;
 class MediaPreviewWidget;
 
 class MainWindow : public Platform::MainWindow {
-	Q_OBJECT
-
 public:
 	explicit MainWindow(not_null<Window::Controller*> controller);
 	~MainWindow();
 
 	void finishFirstShow();
 
+	void preventOrInvoke(Fn<void()> callback);
+
 	void setupPasscodeLock();
 	void clearPasscodeLock();
-	void setupIntro();
+	void setupIntro(Intro::EnterPoint point);
 	void setupMain();
 
-	MainWidget *chatsWidget() {
-		return mainWidget();
-	}
+	void showSettings();
 
-	MainWidget *mainWidget();
+	void setInnerFocus() override;
+
+	MainWidget *sessionContent() const;
 
 	[[nodiscard]] bool doWeMarkAsRead();
 
-	void activate();
 
-	void noIntro(Intro::Widget *was);
 	bool takeThirdSectionFromLayer();
 
 	void checkHistoryActivation();
 
-	void fixOrder();
-
-	enum TempDirState {
-		TempDirRemoving,
-		TempDirExists,
-		TempDirEmpty,
-	};
-	TempDirState tempDirState();
-	TempDirState localStorageState();
-	void tempDirDelete(int task);
-
 	void sendPaths();
 
 	QImage iconWithCounter(int size, int count, style::color bg, style::color fg, bool smallIcon) override;
+	void placeSmallCounter(QImage &img, int size, int count, style::color bg, const QPoint &shift, style::color color) override;
 
 	bool contentOverlapped(const QRect &globalRect);
 	bool contentOverlapped(QWidget *w, QPaintEvent *e) {
@@ -95,8 +83,13 @@ public:
 	}
 
 	void showMainMenu();
-	void updateTrayMenu(bool force = false) override;
+	void updateTrayMenu() override;
+	void fixOrder() override;
 
+	void showLayer(
+		std::unique_ptr<Ui::LayerWidget> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated);
 	void showSpecialLayer(
 		object_ptr<Ui::LayerWidget> layer,
 		anim::type animated);
@@ -110,10 +103,10 @@ public:
 	void ui_hideSettingsAndLayer(anim::type animated);
 	void ui_removeLayerBlackout();
 	bool ui_isLayerShown();
-	void showMediaPreview(
+	bool showMediaPreview(
 		Data::FileOrigin origin,
 		not_null<DocumentData*> document);
-	void showMediaPreview(
+	bool showMediaPreview(
 		Data::FileOrigin origin,
 		not_null<PhotoData*> photo);
 	void hideMediaPreview();
@@ -125,28 +118,8 @@ protected:
 	void closeEvent(QCloseEvent *e) override;
 
 	void initHook() override;
-	void updateIsActiveHook() override;
+	void activeChangedHook() override;
 	void clearWidgetsHook() override;
-
-public slots:
-	void showSettings();
-	void setInnerFocus();
-
-	void quitFromTray();
-	void showFromTray(QSystemTrayIcon::ActivationReason reason = QSystemTrayIcon::Unknown);
-	void toggleDisplayNotifyFromTray();
-
-	void onClearFinished(int task, void *manager);
-	void onClearFailed(int task, void *manager);
-
-	void onShowAddContact();
-	void onShowNewGroup();
-	void onShowNewChannel();
-	void onLogout();
-
-signals:
-	void tempDirCleared(int task);
-	void tempDirClearFailed(int task);
 
 private:
 	[[nodiscard]] bool skipTrayClick() const;
@@ -159,15 +132,27 @@ private:
 	void ensureLayerCreated();
 	void destroyLayer();
 
+	void showBoxOrLayer(
+		std::variant<
+			v::null_t,
+			object_ptr<Ui::BoxContent>,
+			std::unique_ptr<Ui::LayerWidget>> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated);
+
 	void themeUpdated(const Window::Theme::BackgroundUpdate &data);
+
+	void toggleDisplayNotifyFromTray();
 
 	QPixmap grabInner();
 
-	void placeSmallCounter(QImage &img, int size, int count, style::color bg, const QPoint &shift, style::color color) override;
+	std::unique_ptr<Media::SystemMediaControlsManager> _mediaControlsManager;
+
 	QImage icon16, icon32, icon64, iconbig16, iconbig32, iconbig64;
 
 	crl::time _lastTrayClickTime = 0;
 	QPoint _lastMousePosition;
+	bool _activeForTrayIconAction = true;
 
 	object_ptr<Window::PasscodeLockWidget> _passcodeLock = { nullptr };
 	object_ptr<Intro::Widget> _intro = { nullptr };
@@ -177,7 +162,7 @@ private:
 
 	object_ptr<Window::Theme::WarningWidget> _testingThemeWarning = { nullptr };
 
-	Local::ClearManager *_clearManager = nullptr;
+	rpl::event_stream<> _updateTrayMenuTextActions;
 
 };
 

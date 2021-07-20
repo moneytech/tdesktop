@@ -18,6 +18,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace Export {
 namespace View {
+namespace {
+
+constexpr auto kShowSkipFileTimeout = 5 * crl::time(1000);
+
+} // namespace
 
 class ProgressWidget::Row : public Ui::RpWidget {
 public:
@@ -235,12 +240,25 @@ ProgressWidget::ProgressWidget(
 	QWidget *parent,
 	rpl::producer<Content> content)
 : RpWidget(parent)
-, _body(this) {
+, _body(this)
+, _fileShowSkipTimer([=] { _skipFile->show(anim::type::normal); }) {
 	widthValue(
 	) | rpl::start_with_next([=](int width) {
 		_body->resizeToWidth(width);
 		_body->moveToLeft(0, 0);
 	}, _body->lifetime());
+
+	auto skipFileWrap = _body->add(object_ptr<Ui::FixedHeightWidget>(
+		_body.data(),
+		st::defaultLinkButton.font->height + st::exportProgressRowSkip));
+	_skipFile = base::make_unique_q<Ui::FadeWrap<Ui::LinkButton>>(
+		skipFileWrap,
+		object_ptr<Ui::LinkButton>(
+			this,
+			tr::lng_export_skip_file(tr::now),
+			st::defaultLinkButton));
+	_skipFile->hide(anim::type::instant);
+	_skipFile->moveToLeft(st::exportProgressRowPadding.left(), 0);
 
 	_about = _body->add(
 		object_ptr<Ui::FlatLabel>(
@@ -262,9 +280,14 @@ ProgressWidget::ProgressWidget(
 	setupBottomButton(_cancel.get());
 }
 
+rpl::producer<uint64> ProgressWidget::skipFileClicks() const {
+	return _skipFile->entity()->clicks(
+	) | rpl::map([=] { return _fileRandomId; });
+}
+
 rpl::producer<> ProgressWidget::cancelClicks() const {
 	return _cancel
-		? (_cancel->clicks() | rpl::map([] { return rpl::empty_value(); }))
+		? (_cancel->clicks() | rpl::to_empty)
 		: (rpl::never<>() | rpl::type_erased());
 }
 
@@ -288,25 +311,50 @@ void ProgressWidget::updateState(Content &&content) {
 		showDone();
 	}
 
+	const auto wasCount = _rows.size();
 	auto index = 0;
 	for (auto &row : content.rows) {
 		if (index < _rows.size()) {
 			_rows[index]->updateData(std::move(row));
 		} else {
+			if (index > 0) {
+				_body->insert(
+					index * 2 - 1,
+					object_ptr<Ui::FixedHeightWidget>(
+						this,
+						st::exportProgressRowSkip));
+			}
 			_rows.push_back(_body->insert(
-				index,
+				index * 2,
 				object_ptr<Row>(this, std::move(row)),
 				st::exportProgressRowPadding));
+			_rows.back()->show();
 		}
 		++index;
 	}
+	const auto fileRandomId = !content.rows.empty()
+		? content.rows.back().randomId
+		: uint64(0);
+	if (_fileRandomId != fileRandomId) {
+		_fileShowSkipTimer.cancel();
+		_skipFile->hide(anim::type::normal);
+		_fileRandomId = fileRandomId;
+		if (_fileRandomId) {
+			_fileShowSkipTimer.callOnce(kShowSkipFileTimeout);
+		}
+	}
 	for (const auto count = _rows.size(); index != count; ++index) {
 		_rows[index]->updateData(Content::Row());
+	}
+	if (_rows.size() != wasCount) {
+		_body->resizeToWidth(width());
 	}
 }
 
 void ProgressWidget::showDone() {
 	_cancel = nullptr;
+	_skipFile->hide(anim::type::instant);
+	_fileShowSkipTimer.cancel();
 	_about->setText(tr::lng_export_about_done(tr::now));
 	_done = base::make_unique_q<Ui::RoundButton>(
 		this,
@@ -321,9 +369,8 @@ void ProgressWidget::showDone() {
 		_done->setFullWidth(desired);
 	}
 	_done->clicks(
-	) | rpl::map([] {
-		return rpl::empty_value();
-	}) | rpl::start_to_stream(_doneClicks, _done->lifetime());
+	) | rpl::to_empty
+	| rpl::start_to_stream(_doneClicks, _done->lifetime());
 	setupBottomButton(_done.get());
 }
 

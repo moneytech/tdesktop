@@ -65,13 +65,17 @@ QByteArray DnsUserAgent() {
 	static const auto kResult = QByteArray(
 		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
 		"AppleWebKit/537.36 (KHTML, like Gecko) "
-		"Chrome/77.0.3865.90 Safari/537.36");
+		"Chrome/91.0.4472.114 Safari/537.36");
 	return kResult;
 }
 
 std::vector<DnsEntry> ParseDnsResponse(
 		const QByteArray &bytes,
 		std::optional<int> typeRestriction) {
+	if (bytes.isEmpty()) {
+		return {};
+	}
+
 	// Read and store to "result" all the data bytes from the response:
 	// { ..,
 	//   "Answer": [
@@ -294,7 +298,7 @@ void DomainResolver::performRequest(
 			request.setRawHeader("Host", host.toLatin1());
 		}
 	} break;
-	default: Unexpected("Type in SpecialConfigRequest::performRequest.");
+	default: Unexpected("Type in DomainResolver::performRequest.");
 	}
 	request.setUrl(url);
 	request.setRawHeader("User-Agent", DnsUserAgent());
@@ -339,7 +343,7 @@ QByteArray DomainResolver::finalizeRequest(
 		const AttemptKey &key,
 		not_null<QNetworkReply*> reply) {
 	if (reply->error() != QNetworkReply::NoError) {
-		LOG(("Resolve Error: Failed to get response, error: %2 (%3)"
+		DEBUG_LOG(("Resolve Error: Failed to get response, error: %2 (%3)"
 			).arg(reply->errorString()
 			).arg(reply->error()));
 	}

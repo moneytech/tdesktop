@@ -10,28 +10,36 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lang/lang_keys.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/shadow.h"
+#include "ui/cached_round_corners.h"
 #include "mainwidget.h"
-#include "facades.h"
-#include "app.h"
 #include "styles/style_layers.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 namespace Window {
 
 HistoryHider::HistoryHider(
 	QWidget *parent,
 	const QString &text,
-	Fn<bool(PeerId)> confirm)
+	Fn<bool(PeerId)> confirm,
+	rpl::producer<bool> oneColumnValue)
 : RpWidget(parent)
 , _text(text)
 , _confirm(std::move(confirm)) {
-	subscribe(Lang::Current().updated(), [=] { refreshLang(); });
-	subscribe(Global::RefPeerChooseCancel(), [=] { startHide(); });
+	Lang::Updated(
+	) | rpl::start_with_next([=] {
+		refreshLang();
+	}, lifetime());
 
 	_chooseWidth = st::historyForwardChooseFont->width(_text);
 
 	resizeEvent(0);
 	_a_opacity.start([this] { update(); }, 0., 1., st::boxDuration);
+
+	std::move(
+		oneColumnValue
+	) | rpl::start_with_next([=](bool oneColumn) {
+		_isOneColumn = oneColumn;
+	}, lifetime());
 }
 
 void HistoryHider::refreshLang() {
@@ -53,7 +61,7 @@ void HistoryHider::paintEvent(QPaintEvent *e) {
 	p.setFont(st::historyForwardChooseFont);
 	auto w = st::historyForwardChooseMargins.left() + _chooseWidth + st::historyForwardChooseMargins.right();
 	auto h = st::historyForwardChooseMargins.top() + st::historyForwardChooseFont->height + st::historyForwardChooseMargins.bottom();
-	App::roundRect(p, (width() - w) / 2, (height() - h) / 2, w, h, st::historyForwardChooseBg, ForwardCorners);
+	Ui::FillRoundRect(p, (width() - w) / 2, (height() - h) / 2, w, h, st::historyForwardChooseBg, Ui::ForwardCorners);
 
 	p.setPen(st::historyForwardChooseFg);
 	p.drawText(_box, _text, QTextOption(style::al_center));
@@ -77,7 +85,7 @@ void HistoryHider::startHide() {
 	if (_hiding) return;
 
 	_hiding = true;
-	if (Adaptive::OneColumn()) {
+	if (_isOneColumn) {
 		crl::on_main(this, [=] { _hidden.fire({}); });
 	} else {
 		_a_opacity.start([=] { animationCallback(); }, 1., 0., st::boxDuration);

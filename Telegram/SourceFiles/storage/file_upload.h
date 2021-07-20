@@ -8,13 +8,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "api/api_common.h"
+#include "base/timer.h"
 #include "mtproto/facade.h"
-
-#include <QtCore/QTimer>
 
 class ApiWrap;
 struct FileLoadResult;
 struct SendMediaReady;
+
+namespace Api {
+enum class SendProgressType;
+} // namespace Api
+
+namespace Main {
+class Session;
+} // namespace Main
 
 namespace Storage {
 
@@ -26,21 +33,16 @@ struct UploadedPhoto {
 	Api::SendOptions options;
 	MTPInputFile file;
 	bool edit = false;
+	std::vector<MTPInputDocument> attachedStickers;
 };
 
 struct UploadedDocument {
 	FullMsgId fullId;
 	Api::SendOptions options;
 	MTPInputFile file;
+	std::optional<MTPInputFile> thumb;
 	bool edit = false;
-};
-
-struct UploadedThumbDocument {
-	FullMsgId fullId;
-	Api::SendOptions options;
-	MTPInputFile file;
-	MTPInputFile thumb;
-	bool edit = false;
+	std::vector<MTPInputDocument> attachedStickers;
 };
 
 struct UploadSecureProgress {
@@ -55,12 +57,12 @@ struct UploadSecureDone {
 	int partsCount = 0;
 };
 
-class Uploader : public QObject, public RPCSender {
-	Q_OBJECT
-
+class Uploader final : public QObject {
 public:
 	explicit Uploader(not_null<ApiWrap*> api);
 	~Uploader();
+
+	[[nodiscard]] Main::Session &session() const;
 
 	void uploadMedia(const FullMsgId &msgId, const SendMediaReady &image);
 	void upload(
@@ -78,9 +80,6 @@ public:
 	}
 	rpl::producer<UploadedDocument> documentReady() const {
 		return _documentReady.events();
-	}
-	rpl::producer<UploadedThumbDocument> thumbDocumentReady() const {
-		return _thumbDocumentReady.events();
 	}
 	rpl::producer<UploadSecureDone> secureReady() const {
 		return _secureReady.events();
@@ -104,7 +103,6 @@ public:
 		return _secureFailed.events();
 	}
 
-public slots:
 	void unpause();
 	void sendNext();
 	void stopSessions();
@@ -113,11 +111,21 @@ private:
 	struct File;
 
 	void partLoaded(const MTPBool &result, mtpRequestId requestId);
-	bool partFailed(const RPCError &err, mtpRequestId requestId);
+	void partFailed(const MTP::Error &error, mtpRequestId requestId);
+
+	void processPhotoProgress(const FullMsgId &msgId);
+	void processPhotoFailed(const FullMsgId &msgId);
+	void processDocumentProgress(const FullMsgId &msgId);
+	void processDocumentFailed(const FullMsgId &msgId);
 
 	void currentFailed();
 
-	not_null<ApiWrap*> _api;
+	void sendProgressUpdate(
+		not_null<HistoryItem*> item,
+		Api::SendProgressType type,
+		int progress = 0);
+
+	const not_null<ApiWrap*> _api;
 	base::flat_map<mtpRequestId, QByteArray> requestsSent;
 	base::flat_map<mtpRequestId, int32> docRequestsSent;
 	base::flat_map<mtpRequestId, int32> dcMap;
@@ -128,11 +136,10 @@ private:
 	FullMsgId _pausedId;
 	std::map<FullMsgId, File> queue;
 	std::map<FullMsgId, File> uploaded;
-	QTimer nextTimer, stopSessionsTimer;
+	base::Timer _nextTimer, _stopSessionsTimer;
 
 	rpl::event_stream<UploadedPhoto> _photoReady;
 	rpl::event_stream<UploadedDocument> _documentReady;
-	rpl::event_stream<UploadedThumbDocument> _thumbDocumentReady;
 	rpl::event_stream<UploadSecureDone> _secureReady;
 	rpl::event_stream<FullMsgId> _photoProgress;
 	rpl::event_stream<FullMsgId> _documentProgress;
@@ -140,6 +147,8 @@ private:
 	rpl::event_stream<FullMsgId> _photoFailed;
 	rpl::event_stream<FullMsgId> _documentFailed;
 	rpl::event_stream<FullMsgId> _secureFailed;
+
+	rpl::lifetime _lifetime;
 
 };
 

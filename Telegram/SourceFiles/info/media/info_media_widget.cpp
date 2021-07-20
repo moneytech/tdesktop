@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/scroll_area.h"
 #include "ui/search_field_controller.h"
 #include "ui/ui_utility.h"
+#include "data/data_peer.h"
 #include "styles/style_info.h"
 
 namespace Info {
@@ -37,16 +38,16 @@ Type TabIndexToType(int index) {
 
 Memento::Memento(not_null<Controller*> controller)
 : Memento(
-	controller->peerId(),
+	controller->peer(),
 	controller->migratedPeerId(),
 	controller->section().mediaType()) {
 }
 
-Memento::Memento(PeerId peerId, PeerId migratedPeerId, Type type)
-: ContentMemento(peerId, migratedPeerId)
+Memento::Memento(not_null<PeerData*> peer, PeerId migratedPeerId, Type type)
+: ContentMemento(peer, migratedPeerId)
 , _type(type) {
 	_searchState.query.type = type;
-	_searchState.query.peerId = peerId;
+	_searchState.query.peerId = peer->id;
 	_searchState.query.migratedPeerId = migratedPeerId;
 	if (migratedPeerId) {
 		_searchState.migratedList = Storage::SparseIdsList();
@@ -114,8 +115,8 @@ void Widget::setInternalState(
 	restoreState(memento);
 }
 
-std::unique_ptr<ContentMemento> Widget::doCreateMemento() {
-	auto result = std::make_unique<Memento>(controller());
+std::shared_ptr<ContentMemento> Widget::doCreateMemento() {
+	auto result = std::make_shared<Memento>(controller());
 	saveState(result.get());
 	return result;
 }

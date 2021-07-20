@@ -25,7 +25,7 @@ class InnerWidget;
 class Memento final : public ContentMemento {
 public:
 	Memento(not_null<Controller*> controller);
-	Memento(PeerId peerId, PeerId migratedPeerId, Type type);
+	Memento(not_null<PeerData*> peer, PeerId migratedPeerId, Type type);
 
 	using SearchState = Api::DelayedSearchController::SavedState;
 
@@ -103,7 +103,7 @@ private:
 	void saveState(not_null<Memento*> memento);
 	void restoreState(not_null<Memento*> memento);
 
-	std::unique_ptr<ContentMemento> doCreateMemento() override;
+	std::shared_ptr<ContentMemento> doCreateMemento() override;
 
 	InnerWidget *_inner = nullptr;
 

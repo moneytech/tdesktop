@@ -7,25 +7,26 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "base/timer.h"
 #include "profile/profile_block_peer_list.h"
-
-#include <QtCore/QTimer>
 
 namespace Ui {
 class FlatLabel;
 } // namespace Ui
 
-namespace Notify {
+namespace Data {
 struct PeerUpdate;
-} // namespace Notify
+} // namespace Data
 
 namespace Profile {
 
 class GroupMembersWidget : public PeerListWidget {
-	Q_OBJECT
 
 public:
-	GroupMembersWidget(QWidget *parent, PeerData *peer, const style::PeerListItem &st);
+	GroupMembersWidget(
+		QWidget *parent,
+		not_null<PeerData*> peer,
+		const style::PeerListItem &st);
 
 	int onlineCount() const {
 		return _onlineCount;
@@ -33,15 +34,11 @@ public:
 
 	~GroupMembersWidget();
 
-signals:
-	void onlineCountUpdated(int onlineCount);
-
-private slots:
-	void onUpdateOnlineDisplay();
-
 private:
+	void updateOnlineDisplay();
+
 	// Observed notifications.
-	void notifyPeerUpdated(const Notify::PeerUpdate &update);
+	void notifyPeerUpdated(const Data::PeerUpdate &update);
 
 	void removePeer(PeerData *selectedPeer);
 	void refreshMembers();
@@ -55,8 +52,8 @@ private:
 	void refreshUserOnline(UserData *user);
 
 	struct Member : public Item {
-		explicit Member(UserData *user);
-		UserData *user() const;
+		explicit Member(not_null<UserData*> user);
+		not_null<UserData*> user() const;
 
 		TimeId onlineTextTill = 0;
 		TimeId onlineTill = 0;
@@ -76,13 +73,13 @@ private:
 		not_null<ChannelData*> megagroup);
 	bool addUsersToEnd(not_null<ChannelData*> megagroup);
 
-	QMap<UserData*, Member*> _membersByUser;
+	base::flat_map<UserData*, Member*> _membersByUser;
 	bool _sortByOnline = false;
 	TimeId _now = 0;
 
 	int _onlineCount = 0;
 	TimeId _updateOnlineAt = 0;
-	QTimer _updateOnlineTimer;
+	base::Timer _updateOnlineTimer;
 
 };
 

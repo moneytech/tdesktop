@@ -14,11 +14,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "lang/lang_instance.h"
 #include "lang/lang_keys.h"
+#include "main/main_account.h"
+#include "main/main_domain.h"
 #include "main/main_session.h"
 #include "mainwidget.h"
 #include "spellcheck/platform/platform_spellcheck.h"
 #include "spellcheck/spellcheck_utils.h"
 #include "spellcheck/spellcheck_value.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 
 #include <QtGui/QGuiApplication>
 #include <QtGui/QInputMethod>
@@ -87,7 +91,7 @@ const auto kDictionaries = {
 	Dict{{ QLocale::Korean,              615, 1'256'987, "\xed\x95\x9c\xea\xb5\xad\xec\x96\xb4" }}, // ko_KR
 	Dict{{ QLocale::Lithuanian,          616,   267'427, "\x4c\x69\x65\x74\x75\x76\x69\xc5\xb3" }}, // lt_LT
 	Dict{{ QLocale::Latvian,             617,   641'602, "\x4c\x61\x74\x76\x69\x65\xc5\xa1\x75" }}, // lv_LV
-	Dict{{ QLocale::Norwegian,           618,   588'650, "\x4e\x6f\x72\x73\x6b" }}, // nb_NO
+	Dict{{ QLocale::NorwegianBokmal,     618,   588'650, "\x4e\x6f\x72\x73\x6b" }}, // nb_NO
 	Dict{{ QLocale::Dutch,               619,   743'406, "\x4e\x65\x64\x65\x72\x6c\x61\x6e\x64\x73" }}, // nl_NL
 	Dict{{ QLocale::Polish,              620, 1'015'747, "\x50\x6f\x6c\x73\x6b\x69" }}, // pl_PL
 	Dict{{ QLocale::Portuguese,          621, 1'231'999, "\x50\x6f\x72\x74\x75\x67\x75\xc3\xaa\x73 (Brazil)" }}, // pt_BR
@@ -117,9 +121,9 @@ void EnsurePath() {
 }
 
 bool IsGoodPartName(const QString &name) {
-	return ranges::find_if(kDictExtensions, [&](const auto &ext) {
+	return ranges::any_of(kDictExtensions, [&](const auto &ext) {
 		return name.endsWith(ext);
-	}) != end(kDictExtensions);
+	});
 }
 
 using DictLoaderPtr = std::shared_ptr<base::unique_qptr<DictLoader>>;
@@ -142,11 +146,11 @@ void DownloadDictionaryInBackground(
 		BackgroundLoaderChanged.fire(0);
 
 		if (DictionaryExists(id)) {
-			auto dicts = session->settings().dictionariesEnabled();
+			auto dicts = Core::App().settings().dictionariesEnabled();
 			if (!ranges::contains(dicts, id)) {
 				dicts.push_back(id);
-				session->settings().setDictionariesEnabled(std::move(dicts));
-				session->saveSettingsDelayed();
+				Core::App().settings().setDictionariesEnabled(std::move(dicts));
+				Core::App().saveSettingsDelayed();
 			}
 		}
 
@@ -162,7 +166,8 @@ void DownloadDictionaryInBackground(
 
 	auto sharedLoader = std::make_shared<base::unique_qptr<DictLoader>>();
 	*sharedLoader = base::make_unique_q<DictLoader>(
-		App::main(),
+		QCoreApplication::instance(),
+		session,
 		id,
 		GetDownloadLocation(id),
 		DictPathByLangId(id),
@@ -173,7 +178,7 @@ void DownloadDictionaryInBackground(
 }
 
 void AddExceptions() {
-	const auto exceptions = ranges::view::all(
+	const auto exceptions = ranges::views::all(
 		kExceptions
 	) | ranges::views::transform([](const auto &word) {
 		return word.utf16();
@@ -197,12 +202,13 @@ rpl::producer<int> GlobalLoaderChanged() {
 
 DictLoader::DictLoader(
 	QObject *parent,
+	not_null<Main::Session*> session,
 	int id,
 	MTP::DedicatedLoader::Location location,
 	const QString &folder,
 	int size,
 	Fn<void()> destroyCallback)
-: BlobLoader(parent, id, location, folder, size)
+: BlobLoader(parent, session, id, location, folder, size)
 , _destroyCallback(std::move(destroyCallback)) {
 }
 
@@ -245,9 +251,9 @@ MTP::DedicatedLoader::Location GetDownloadLocation(int id) {
 
 QString DictPathByLangId(int langId) {
 	EnsurePath();
-	return qsl("%1/%2")
-		.arg(DictionariesPath())
-		.arg(Spellchecker::LocaleFromLangId(langId).name());
+	return qsl("%1/%2").arg(
+		DictionariesPath(),
+		Spellchecker::LocaleFromLangId(langId).name());
 }
 
 QString DictionariesPath() {
@@ -264,11 +270,10 @@ bool DictionaryExists(int langId) {
 		return true;
 	}
 	const auto folder = DictPathByLangId(langId) + '/';
-	const auto bad = ranges::find_if(kDictExtensions, [&](const auto &ext) {
+	return ranges::none_of(kDictExtensions, [&](const auto &ext) {
 		const auto name = Spellchecker::LocaleFromLangId(langId).name();
 		return !QFile(folder + name + '.' + ext).exists();
 	});
-	return (bad == end(kDictExtensions));
 }
 
 bool RemoveDictionary(int langId) {
@@ -276,9 +281,9 @@ bool RemoveDictionary(int langId) {
 		return true;
 	}
 	const auto fileName = Spellchecker::LocaleFromLangId(langId).name();
-	const auto folder = qsl("%1/%2/")
-		.arg(DictionariesPath())
-		.arg(fileName);
+	const auto folder = qsl("%1/%2/").arg(
+		DictionariesPath(),
+		fileName);
 	return QDir(folder).removeRecursively();
 }
 
@@ -289,9 +294,9 @@ bool WriteDefaultDictionary() {
 		return false;
 	}
 	const auto fileName = QLocale(en).name();
-	const auto folder = qsl("%1/%2/")
-		.arg(DictionariesPath())
-		.arg(fileName);
+	const auto folder = qsl("%1/%2/").arg(
+		DictionariesPath(),
+		fileName);
 	QDir(folder).removeRecursively();
 
 	const auto path = folder + fileName;
@@ -309,19 +314,19 @@ bool WriteDefaultDictionary() {
 }
 
 rpl::producer<QString> ButtonManageDictsState(
-	not_null<Main::Session*> session) {
+		not_null<Main::Session*> session) {
 	if (Platform::Spellchecker::IsSystemSpellchecker()) {
 		return rpl::single(QString());
 	}
 	const auto computeString = [=] {
-		if (!session->settings().spellcheckerEnabled()) {
+		if (!Core::App().settings().spellcheckerEnabled()) {
 			return QString();
 		}
-		if (!session->settings().dictionariesEnabled().size()) {
+		if (!Core::App().settings().dictionariesEnabled().size()) {
 			return QString();
 		}
-		const auto dicts = session->settings().dictionariesEnabled();
-		const auto filtered = ranges::view::all(
+		const auto dicts = Core::App().settings().dictionariesEnabled();
+		const auto filtered = ranges::views::all(
 			dicts
 		) | ranges::views::filter(
 			DictionaryExists
@@ -332,16 +337,15 @@ rpl::producer<QString> ButtonManageDictsState(
 			? QString::number(filtered.size())
 			: tr::lng_contacts_loading(tr::now);
 	};
-	const auto emptyValue = [] { return rpl::empty_value(); };
 	return rpl::single(
 		computeString()
 	) | rpl::then(
 		rpl::merge(
 			Spellchecker::SupportedScriptsChanged(),
-			session->settings().dictionariesEnabledChanges(
-			) | rpl::map(emptyValue),
-			session->settings().spellcheckerEnabledChanges(
-			) | rpl::map(emptyValue)
+			Core::App().settings().dictionariesEnabledChanges(
+			) | rpl::to_empty,
+			Core::App().settings().spellcheckerEnabledChanges(
+			) | rpl::to_empty
 		) | rpl::map(computeString)
 	);
 }
@@ -362,7 +366,7 @@ std::vector<int> DefaultLanguages() {
 		append(method->locale());
 	}
 	append(QLocale(Platform::SystemLanguage()));
-	append(QLocale(Lang::LanguageIdOrDefault(Lang::Current().id())));
+	append(QLocale(Lang::LanguageIdOrDefault(Lang::Id())));
 
 	return langs;
 }
@@ -374,7 +378,8 @@ void Start(not_null<Main::Session*> session) {
 		{ &ph::lng_spellchecker_remove, tr::lng_spellchecker_remove() },
 		{ &ph::lng_spellchecker_ignore, tr::lng_spellchecker_ignore() },
 	} });
-	const auto settings = &session->settings();
+	const auto settings = &Core::App().settings();
+	auto &lifetime = session->lifetime();
 
 	const auto onEnabled = [=](auto enabled) {
 		Platform::Spellchecker::UpdateLanguages(
@@ -388,31 +393,25 @@ void Start(not_null<Main::Session*> session) {
 	});
 
 	if (Platform::Spellchecker::IsSystemSpellchecker()) {
-
-		const auto scriptsLifetime =
-			session->lifetime().make_state<rpl::lifetime>();
-
-		Spellchecker::SupportedScriptsChanged(
-		) | rpl::start_with_next([=] {
-			AddExceptions();
-			scriptsLifetime->destroy();
-		}, *scriptsLifetime);
+		Spellchecker::SupportedScriptsChanged()
+		| rpl::take(1)
+		| rpl::start_with_next(AddExceptions, lifetime);
 
 		return;
 	}
 
 	Spellchecker::SupportedScriptsChanged(
-	) | rpl::start_with_next(AddExceptions, session->lifetime());
+	) | rpl::start_with_next(AddExceptions, lifetime);
 
 	Spellchecker::SetWorkingDirPath(DictionariesPath());
 
 	settings->dictionariesEnabledChanges(
 	) | rpl::start_with_next([](auto dictionaries) {
 		Platform::Spellchecker::UpdateLanguages(dictionaries);
-	}, session->lifetime());
+	}, lifetime);
 
 	settings->spellcheckerEnabledChanges(
-	) | rpl::start_with_next(onEnabled, session->lifetime());
+	) | rpl::start_with_next(onEnabled, lifetime);
 
 	const auto method = QGuiApplication::inputMethod();
 
@@ -446,10 +445,29 @@ void Start(not_null<Main::Session*> session) {
 			}
 
 			DownloadDictionaryInBackground(session, 0, DefaultLanguages());
-		}, session->lifetime());
+		}, lifetime);
 
 		connectInput();
 	}
+
+	const auto disconnect = [=] {
+		QObject::disconnect(
+			method,
+			&QInputMethod::localeChanged,
+			nullptr,
+			nullptr);
+	};
+	lifetime.add([=] {
+		disconnect();
+		for (auto &[index, account] : session->domain().accounts()) {
+			if (const auto anotherSession = account->maybeSession()) {
+				if (anotherSession->uniqueId() != session->uniqueId()) {
+					Spellchecker::Start(anotherSession);
+					return;
+				}
+			}
+		}
+	});
 
 	rpl::combine(
 		settings->spellcheckerEnabledValue(),
@@ -459,12 +477,8 @@ void Start(not_null<Main::Session*> session) {
 			connectInput();
 			return;
 		}
-		QObject::disconnect(
-			method,
-			&QInputMethod::localeChanged,
-			nullptr,
-			nullptr);
-	}, session->lifetime());
+		disconnect();
+	}, lifetime);
 
 }
 

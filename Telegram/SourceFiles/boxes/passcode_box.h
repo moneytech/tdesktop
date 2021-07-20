@@ -55,7 +55,8 @@ public:
 	rpl::producer<> passwordReloadNeeded() const;
 	rpl::producer<> clearUnconfirmedPassword() const;
 
-	bool handleCustomCheckError(const RPCError &error);
+	bool handleCustomCheckError(const MTP::Error &error);
+	bool handleCustomCheckError(const QString &type);
 
 protected:
 	void prepare() override;
@@ -81,18 +82,19 @@ private:
 	bool onlyCheckCurrent() const;
 
 	void setPasswordDone(const QByteArray &newPasswordBytes);
-	void setPasswordFail(const RPCError &error);
+	void setPasswordFail(const MTP::Error &error);
+	void setPasswordFail(const QString &type);
 	void setPasswordFail(
 		const QByteArray &newPasswordBytes,
 		const QString &email,
-		const RPCError &error);
+		const MTP::Error &error);
 	void validateEmail(
 		const QString &email,
 		int codeLength,
 		const QByteArray &newPasswordBytes);
 
 	void recoverStarted(const MTPauth_PasswordRecovery &result);
-	void recoverStartFail(const RPCError &error);
+	void recoverStartFail(const MTP::Error &error);
 
 	void recover();
 	void submitOnlyCheckCloudPassword(const QString &oldPassword);
@@ -164,9 +166,13 @@ private:
 
 };
 
-class RecoverBox : public Ui::BoxContent, public RPCSender {
+class RecoverBox final : public Ui::BoxContent {
 public:
-	RecoverBox(QWidget*, const QString &pattern, bool notEmptyPassport);
+	RecoverBox(
+		QWidget*,
+		not_null<Main::Session*> session,
+		const QString &pattern,
+		bool notEmptyPassport);
 
 	rpl::producer<> passwordCleared() const;
 	rpl::producer<> recoveryExpired() const;
@@ -184,9 +190,10 @@ protected:
 private:
 	void submit();
 	void codeChanged();
-	void codeSubmitDone(bool recover, const MTPauth_Authorization &result);
-	bool codeSubmitFail(const RPCError &error);
+	void codeSubmitDone(const MTPauth_Authorization &result);
+	void codeSubmitFail(const MTP::Error &error);
 
+	MTP::Sender _api;
 	mtpRequestId _submitRequest = 0;
 
 	QString _pattern;
@@ -206,4 +213,11 @@ struct RecoveryEmailValidation {
 	rpl::producer<> reloadRequests;
 	rpl::producer<> cancelRequests;
 };
-RecoveryEmailValidation ConfirmRecoveryEmail(const QString &pattern);
+[[nodiscard]] RecoveryEmailValidation ConfirmRecoveryEmail(
+	not_null<Main::Session*> session,
+	const QString &pattern);
+
+[[nodiscard]] object_ptr<Ui::GenericBox> PrePasswordErrorBox(
+	const MTP::Error &error,
+	not_null<Main::Session*> session,
+	TextWithEntities &&about);

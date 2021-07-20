@@ -90,8 +90,8 @@ void Widget::setInternalState(
 	restoreState(memento);
 }
 
-std::unique_ptr<ContentMemento> Widget::doCreateMemento() {
-	auto result = std::make_unique<Memento>(poll(), contextId());
+std::shared_ptr<ContentMemento> Widget::doCreateMemento() {
+	auto result = std::make_shared<Memento>(poll(), contextId());
 	saveState(result.get());
 	return result;
 }
@@ -103,7 +103,6 @@ void Widget::saveState(not_null<Memento*> memento) {
 
 void Widget::restoreState(not_null<Memento*> memento) {
 	_inner->restoreState(memento);
-	auto scrollTop = memento->scrollTop();
 	scrollTopRestore(memento->scrollTop());
 }
 

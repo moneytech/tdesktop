@@ -2,42 +2,45 @@ name: telegram-desktop
 adopt-info: telegram
 icon: Telegram/Resources/art/icon512@2x.png
 
-base: core18
+base: core20
 grade: stable
 confinement: strict
+compression: lzo
 
 architectures:
   - build-on: amd64
-  - build-on: i386
   - build-on: arm64
   - build-on: armhf
   - build-on: ppc64el
 
 apps:
   telegram-desktop:
-    command: telegram-launch
+    command: bin/desktop-launch telegram-desktop
     common-id: org.telegram.desktop
-    desktop: share/applications/telegramdesktop.desktop
+    desktop: usr/share/applications/telegram-desktop_telegram-desktop.desktop
     environment:
-      # Use GTK3 cursor theme, icon theme and open/save file dialogs.
-      QT_QPA_PLATFORMTHEME: gtk3
-    extensions:
-      - kde-neon
+      # Tell glib to use portals on file associations handling.
+      GTK_USE_PORTAL: 1
+      # Use sandboxed ibus api
+      IBUS_USE_PORTAL: 1
     plugs:
       - alsa
       - audio-playback
       - audio-record
+      - camera
       - desktop
       - desktop-legacy
       - home
       - network
-      - network-manager
+      - network-manager-observe
       - opengl
       - pulseaudio
       - removable-media
       - unity7
       - wayland
       - x11
+    slots:
+      - tdesktop-mpris
 
 plugs:
   # Support for common GTK themes
@@ -56,57 +59,69 @@ plugs:
     target: $SNAP/data-dir/sounds
     default-provider: gtk-common-themes
 
+slots:
+  tdesktop-dbus:
+    interface: dbus
+    bus: session
+    name: org.telegram.desktop
+  tdesktop-mpris:
+    interface: mpris
+    name: tdesktop
+
 layout:
   /usr/share/alsa:
     bind: $SNAP/usr/share/alsa
   /usr/share/X11:
     bind: $SNAP/usr/share/X11
+  /usr/lib/$SNAPCRAFT_ARCH_TRIPLET/webkit2gtk-4.0:
+    bind: $SNAP/usr/lib/$SNAPCRAFT_ARCH_TRIPLET/webkit2gtk-4.0
 
 parts:
   telegram:
     plugin: cmake
     source: .
     source-type: git
-    parse-info: [share/metainfo/telegramdesktop.appdata.xml]
-    build-snaps:
-      - kde-frameworks-5-core18-sdk
-      - kde-frameworks-5-core18
+    parse-info: [usr/share/metainfo/telegram-desktop_telegram-desktop.appdata.xml]
+    build-environment:
+      - LD_LIBRARY_PATH: $SNAPCRAFT_STAGE/usr/lib/$SNAPCRAFT_ARCH_TRIPLET:$LD_LIBRARY_PATH
     build-packages:
-      - gcc-8
-      - g++-8
-      - libmapbox-variant-dev
+      - python
       - libasound2-dev
-      - libglvnd-dev
-      - libhunspell-dev
-      - liblz4-dev
+      - libglib2.0-dev
+      - libglibmm-2.4-dev
+      - libgtk-3-dev
       - liblzma-dev
-      - libminizip-dev
       - libopus-dev
       - libpulse-dev
       - libssl-dev
+      - libwebkit2gtk-4.0-dev
+      - libxcb1-dev
+      - libxcb-keysyms1-dev
+      - libxcb-record0-dev
+      - libxcb-screensaver0-dev
       - zlib1g-dev
     stage-packages:
       - libasound2
-      - libhunspell-1.6-0
-      - liblz4-1
+      - libglib2.0-0
+      - libglibmm-2.4-1v5
+      - libgtk-3-0
       - liblzma5
-      - libminizip1
       - libopus0
       - libpulse0
       - libssl1.1
+      - libwebkit2gtk-4.0-37
+      - libxcb1
+      - libxcb-keysyms1
+      - libxcb-record0
+      - libxcb-screensaver0
       - zlib1g
-    configflags:
-      - -DCMAKE_C_COMPILER=gcc-8
-      - -DCMAKE_CXX_COMPILER=g++-8
+    cmake-parameters:
       - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_PREFIX=/usr
       - -DTDESKTOP_API_ID=611335
       - -DTDESKTOP_API_HASH=d524b414d21f4d37f08684c1df41ac9c
-      - -DDESKTOP_APP_USE_PACKAGED_FONTS=OFF
-      - -DDESKTOP_APP_USE_PACKAGED_GSL=OFF
-      - -DDESKTOP_APP_USE_PACKAGED_EXPECTED=OFF
-      - -DDESKTOP_APP_USE_PACKAGED_RLOTTIE=OFF
-      - -DTDESKTOP_USE_PACKAGED_TGVOIP=OFF
-      - -DTDESKTOP_USE_FONTCONFIG_FALLBACK=ON
+      - -DDESKTOP_APP_USE_PACKAGED_LAZY=ON
+      - -DTDESKTOP_LAUNCHER_BASENAME=telegram-desktop_telegram-desktop
     override-pull: |
       snapcraftctl pull
 
@@ -122,418 +137,366 @@ parts:
 
       snapcraftctl set-version "$version"
 
-      sed -i 's|^Icon=.*|Icon=/share/icons/hicolor/512x512/apps/telegram.png|g' lib/xdg/telegramdesktop.desktop
+      sed -i 's|^Icon=.*|Icon=${SNAP}/meta/gui/icon.png|g' lib/xdg/telegramdesktop.desktop
+    override-build: |
+      snapcraftctl build
+      rm -rf "$SNAPCRAFT_PART_INSTALL/usr/share/icons"
+    stage:
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/libjpeg.so.8.2.2
     after:
-      - cmake
+      - desktop-qt5
+      - extra-cmake-modules
       - ffmpeg
-      - libdbusmenu-qt
+      - kwayland
+      - mozjpeg
       - openal
-      - range-v3
-      - xxhash
-
-  telegram-launcher:
-    plugin: dump
-    source: snap/scripts
-    organize:
-      telegram-launch: bin/telegram-launch
+      - rnnoise
+      - webrtc
 
   patches:
-    plugin: dump
-    source: Telegram/Patches
-    prime: [-./*]
-
-  qtconf:
-    plugin: nil
-    override-build: |
-      KF5_DIR=/snap/kde-frameworks-5-core18-sdk/current
-
-      install -d "$SNAPCRAFT_PART_INSTALL/usr/include/$SNAPCRAFT_ARCH_TRIPLET"
-      cp -a $KF5_DIR/usr/include/$SNAPCRAFT_ARCH_TRIPLET/qt5 "$SNAPCRAFT_PART_INSTALL/usr/include/$SNAPCRAFT_ARCH_TRIPLET"
-
-      install -d "$SNAPCRAFT_PART_INSTALL/usr/lib/$SNAPCRAFT_ARCH_TRIPLET"
-      cp -a $KF5_DIR/usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5 "$SNAPCRAFT_PART_INSTALL/usr/lib/$SNAPCRAFT_ARCH_TRIPLET"
-
-      cat << EOF > "$SNAPCRAFT_PART_INSTALL/qt.conf"
-      [Paths]
-      Prefix=$KF5_DIR/usr
-      ArchData=lib/$SNAPCRAFT_ARCH_TRIPLET/qt5
-      Binaries=lib/qt5/bin
-      Data=share/qt5
-      Documentation=share/qt5/doc
-      Examples=lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/examples
-      Headers=$SNAPCRAFT_STAGE/usr/include/$SNAPCRAFT_ARCH_TRIPLET/qt5
-      HostBinaries=lib/qt5/bin
-      HostData=$SNAPCRAFT_STAGE/usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5
-      HostLibraries=lib/$SNAPCRAFT_ARCH_TRIPLET
-      Imports=lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/imports
-      Libraries=lib/$SNAPCRAFT_ARCH_TRIPLET
-      LibraryExecutables=lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/libexec
-      Plugins=lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/plugins
-      Qml2Imports=lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/qml
-      Settings=/etc/xdg
-      Translations=share/qt5/translations
-      EOF
-    stage:
-      - -usr/lib/x86_64-linux-gnu/qt5/plugins/platforms/libqwayland*
-      - -usr/lib/x86_64-linux-gnu/qt5/plugins/wayland*
-      - -usr/lib/x86_64-linux-gnu/qt5/qml/QtWayland
-    prime: [-./*]
-
-  cmake:
-    source: "https://gitlab.kitware.com/cmake/cmake.git"
+    source: https://github.com/desktop-app/patches.git
     source-depth: 1
-    source-tag: v3.16.4
-    source-type: git
+    plugin: dump
+    organize:
+      "*": patches/
+    prime: [-./*]
+
+  desktop-qt5:
+    source: https://github.com/desktop-app/snapcraft-desktop-helpers.git
+    source-subdir: qt
     plugin: make
-    override-build: |
-      ${SNAPCRAFT_PART_SRC}/bootstrap \
-        --parallel=${SNAPCRAFT_PARALLEL_BUILD_COUNT} \
-        -- \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/ \
-        -DBUILD_TESTING=OFF
-      snapcraftctl build
+    make-parameters: ["FLAVOR=qt5"]
     build-packages:
       - build-essential
-      - libssl-dev
-      - libncurses5-dev
+      - dpkg-dev
     stage-packages:
-      - libssl1.1
-      - libncurses5
-      - libtinfo5
-    prime: [-./*]
-
-  nasm:
-    source: https://repo.or.cz/nasm.git
-    source-depth: 1
-    source-tag: nasm-2.14.02
-    plugin: autotools
-    override-build: |
-      ./autogen.sh
-      ./configure --prefix=
-      make -j$(nproc)
-      install -d "$SNAPCRAFT_PART_INSTALL/bin"
-      install nasm "$SNAPCRAFT_PART_INSTALL/bin/nasm"
-      install ndisasm "$SNAPCRAFT_PART_INSTALL/bin/ndisasm"
-    prime: [-./*]
-
-  dav1d:
-    source: https://github.com/videolan/dav1d.git
-    source-depth: 1
-    source-tag: 0.6.0
-    plugin: meson
-    meson-parameters:
-      - --prefix=/usr
-      - -Denable_tools=false
-      - -Denable_tests=false
-    prime:
-      - -./usr/include
-      - -./usr/lib/*/pkgconfig
+      - libxkbcommon0
+      - ttf-ubuntu-font-family
+      - dmz-cursor-theme
+      - light-themes
+      - adwaita-icon-theme
+      - gnome-themes-standard
+      - shared-mime-info
+      - libgdk-pixbuf2.0-0
+      - locales-all
+      - xdg-user-dirs
+    stage:
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/libjpeg.so.8.2.2
     after:
-      - nasm
+      - mozjpeg
+      - qt5
 
-  fcitx-qt5:
-    source: https://github.com/fcitx/fcitx-qt5.git
+  extra-cmake-modules:
+    source: https://github.com/KDE/extra-cmake-modules.git
     source-depth: 1
-    source-tag: 1.2.4
+    source-tag: v5.77.0
     plugin: cmake
-    build-snaps:
-      - kde-frameworks-5-core18-sdk
-      - kde-frameworks-5-core18
-    build-packages:
-      - libglvnd-dev
-    configflags:
+    cmake-parameters:
       - -DCMAKE_BUILD_TYPE=Release
-      - -DENABLE_LIBRARY=OFF
+      - -DCMAKE_INSTALL_PREFIX=/usr
+      - -DBUILD_TESTING=OFF
+    prime: [-./*]
 
   ffmpeg:
-    source: https://github.com/FFmpeg/FFmpeg.git
-    source-depth: 1
-    source-branch: release/4.2
-    plugin: autotools
+    plugin: nil
     build-packages:
-      - libasound2-dev
-      - libopus-dev
-      - libva-dev
-      - libvdpau-dev
+      - libavcodec-dev
+      - libavformat-dev
+      - libavutil-dev
+      - libswresample-dev
+      - libswscale-dev
     stage-packages:
-      - libasound2
-      - libopus0
-      - libva2
-      - libva-drm2
-      - libvdpau1
-    configflags:
-      - --prefix=/usr
-      - --disable-static
-      - --disable-debug
-      - --disable-programs
-      - --disable-doc
-      - --disable-network
-      - --disable-autodetect
-      - --disable-everything
-      - --disable-neon
-      - --disable-iconv
-      - --enable-shared
-      - --enable-libdav1d
-      - --enable-libopus
-      - --enable-vaapi
-      - --enable-vdpau
-      - --enable-protocol=file
-      - --enable-hwaccel=h264_vaapi
-      - --enable-hwaccel=h264_vdpau
-      - --enable-hwaccel=mpeg4_vaapi
-      - --enable-hwaccel=mpeg4_vdpau
-      - --enable-decoder=aac
-      - --enable-decoder=aac_fixed
-      - --enable-decoder=aac_latm
-      - --enable-decoder=aasc
-      - --enable-decoder=alac
-      - --enable-decoder=flac
-      - --enable-decoder=gif
-      - --enable-decoder=h264
-      - --enable-decoder=hevc
-      - --enable-decoder=libdav1d
-      - --enable-decoder=mp1
-      - --enable-decoder=mp1float
-      - --enable-decoder=mp2
-      - --enable-decoder=mp2float
-      - --enable-decoder=mp3
-      - --enable-decoder=mp3adu
-      - --enable-decoder=mp3adufloat
-      - --enable-decoder=mp3float
-      - --enable-decoder=mp3on4
-      - --enable-decoder=mp3on4float
-      - --enable-decoder=mpeg4
-      - --enable-decoder=msmpeg4v2
-      - --enable-decoder=msmpeg4v3
-      - --enable-decoder=opus
-      - --enable-decoder=pcm_alaw
-      - --enable-decoder=pcm_f32be
-      - --enable-decoder=pcm_f32le
-      - --enable-decoder=pcm_f64be
-      - --enable-decoder=pcm_f64le
-      - --enable-decoder=pcm_lxf
-      - --enable-decoder=pcm_mulaw
-      - --enable-decoder=pcm_s16be
-      - --enable-decoder=pcm_s16be_planar
-      - --enable-decoder=pcm_s16le
-      - --enable-decoder=pcm_s16le_planar
-      - --enable-decoder=pcm_s24be
-      - --enable-decoder=pcm_s24daud
-      - --enable-decoder=pcm_s24le
-      - --enable-decoder=pcm_s24le_planar
-      - --enable-decoder=pcm_s32be
-      - --enable-decoder=pcm_s32le
-      - --enable-decoder=pcm_s32le_planar
-      - --enable-decoder=pcm_s64be
-      - --enable-decoder=pcm_s64le
-      - --enable-decoder=pcm_s8
-      - --enable-decoder=pcm_s8_planar
-      - --enable-decoder=pcm_u16be
-      - --enable-decoder=pcm_u16le
-      - --enable-decoder=pcm_u24be
-      - --enable-decoder=pcm_u24le
-      - --enable-decoder=pcm_u32be
-      - --enable-decoder=pcm_u32le
-      - --enable-decoder=pcm_u8
-      - --enable-decoder=pcm_zork
-      - --enable-decoder=vorbis
-      - --enable-decoder=wavpack
-      - --enable-decoder=wmalossless
-      - --enable-decoder=wmapro
-      - --enable-decoder=wmav1
-      - --enable-decoder=wmav2
-      - --enable-decoder=wmavoice
-      - --enable-encoder=libopus
-      - --enable-parser=aac
-      - --enable-parser=aac_latm
-      - --enable-parser=flac
-      - --enable-parser=h264
-      - --enable-parser=hevc
-      - --enable-parser=mpeg4video
-      - --enable-parser=mpegaudio
-      - --enable-parser=opus
-      - --enable-parser=vorbis
-      - --enable-demuxer=aac
-      - --enable-demuxer=flac
-      - --enable-demuxer=gif
-      - --enable-demuxer=h264
-      - --enable-demuxer=hevc
-      - --enable-demuxer=m4v
-      - --enable-demuxer=mov
-      - --enable-demuxer=mp3
-      - --enable-demuxer=ogg
-      - --enable-demuxer=wav
-      - --enable-muxer=ogg
-      - --enable-muxer=opus
-    override-pull: |
-      snapcraftctl pull
-      patch -p1 < "$SNAPCRAFT_STAGE/ffmpeg.diff"
+      - libavcodec58
+      - libavformat58
+      - libavutil56
+      - libswresample3
+      - libswscale5
+    stage:
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/libjpeg.so.8.2.2
+    after:
+      - mozjpeg
+
+  kwayland:
+    source: https://github.com/KDE/kwayland.git
+    source-depth: 1
+    source-tag: v5.77.0
+    plugin: cmake
+    build-packages:
+      - libwayland-dev
+      - wayland-protocols
+    stage-packages:
+      - libwayland-client0
+      - libwayland-server0
+    cmake-parameters:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_PREFIX=/usr
+      - -DBUILD_TESTING=OFF
     prime:
       - -./usr/include
-      - -./usr/lib/pkgconfig
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/libexec
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/pkgconfig
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/*.so
+      - -./usr/mkspecs
+      - -./usr/share
     after:
-      - patches
-      - nasm
-      - dav1d
+      - extra-cmake-modules
+      - desktop-qt5
+      - plasma-wayland-protocols
 
-  libdbusmenu-qt:
-    source: https://github.com/unity8-team/libdbusmenu-qt.git
+  mozjpeg:
+    source: https://github.com/mozilla/mozjpeg.git
     source-depth: 1
-    source-tag: 0.9.3+16.04.20160218-0ubuntu1
+    source-tag: v4.0.1-rc2
     plugin: cmake
-    build-snaps:
-      - kde-frameworks-5-core18-sdk
-      - kde-frameworks-5-core18
-    build-packages:
-      - libglvnd-dev
-    configflags:
+    cmake-parameters:
       - -DCMAKE_BUILD_TYPE=Release
-      - -DWITH_DOC=OFF
+      - -DCMAKE_INSTALL_PREFIX=/usr
+      - -DENABLE_STATIC=OFF
+      - -DWITH_JPEG8=ON
+      - -DPNG_SUPPORTED=OFF
     prime:
-      - -./include
-      - -./lib/cmake
-      - -./lib/pkgconfig
-
-  materialdecoration:
-    source: https://github.com/desktop-app/materialdecoration.git
-    source-depth: 1
-    plugin: dump
-    build-snaps:
-      - kde-frameworks-5-core18-sdk
-      - kde-frameworks-5-core18
-    build-packages:
-      - libglvnd-dev
-    override-build: |
-      KF5_DIR=/snap/kde-frameworks-5-core18-sdk/current
-
-      $KF5_DIR/usr/lib/qt5/bin/qmake -qtconf "$SNAPCRAFT_STAGE/qt.conf"
-      make -j$(nproc)
-      make INSTALL_ROOT="$SNAPCRAFT_PART_INSTALL/tmp" install
-
-      cp -a "$SNAPCRAFT_PART_INSTALL/tmp/$KF5_DIR/." "$SNAPCRAFT_PART_INSTALL"
-      rm -r "$SNAPCRAFT_PART_INSTALL/tmp"
-    after:
-      - qtconf
-      - qtwayland
+      - -./usr/bin
+      - -./usr/include
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/pkgconfig
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/*.so
+      - -./usr/share
 
   openal:
-    source: https://github.com/kcat/openal-soft.git
+    source: https://github.com/telegramdesktop/openal-soft.git
     source-depth: 1
-    source-tag: openal-soft-1.20.1
+    source-branch: fix_pulse_default
     plugin: cmake
     build-packages:
       - libasound2-dev
       - libpulse-dev
-      - libsndio-dev
-      - portaudio19-dev
     stage-packages:
       - libasound2
       - libpulse0
-      - libportaudio2
-      - libsndio6.1
-    configflags:
+    cmake-parameters:
       - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_PREFIX=/usr
       - -DALSOFT_EXAMPLES=OFF
       - -DALSOFT_TESTS=OFF
       - -DALSOFT_UTILS=OFF
       - -DALSOFT_CONFIG=OFF
     prime:
-      - -./include
-      - -./lib/cmake
-      - -./lib/pkgconfig
+      - -./usr/include
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/cmake
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/pkgconfig
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/libopenal.so
 
-  range-v3:
-    source: https://github.com/ericniebler/range-v3.git
+  plasma-wayland-protocols:
+    source: https://github.com/KDE/plasma-wayland-protocols.git
     source-depth: 1
-    source-tag: 0.10.0
+    source-tag: v1.1.1
     plugin: cmake
-    configflags:
-      - -DRANGE_V3_TESTS=OFF
-      - -DRANGE_V3_EXAMPLES=OFF
-      - -DRANGE_V3_DOCS=OFF
+    cmake-parameters:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_PREFIX=/usr
     prime: [-./*]
+    after:
+      - extra-cmake-modules
 
-  qgnomeplatform:
-    source: https://github.com/FedoraQt/QGnomePlatform.git
-    source-depth: 1
-    source-tag: 0.6.0
-    plugin: dump
-    build-snaps:
-      - kde-frameworks-5-core18-sdk
-      - kde-frameworks-5-core18
+  qt5:
+    plugin: nil
     build-packages:
-      - libglvnd-dev
+      - libdbus-1-dev
+      - libegl-dev
+      - libfontconfig1-dev
+      - libfreetype-dev
+      - libgl-dev
+      - libglib2.0-dev
       - libgtk-3-dev
+      - libharfbuzz-dev
+      - libicu-dev
+      - libpcre2-dev
+      - libpng-dev
+      - libssl-dev
+      - libwayland-dev
+      - libx11-dev
+      - libx11-xcb-dev
+      - libxcb1-dev
+      - libxcb-glx0-dev
+      - libxcb-icccm4-dev
+      - libxcb-image0-dev
+      - libxcb-keysyms1-dev
+      - libxcb-randr0-dev
+      - libxcb-render0-dev
+      - libxcb-render-util0-dev
+      - libxcb-shape0-dev
+      - libxcb-shm0-dev
+      - libxcb-sync-dev
+      - libxcb-util-dev
+      - libxcb-xfixes0-dev
+      - libxcb-xinerama0-dev
+      - libxcb-xinput-dev
+      - libxcb-xkb-dev
+      - libxcursor-dev
+      - libxkbcommon-dev
+      - libxkbcommon-x11-dev
+      - zlib1g-dev
     stage-packages:
+      - libdbus-1-3
+      - libegl1
+      - libfontconfig1
+      - libfreetype6
+      - libgl1
+      - libglib2.0-0
       - libgtk-3-0
-      - cinnamon-desktop-data
+      - libharfbuzz0b
+      - libicu66
+      - libpcre2-16-0
+      - libpng16-16
+      - libssl1.1
+      - libwayland-client0
+      - libwayland-cursor0
+      - libwayland-egl1
+      - libx11-6
+      - libx11-xcb1
+      - libxcb1
+      - libxcb-glx0
+      - libxcb-icccm4
+      - libxcb-image0
+      - libxcb-keysyms1
+      - libxcb-randr0
+      - libxcb-render0
+      - libxcb-render-util0
+      - libxcb-shape0
+      - libxcb-shm0
+      - libxcb-sync1
+      - libxcb-util1
+      - libxcb-xfixes0
+      - libxcb-xinerama0
+      - libxcb-xinput0
+      - libxcb-xkb1
+      - libxcursor1
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - zlib1g
+    override-pull: |
+      QT=5_15_2
+
+      git clone -b v5.15.2 --depth=1 git://code.qt.io/qt/qt5.git .
+      perl init-repository --module-subset=qtbase,qtwayland,qtimageformats,qtsvg
+      git submodule update qtbase qtwayland qtimageformats qtsvg
+
+      cd qtbase
+      find $SNAPCRAFT_STAGE/patches/qtbase_${QT} -type f -print0 | sort -z | xargs -r0 git apply
+      cd ../qtwayland
+      find $SNAPCRAFT_STAGE/patches/qtwayland_${QT} -type f -print0 | sort -z | xargs -r0 git apply
+      cd ..
     override-build: |
-      KF5_DIR=/snap/kde-frameworks-5-core18-sdk/current
+      ./configure \
+        -prefix /usr \
+        -bindir /usr/lib/qt5/bin \
+        -libdir /usr/lib/$SNAPCRAFT_ARCH_TRIPLET \
+        -docdir /usr/share/qt5/doc \
+        -headerdir /usr/include/$SNAPCRAFT_ARCH_TRIPLET/qt5 \
+        -datadir /usr/share/qt5 \
+        -archdatadir /usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5 \
+        -plugindir /usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/plugins \
+        -importdir /usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/imports \
+        -translationdir /usr/share/qt5/translations \
+        -hostdatadir /usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5 \
+        -sysconfdir /etc/xdg \
+        -examplesdir /usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/examples \
+        -release \
+        -opensource \
+        -confirm-license \
+        -no-feature-xcb-sm \
+        -no-feature-xcomposite-egl \
+        -no-feature-xcomposite-glx \
+        -no-feature-wayland-server \
+        -openssl-linked \
+        -nomake examples \
+        -nomake tests \
+        -I $SNAPCRAFT_STAGE/usr/include \
+        -L $SNAPCRAFT_STAGE/usr/lib/$SNAPCRAFT_ARCH_TRIPLET
 
-      $KF5_DIR/usr/lib/qt5/bin/qmake -qtconf "$SNAPCRAFT_STAGE/qt.conf"
-      make -j$(nproc)
-      make INSTALL_ROOT="$SNAPCRAFT_PART_INSTALL/tmp" install
-
-      cp -a "$SNAPCRAFT_PART_INSTALL/tmp/$KF5_DIR/." "$SNAPCRAFT_PART_INSTALL"
-      rm -r "$SNAPCRAFT_PART_INSTALL/tmp"
-    after:
-      - qtconf
-      - qtwayland
-
-  qtimageformats:
-    source: https://github.com/qt/qtimageformats.git
-    source-depth: 1
-    source-tag: v5.12.3
-    plugin: dump
-    build-snaps:
-      - kde-frameworks-5-core18-sdk
-      - kde-frameworks-5-core18
-    build-packages:
-      - libglvnd-dev
-    override-build: |
-      KF5_DIR=/snap/kde-frameworks-5-core18-sdk/current
-
-      $KF5_DIR/usr/lib/qt5/bin/qmake -qtconf "$SNAPCRAFT_STAGE/qt.conf"
-      make -j$(nproc)
-      make INSTALL_ROOT="$SNAPCRAFT_PART_INSTALL/tmp" install
-
-      cp -a "$SNAPCRAFT_PART_INSTALL/tmp/$KF5_DIR/." "$SNAPCRAFT_PART_INSTALL"
-      rm -r "$SNAPCRAFT_PART_INSTALL/tmp"
-    after:
-      - qtconf
-
-  qtwayland:
-    source: https://github.com/qt/qtwayland.git
-    source-depth: 1
-    source-tag: v5.12.3
-    plugin: dump
-    build-snaps:
-      - kde-frameworks-5-core18-sdk
-      - kde-frameworks-5-core18
-    build-packages:
-      - libglvnd-dev
-    override-build: |
-      KF5_DIR=/snap/kde-frameworks-5-core18-sdk/current
-
-      $KF5_DIR/usr/lib/qt5/bin/qmake -qtconf "$SNAPCRAFT_STAGE/qt.conf"
-      make -j$(nproc)
-      make INSTALL_ROOT="$SNAPCRAFT_PART_INSTALL/tmp" install
-
-      cp -a "$SNAPCRAFT_PART_INSTALL/tmp/$KF5_DIR/." "$SNAPCRAFT_PART_INSTALL"
-      cp -a "$SNAPCRAFT_PART_INSTALL/tmp/$SNAPCRAFT_STAGE/." "$SNAPCRAFT_PART_INSTALL"
-      rm -r "$SNAPCRAFT_PART_INSTALL/tmp"
-    after:
-      - qtconf
-    prime: [-./*]
-
-  xxhash:
-    source: https://github.com/Cyan4973/xxHash.git
-    source-depth: 1
-    source-tag: v0.7.2
-    plugin: make
-    make-parameters: [PREFIX=]
+      make -j$SNAPCRAFT_PARALLEL_BUILD_COUNT
+      make INSTALL_ROOT="$SNAPCRAFT_PART_INSTALL" install
+    stage:
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/libjpeg.so.8.2.2
     prime:
-      - -./bin
-      - -./include
-      - -./share
+      - -./usr/include
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/cmake
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/pkgconfig
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/bin
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/mkspecs
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/examples
+      # Allow tdesktop's custom try-portal-and-fallback logic to work
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/plugins/platformthemes/libqxdgdesktopportal.so
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/*.a
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/*.la
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/*.prl
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/*.so
+      - -./usr/lib/qt5
+      - -./usr/share
+    after:
+      - mozjpeg
+      - patches
+
+  rnnoise:
+    source: https://gitlab.xiph.org/xiph/rnnoise.git
+    source-depth: 1
+    source-commit: 7f449bf8bd3b933891d12c30112268c4090e4d59
+    plugin: autotools
+    autotools-configure-parameters:
+      - --prefix=/usr
+      - --libdir=\${exec_prefix}/lib/$SNAPCRAFT_ARCH_TRIPLET
+      - --disable-static
+      - --disable-examples
+      - --disable-doc
+    prime:
+      - -./usr/include
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/pkgconfig
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/librnnoise.la
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/librnnoise.so
+      - -./usr/share
+
+  webrtc:
+    source: https://github.com/desktop-app/tg_owt.git
+    source-depth: 1
+    source-commit: 91d836dc84a16584c6ac52b36c04c0de504d9c34
+    plugin: cmake
+    build-packages:
+      - yasm
+      - libglib2.0-dev
+      - libopus-dev
+      - libpipewire-0.2-dev
+      - libssl-dev
+      - libx11-dev
+      - libxcomposite-dev
+      - libxdamage-dev
+      - libxext-dev
+      - libxfixes-dev
+      - libxrender-dev
+      - libxrandr-dev
+      - libxtst-dev
+    stage-packages:
+      - libglib2.0-0
+      - libopus0
+      - libpipewire-0.2-1
+      - libssl1.1
+      - libx11-6
+      - libxcomposite1
+      - libxdamage1
+      - libxext6
+      - libxfixes3
+      - libxrender1
+      - libxrandr2
+      - libxtst6
+    cmake-parameters:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_PREFIX=/usr
+      - -DBUILD_SHARED_LIBS=OFF
+      - -DJPEG_LIBRARY_RELEASE=$SNAPCRAFT_STAGE/usr/lib/$SNAPCRAFT_ARCH_TRIPLET/libjpeg.so
+      - -DJPEG_INCLUDE_DIR=$SNAPCRAFT_STAGE/usr/include
+      - -DTG_OWT_BUILD_AUDIO_BACKENDS=OFF
+    prime:
+      - -./usr/include
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/cmake
+      - -./usr/lib/$SNAPCRAFT_ARCH_TRIPLET/*.a
+    after:
+      - ffmpeg
+      - mozjpeg

@@ -8,10 +8,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/storage_cloud_blob.h"
 
 #include "base/zlib_help.h"
-#include "core/application.h"
 #include "lang/lang_keys.h"
-#include "layout.h"
+#include "ui/text/format_values.h"
 #include "main/main_account.h"
+#include "main/main_session.h"
 
 namespace Storage::CloudBlob {
 
@@ -40,9 +40,9 @@ bool ExtractZipFile(zlib::FileToRead &zip, const QString path) {
 } // namespace
 
 bool UnpackBlob(
-	const QString &path,
-	const QString &folder,
-	Fn<bool(const QString &)> checkNameCallback) {
+		const QString &path,
+		const QString &folder,
+		Fn<bool(const QString &)> checkNameCallback) {
 	const auto bytes = ReadFinalFile(path);
 	if (bytes.isEmpty()) {
 		return false;
@@ -69,25 +69,25 @@ bool UnpackBlob(
 }
 
 QString StateDescription(const BlobState &state, tr::phrase<> activeText) {
-	return state.match([](const Available &data) {
+	return v::match(state, [](const Available &data) {
 		return tr::lng_emoji_set_download(
 			tr::now,
 			lt_size,
-			formatSizeText(data.size));
+			Ui::FormatSizeText(data.size));
 	}, [](const Ready &data) -> QString {
 		return tr::lng_emoji_set_ready(tr::now);
 	}, [&](const Active &data) -> QString {
 		return activeText(tr::now);
 	}, [](const Loading &data) {
 		const auto percent = (data.size > 0)
-			? snap((data.already * 100) / float64(data.size), 0., 100.)
+			? std::clamp((data.already * 100) / float64(data.size), 0., 100.)
 			: 0.;
 		return tr::lng_emoji_set_loading(
 			tr::now,
 			lt_percent,
 			QString::number(int(std::round(percent))) + '%',
 			lt_progress,
-			formatDownloadText(data.already, data.size));
+			Ui::FormatDownloadText(data.already, data.size));
 	}, [](const Failed &data) {
 		return tr::lng_attach_failed(tr::now);
 	});
@@ -95,6 +95,7 @@ QString StateDescription(const BlobState &state, tr::phrase<> activeText) {
 
 BlobLoader::BlobLoader(
 	QObject *parent,
+	not_null<Main::Session*> session,
 	int id,
 	MTP::DedicatedLoader::Location location,
 	const QString &folder,
@@ -103,7 +104,7 @@ BlobLoader::BlobLoader(
 , _folder(folder)
 , _id(id)
 , _state(Loading{ 0, size })
-, _mtproto(Core::App().activeAccount().mtp()) {
+, _mtproto(session.get()) {
 	const auto ready = [=](std::unique_ptr<MTP::DedicatedLoader> loader) {
 		if (loader) {
 			setImplementation(std::move(loader));
@@ -125,9 +126,6 @@ rpl::producer<BlobState> BlobLoader::state() const {
 void BlobLoader::setImplementation(
 		std::unique_ptr<MTP::DedicatedLoader> loader) {
 	_implementation = std::move(loader);
-	auto convert = [](auto value) {
-		return BlobState(value);
-	};
 	_state = _implementation->progress(
 	) | rpl::map([](const Loading &state) {
 		return BlobState(state);

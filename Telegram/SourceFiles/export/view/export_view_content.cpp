@@ -7,15 +7,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "export/view/export_view_content.h"
 
+#include "export/export_settings.h"
 #include "lang/lang_keys.h"
-#include "layout.h"
+#include "ui/text/format_values.h"
 
 namespace Export {
 namespace View {
 
 const QString Content::kDoneId = "done";
 
-Content ContentFromState(const ProcessingState &state) {
+Content ContentFromState(
+		not_null<Settings*> settings,
+		const ProcessingState &state) {
 	using Step = ProcessingState::Step;
 
 	auto result = Content();
@@ -23,8 +26,9 @@ Content ContentFromState(const ProcessingState &state) {
 			const QString &id,
 			const QString &label,
 			const QString &info,
-			float64 progress) {
-		result.rows.push_back({ id, label, info, progress });
+			float64 progress,
+			uint64 randomId = 0) {
+		result.rows.push_back({ id, label, info, progress, randomId });
 	};
 	const auto pushMain = [&](const QString &label) {
 		const auto info = (state.entityCount > 0)
@@ -37,7 +41,6 @@ Content ContentFromState(const ProcessingState &state) {
 			return;
 		}
 		const auto substepsTotal = state.substepsTotal;
-		const auto step = static_cast<int>(state.step);
 		const auto done = state.substepsPassed;
 		const auto add = state.substepsNow;
 		const auto doneProgress = done / float64(substepsTotal);
@@ -53,15 +56,18 @@ Content ContentFromState(const ProcessingState &state) {
 			: addPart(state.entityIndex, state.entityCount);
 		push("main", label, info, doneProgress + addProgress);
 	};
-	const auto pushBytes = [&](const QString &id, const QString &label) {
+	const auto pushBytes = [&](
+			const QString &id,
+			const QString &label,
+			uint64 randomId) {
 		if (!state.bytesCount) {
 			return;
 		}
 		const auto progress = state.bytesLoaded / float64(state.bytesCount);
-		const auto info = formatDownloadText(
+		const auto info = Ui::FormatDownloadText(
 			state.bytesLoaded,
 			state.bytesCount);
-		push(id, label, info, progress);
+		push(id, label, info, progress, randomId);
 	};
 	switch (state.step) {
 	case Step::Initializing:
@@ -77,7 +83,8 @@ Content ContentFromState(const ProcessingState &state) {
 		pushMain(tr::lng_export_state_userpics(tr::now));
 		pushBytes(
 			"userpic" + QString::number(state.entityIndex),
-			state.bytesName);
+			state.bytesName,
+			state.bytesRandomId);
 		break;
 	case Step::Contacts:
 		pushMain(tr::lng_export_option_contacts(tr::now));
@@ -89,14 +96,18 @@ Content ContentFromState(const ProcessingState &state) {
 		pushMain(tr::lng_export_option_other(tr::now));
 		break;
 	case Step::Dialogs:
-		pushMain(tr::lng_export_state_chats(tr::now));
+		if (state.entityCount > 1) {
+			pushMain(tr::lng_export_state_chats(tr::now));
+		}
 		push(
 			"chat" + QString::number(state.entityIndex),
 			(state.entityName.isEmpty()
 				? tr::lng_deleted(tr::now)
 				: (state.entityType == ProcessingState::EntityType::Chat)
 				? state.entityName
-				: tr::lng_saved_messages(tr::now)),
+				: (state.entityType == ProcessingState::EntityType::SavedMessages)
+				? tr::lng_saved_messages(tr::now)
+				: tr::lng_replies_messages(tr::now)),
 			(state.itemCount > 0
 				? (QString::number(state.itemIndex)
 					+ " / "
@@ -110,11 +121,13 @@ Content ContentFromState(const ProcessingState &state) {
 				+ QString::number(state.entityIndex)
 				+ '_'
 				+ QString::number(state.itemIndex)),
-			state.bytesName);
+			state.bytesName,
+			state.bytesRandomId);
 		break;
 	default: Unexpected("Step in ContentFromState.");
 	}
-	while (result.rows.size() < 3) {
+	const auto requiredRows = settings->onlySinglePeer() ? 2 : 3;
+	while (result.rows.size() < requiredRows) {
 		result.rows.emplace_back();
 	}
 	return result;
@@ -140,7 +153,7 @@ Content ContentFromState(const FinishedState &state) {
 		tr::lng_export_total_size(
 			tr::now,
 			lt_size,
-			formatSizeText(state.bytesCount)),
+			Ui::FormatSizeText(state.bytesCount)),
 		QString(),
 		1. });
 	return result;

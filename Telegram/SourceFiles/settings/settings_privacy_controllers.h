@@ -12,11 +12,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_element.h"
 #include "mtproto/sender.h"
 
+namespace Window {
+class SessionController;
+} // namespace Window
+
 namespace Settings {
 
-class BlockedBoxController
-	: public PeerListController
-	, private base::Subscriber {
+class BlockedBoxController : public PeerListController {
 public:
 	explicit BlockedBoxController(
 		not_null<Window::SessionController*> window);
@@ -27,15 +29,15 @@ public:
 	void rowActionClicked(not_null<PeerListRow*> row) override;
 	void loadMoreRows() override;
 
-	static void BlockNewUser(not_null<Window::SessionController*> window);
+	static void BlockNewPeer(not_null<Window::SessionController*> window);
 
 private:
-	void receivedUsers(const QVector<MTPContactBlocked> &result);
-	void handleBlockedEvent(not_null<UserData*> user);
+	void receivedPeers(const QVector<MTPPeerBlocked> &result);
+	void handleBlockedEvent(not_null<PeerData*> peer);
 
-	bool appendRow(not_null<UserData*> user);
-	bool prependRow(not_null<UserData*> user);
-	std::unique_ptr<PeerListRow> createRow(not_null<UserData*> user) const;
+	bool appendRow(not_null<PeerData*> peer);
+	bool prependRow(not_null<PeerData*> peer);
+	std::unique_ptr<PeerListRow> createRow(not_null<PeerData*> peer) const;
 
 	const not_null<Window::SessionController*> _window;
 	MTP::Sender _api;
@@ -168,7 +170,8 @@ public:
 	using Option = EditPrivacyBox::Option;
 	using Exception = EditPrivacyBox::Exception;
 
-	explicit ForwardsPrivacyController(not_null<::Main::Session*> session);
+	explicit ForwardsPrivacyController(
+		not_null<Window::SessionController*> controller);
 
 	Key key() override;
 	MTPInputPrivacyKey apiKey() override;
@@ -195,7 +198,7 @@ private:
 		not_null<HistoryView::Element*> view,
 		Option value);
 
-	const not_null<::Main::Session*> _session;
+	const not_null<Window::SessionController*> _controller;
 
 };
 

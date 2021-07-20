@@ -7,8 +7,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "media/clip/media_clip_check_streaming.h"
 
-#include <QtCore/QBuffer>
+#include "core/file_location.h"
+#include "base/bytes.h"
+#include "logs.h"
+
 #include <QtCore/QtEndian>
+#include <QtCore/QBuffer>
 
 namespace Media {
 namespace Clip {
@@ -24,7 +28,6 @@ Type ReadBigEndian(bytes::const_span data) {
 }
 
 bool IsAtom(bytes::const_span header, const char (&atom)[5]) {
-	const auto check = header.subspan(4, 4);
 	return bytes::compare(
 		header.subspan(4, 4),
 		bytes::make_span(atom).subspan(0, 4)) == 0;
@@ -33,7 +36,7 @@ bool IsAtom(bytes::const_span header, const char (&atom)[5]) {
 } // namespace
 
 bool CheckStreamingSupport(
-		const FileLocation &location,
+		const Core::FileLocation &location,
 		QByteArray data) {
 	QBuffer buffer;
 	QFile file;

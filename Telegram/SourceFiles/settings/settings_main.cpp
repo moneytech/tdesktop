@@ -24,13 +24,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_cloud_themes.h"
 #include "data/data_chat_filters.h"
 #include "lang/lang_keys.h"
+#include "lang/lang_instance.h"
 #include "storage/localstorage.h"
 #include "main/main_session.h"
+#include "main/main_session_settings.h"
 #include "main/main_account.h"
 #include "main/main_app_config.h"
 #include "apiwrap.h"
+#include "api/api_sensitive_content.h"
+#include "api/api_global_privacy.h"
+#include "window/window_controller.h"
 #include "window/window_session_controller.h"
-#include "core/file_utilities.h"
+#include "core/click_handler_types.h"
 #include "base/call_delayed.h"
 #include "facades.h"
 #include "app.h"
@@ -45,10 +50,10 @@ void SetupLanguageButton(
 		container,
 		tr::lng_settings_language(),
 		rpl::single(
-			Lang::Current().id()
+			Lang::GetInstance().id()
 		) | rpl::then(
-			Lang::Current().idChanges()
-		) | rpl::map([] { return Lang::Current().nativeName(); }),
+			Lang::GetInstance().idChanges()
+		) | rpl::map([] { return Lang::GetInstance().nativeName(); }),
 		icon ? st::settingsSectionButton : st::settingsButton,
 		icon ? &st::settingsIconLanguage : nullptr);
 	const auto guard = Ui::CreateChild<base::binary_guard>(button.get());
@@ -117,7 +122,7 @@ void SetupSections(
 				st::settingsSectionButton,
 				&st::settingsIconFolders)))->setDuration(0);
 	if (!controller->session().data().chatsFilters().list().empty()
-		|| Global::DialogsFiltersEnabled()) {
+		|| controller->session().settings().dialogsFiltersEnabled()) {
 		slided->show(anim::type::instant);
 		preload();
 	} else {
@@ -163,6 +168,7 @@ bool HasInterfaceScale() {
 }
 
 void SetupInterfaceScale(
+		not_null<Window::Controller*> window,
 		not_null<Ui::VerticalLayout*> container,
 		bool icon) {
 	if (!HasInterfaceScale()) {
@@ -208,10 +214,11 @@ void SetupInterfaceScale(
 		}
 		return (result == ScaleValues.size()) ? (result - 1) : result;
 	};
-	const auto inSetScale = Ui::CreateChild<bool>(container.get());
-	const auto setScale = std::make_shared<Fn<void(int)>>();
-	*setScale = [=](int scale) {
-		if (*inSetScale) return;
+	const auto inSetScale = container->lifetime().make_state<bool>();
+	const auto setScale = [=](int scale, const auto &repeatSetScale) -> void {
+		if (*inSetScale) {
+			return;
+		}
 		*inSetScale = true;
 		const auto guard = gsl::finally([=] { *inSetScale = false; });
 
@@ -227,9 +234,9 @@ void SetupInterfaceScale(
 				base::call_delayed(
 					st::defaultSettingsSlider.duration,
 					button,
-					[=] { (*setScale)(cConfigScale()); });
+					[=] { repeatSetScale(cConfigScale(), repeatSetScale); });
 			});
-			Ui::show(Box<ConfirmBox>(
+			window->show(Box<ConfirmBox>(
 				tr::lng_settings_need_restart(tr::now),
 				tr::lng_settings_restart_now(tr::now),
 				confirmed,
@@ -254,22 +261,24 @@ void SetupInterfaceScale(
 	slider->sectionActivated(
 	) | rpl::map([=](int section) {
 		return scaleByIndex(section);
+	}) | rpl::filter([=](int scale) {
+		return cEvalScale(scale) != cEvalScale(cConfigScale());
 	}) | rpl::start_with_next([=](int scale) {
-		(*setScale)((scale == cScreenScale())
-			? style::kScaleAuto
-			: scale);
+		setScale(
+			(scale == cScreenScale()) ? style::kScaleAuto : scale,
+			setScale);
 	}, slider->lifetime());
 
 	button->toggledValue(
 	) | rpl::map([](bool checked) {
 		return checked ? style::kScaleAuto : cEvalScale(cConfigScale());
 	}) | rpl::start_with_next([=](int scale) {
-		(*setScale)(scale);
+		setScale(scale, setScale);
 	}, button->lifetime());
 }
 
 void OpenFaq() {
-	File::OpenUrl(telegramFaqLink());
+	UrlClickHandler::Open(telegramFaqLink());
 }
 
 void SetupFaq(not_null<Ui::VerticalLayout*> container, bool icon) {
@@ -314,7 +323,7 @@ void SetupHelp(
 						Ui::showPeerHistory(user, ShowAtUnreadMsgId);
 					}
 				});
-			}).fail([=](const RPCError &error) {
+			}).fail([=](const MTP::Error &error) {
 				*requestId = 0;
 			}).send();
 		});
@@ -325,7 +334,7 @@ void SetupHelp(
 			sure,
 			OpenFaq);
 		box->setStrictCancel(true);
-		Ui::show(std::move(box));
+		controller->show(std::move(box));
 	});
 
 	AddSkip(container);
@@ -361,7 +370,7 @@ void Main::setupContent(not_null<Window::SessionController*> controller) {
 	if (HasInterfaceScale()) {
 		AddDivider(content);
 		AddSkip(content);
-		SetupInterfaceScale(content);
+		SetupInterfaceScale(&controller->window(), content);
 		AddSkip(content);
 	}
 	SetupHelp(controller, content);
@@ -371,6 +380,8 @@ void Main::setupContent(not_null<Window::SessionController*> controller) {
 	// If we load this in advance it won't jump when we open its' section.
 	controller->session().api().reloadPasswordState();
 	controller->session().api().reloadContactSignupSilent();
+	controller->session().api().sensitiveContent().reload();
+	controller->session().api().globalPrivacy().reload();
 	controller->session().data().cloudThemes().refresh();
 }
 

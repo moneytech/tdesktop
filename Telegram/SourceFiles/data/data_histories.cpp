@@ -9,7 +9,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "data/data_session.h"
 #include "data/data_channel.h"
+#include "data/data_chat.h"
 #include "data/data_folder.h"
+#include "data/data_scheduled_messages.h"
 #include "main/main_session.h"
 #include "window/notifications_manager.h"
 #include "history/history.h"
@@ -66,23 +68,32 @@ void Histories::clearAll() {
 }
 
 void Histories::readInbox(not_null<History*> history) {
+	DEBUG_LOG(("Reading: readInbox called."));
 	if (history->lastServerMessageKnown()) {
 		const auto last = history->lastServerMessage();
+		DEBUG_LOG(("Reading: last known, reading till %1."
+			).arg(last ? last->id : 0));
 		readInboxTill(history, last ? last->id : 0);
 		return;
 	} else if (history->loadedAtBottom()) {
 		if (const auto lastId = history->maxMsgId()) {
+			DEBUG_LOG(("Reading: loaded at bottom, maxMsgId %1."
+				).arg(lastId));
 			readInboxTill(history, lastId);
 			return;
 		} else if (history->loadedAtTop()) {
+			DEBUG_LOG(("Reading: loaded at bottom, loaded at top."));
 			readInboxTill(history, 0);
 			return;
 		}
+		DEBUG_LOG(("Reading: loaded at bottom, but requesting entry."));
 	}
 	requestDialogEntry(history, [=] {
 		Expects(history->lastServerMessageKnown());
 
 		const auto last = history->lastServerMessage();
+		DEBUG_LOG(("Reading: got entry, reading till %1."
+			).arg(last ? last->id : 0));
 		readInboxTill(history, last ? last->id : 0);
 	});
 }
@@ -135,10 +146,20 @@ void Histories::readInboxTill(
 		bool force) {
 	Expects(IsServerMsgId(tillId) || (!tillId && !force));
 
+	DEBUG_LOG(("Reading: readInboxTill %1, force %2."
+		).arg(tillId
+		).arg(Logs::b(force)));
+
 	const auto syncGuard = gsl::finally([&] {
+		DEBUG_LOG(("Reading: in guard, unread %1."
+			).arg(history->unreadCount()));
 		if (history->unreadCount() > 0) {
 			if (const auto last = history->lastServerMessage()) {
+				DEBUG_LOG(("Reading: checking last %1 and %2."
+					).arg(last->id
+					).arg(tillId));
 				if (last->id == tillId) {
+					DEBUG_LOG(("Reading: locally marked as read."));
 					history->setUnreadCount(0);
 					history->updateChatListEntry();
 				}
@@ -146,18 +167,25 @@ void Histories::readInboxTill(
 		}
 	});
 
-	history->session().notifications().clearIncomingFromHistory(history);
+	Core::App().notifications().clearIncomingFromHistory(history);
 
 	const auto needsRequest = history->readInboxTillNeedsRequest(tillId);
 	if (!needsRequest && !force) {
+		DEBUG_LOG(("Reading: readInboxTill finish 1."));
 		return;
 	} else if (!history->trackUnreadMessages()) {
+		DEBUG_LOG(("Reading: readInboxTill finish 2."));
 		return;
 	}
 	const auto maybeState = lookup(history);
 	if (maybeState && maybeState->sentReadTill >= tillId) {
+		DEBUG_LOG(("Reading: readInboxTill finish 3 with %1."
+			).arg(maybeState->sentReadTill));
 		return;
 	} else if (maybeState && maybeState->willReadTill >= tillId) {
+		DEBUG_LOG(("Reading: readInboxTill finish 4 with %1 and force %2."
+			).arg(maybeState->sentReadTill
+			).arg(Logs::b(force)));
 		if (force) {
 			sendPendingReadInbox(history);
 		}
@@ -171,23 +199,35 @@ void Histories::readInboxTill(
 		&& stillUnread
 		&& history->unreadCountKnown()
 		&& *stillUnread == history->unreadCount()) {
+		DEBUG_LOG(("Reading: count didn't change so just update till %1"
+			).arg(tillId));
 		history->setInboxReadTill(tillId);
 		return;
 	}
 	auto &state = maybeState ? *maybeState : _states[history];
 	state.willReadTill = tillId;
 	if (force || !stillUnread || !*stillUnread) {
+		DEBUG_LOG(("Reading: will read till %1 with still unread %2"
+			).arg(tillId
+			).arg(stillUnread.value_or(-666)));
 		state.willReadWhen = 0;
 		sendReadRequests();
 		if (!stillUnread) {
 			return;
 		}
 	} else if (!state.willReadWhen) {
+		DEBUG_LOG(("Reading: will read till %1 with postponed").arg(tillId));
 		state.willReadWhen = crl::now() + kReadRequestTimeout;
 		if (!_readRequestsTimer.isActive()) {
 			_readRequestsTimer.callOnce(kReadRequestTimeout);
 		}
+	} else {
+		DEBUG_LOG(("Reading: will read till %1 postponed already"
+			).arg(tillId));
 	}
+	DEBUG_LOG(("Reading: marking now with till %1 and still %2"
+		).arg(tillId
+		).arg(*stillUnread));
 	history->setInboxReadTill(tillId);
 	history->setUnreadCount(*stillUnread);
 	history->updateChatListEntry();
@@ -226,7 +266,7 @@ void Histories::requestDialogEntry(not_null<Data::Folder*> folder) {
 	)).done([=](const MTPmessages_PeerDialogs &result) {
 		applyPeerDialogs(result);
 		_dialogFolderRequests.remove(folder);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_dialogFolderRequests.remove(folder);
 	}).send();
 }
@@ -265,11 +305,11 @@ void Histories::sendDialogRequests() {
 	if (_dialogRequestsPending.empty()) {
 		return;
 	}
-	const auto histories = ranges::view::all(
+	const auto histories = ranges::views::all(
 		_dialogRequestsPending
-	) | ranges::view::transform([](const auto &pair) {
+	) | ranges::views::transform([](const auto &pair) {
 		return pair.first;
-	}) | ranges::view::filter([&](not_null<History*> history) {
+	}) | ranges::views::filter([&](not_null<History*> history) {
 		const auto state = lookup(history);
 		if (!state) {
 			return true;
@@ -306,7 +346,7 @@ void Histories::sendDialogRequests() {
 	)).done([=](const MTPmessages_PeerDialogs &result) {
 		applyPeerDialogs(result);
 		finalize();
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		finalize();
 	}).send();
 }
@@ -386,7 +426,7 @@ void Histories::requestFakeChatListMessage(
 			_fakeChatListRequests.erase(history);
 			history->setFakeChatListMessageFrom(result);
 			finish();
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			_fakeChatListRequests.erase(history);
 			history->setFakeChatListMessageFrom(MTP_messages_messages(
 				MTP_vector<MTPMessage>(0),
@@ -399,6 +439,9 @@ void Histories::requestFakeChatListMessage(
 
 void Histories::sendPendingReadInbox(not_null<History*> history) {
 	if (const auto state = lookup(history)) {
+		DEBUG_LOG(("Reading: send pending now with till %1 and when %2"
+			).arg(state->willReadTill
+			).arg(state->willReadWhen));
 		if (state->willReadTill && state->willReadWhen) {
 			state->willReadWhen = 0;
 			sendReadRequests();
@@ -407,6 +450,7 @@ void Histories::sendPendingReadInbox(not_null<History*> history) {
 }
 
 void Histories::sendReadRequests() {
+	DEBUG_LOG(("Reading: send requests with count %1.").arg(_states.size()));
 	if (_states.empty()) {
 		return;
 	}
@@ -414,10 +458,14 @@ void Histories::sendReadRequests() {
 	auto next = std::optional<crl::time>();
 	for (auto &[history, state] : _states) {
 		if (!state.willReadTill) {
+			DEBUG_LOG(("Reading: skipping zero till."));
 			continue;
 		} else if (state.willReadWhen <= now) {
+			DEBUG_LOG(("Reading: sending with till %1."
+				).arg(state.willReadTill));
 			sendReadRequest(history, state);
 		} else if (!next || *next > state.willReadWhen) {
+			DEBUG_LOG(("Reading: scheduling for later send."));
 			next = state.willReadWhen;
 		}
 	}
@@ -434,7 +482,11 @@ void Histories::sendReadRequest(not_null<History*> history, State &state) {
 	const auto tillId = state.sentReadTill = base::take(state.willReadTill);
 	state.willReadWhen = 0;
 	state.sentReadDone = false;
+	DEBUG_LOG(("Reading: sending request now with till %1."
+		).arg(tillId));
 	sendRequest(history, RequestType::ReadInbox, [=](Fn<void()> finish) {
+		DEBUG_LOG(("Reading: sending request invoked with till %1."
+			).arg(tillId));
 		const auto finished = [=] {
 			const auto state = lookup(history);
 			Assert(state != nullptr);
@@ -458,7 +510,7 @@ void Histories::sendReadRequest(not_null<History*> history, State &state) {
 				MTP_int(tillId)
 			)).done([=](const MTPBool &result) {
 				finished();
-			}).fail([=](const RPCError &error) {
+			}).fail([=](const MTP::Error &error) {
 				finished();
 			}).send();
 		} else {
@@ -468,7 +520,7 @@ void Histories::sendReadRequest(not_null<History*> history, State &state) {
 			)).done([=](const MTPmessages_AffectedMessages &result) {
 				session().api().applyAffectedMessages(history->peer, result);
 				finished();
-			}).fail([=](const RPCError &error) {
+			}).fail([=](const MTP::Error &error) {
 				finished();
 			}).send();
 		}
@@ -498,10 +550,9 @@ bool Histories::postponeHistoryRequest(const State &state) const {
 }
 
 bool Histories::postponeEntryRequest(const State &state) const {
-	const auto i = ranges::find_if(state.sent, [](const auto &pair) {
+	return ranges::any_of(state.sent, [](const auto &pair) {
 		return pair.second.type != RequestType::History;
 	});
-	return (i != end(state.sent));
 }
 
 void Histories::deleteMessages(
@@ -514,7 +565,7 @@ void Histories::deleteMessages(
 			finish();
 			history->requestChatListMessage();
 		};
-		const auto fail = [=](const RPCError &error) {
+		const auto fail = [=](const MTP::Error &error) {
 			finish();
 		};
 		if (const auto channel = history->peer->asChannel()) {
@@ -539,21 +590,57 @@ void Histories::deleteAllMessages(
 		bool revoke) {
 	sendRequest(history, RequestType::Delete, [=](Fn<void()> finish) {
 		const auto peer = history->peer;
-		const auto fail = [=](const RPCError &error) {
+		const auto fail = [=](const MTP::Error &error) {
 			finish();
 		};
-		if (const auto channel = peer->asChannel()) {
+		const auto chat = peer->asChat();
+		const auto channel = peer->asChannel();
+		if (!justClear && revoke && channel && channel->canDelete()) {
+			return session().api().request(MTPchannels_DeleteChannel(
+				channel->inputChannel
+			)).done([=](const MTPUpdates &result) {
+				session().api().applyUpdates(result);
+			//}).fail([=](const MTP::Error &error) {
+			//	if (error.type() == qstr("CHANNEL_TOO_LARGE")) {
+			//		Ui::show(Box<InformBox>(tr::lng_cant_delete_channel(tr::now)));
+			//	}
+			}).send();
+		} else if (channel) {
 			return session().api().request(MTPchannels_DeleteHistory(
 				channel->inputChannel,
 				MTP_int(deleteTillId)
 			)).done([=](const MTPBool &result) {
 				finish();
 			}).fail(fail).send();
+		} else if (revoke && chat && chat->amCreator()) {
+			return session().api().request(MTPmessages_DeleteChat(
+				chat->inputChat
+			)).done([=](const MTPBool &result) {
+				finish();
+			}).fail([=](const MTP::Error &error) {
+				if (error.type() == "PEER_ID_INVALID") {
+					// Try to join and delete,
+					// while delete fails for non-joined.
+					session().api().request(MTPmessages_AddChatUser(
+						chat->inputChat,
+						MTP_inputUserSelf(),
+						MTP_int(0)
+					)).done([=](const MTPUpdates &updates) {
+						session().api().applyUpdates(updates);
+						deleteAllMessages(
+							history,
+							deleteTillId,
+							justClear,
+							revoke);
+					}).send();
+				}
+				finish();
+			}).send();
 		} else {
 			using Flag = MTPmessages_DeleteHistory::Flag;
 			const auto flags = Flag(0)
 				| (justClear ? Flag::f_just_clear : Flag(0))
-				| ((peer->isUser() && revoke) ? Flag::f_revoke : Flag(0));
+				| (revoke ? Flag::f_revoke : Flag(0));
 			return session().api().request(MTPmessages_DeleteHistory(
 				MTP_flags(flags),
 				peer->input,
@@ -573,6 +660,56 @@ void Histories::deleteAllMessages(
 			}).fail(fail).send();
 		}
 	});
+}
+
+void Histories::deleteMessages(const MessageIdsList &ids, bool revoke) {
+	auto remove = std::vector<not_null<HistoryItem*>>();
+	remove.reserve(ids.size());
+	base::flat_map<not_null<History*>, QVector<MTPint>> idsByPeer;
+	base::flat_map<not_null<PeerData*>, QVector<MTPint>> scheduledIdsByPeer;
+	for (const auto itemId : ids) {
+		if (const auto item = _owner->message(itemId)) {
+			const auto history = item->history();
+			if (item->isScheduled()) {
+				const auto wasOnServer = !item->isSending()
+					&& !item->hasFailed();
+				if (wasOnServer) {
+					scheduledIdsByPeer[history->peer].push_back(MTP_int(
+						_owner->scheduledMessages().lookupId(item)));
+				} else {
+					_owner->scheduledMessages().removeSending(item);
+				}
+				continue;
+			}
+			remove.push_back(item);
+			if (IsServerMsgId(item->id)) {
+				idsByPeer[history].push_back(MTP_int(itemId.msg));
+			}
+		}
+	}
+
+	for (const auto &[history, ids] : idsByPeer) {
+		history->owner().histories().deleteMessages(history, ids, revoke);
+	}
+	for (const auto &[peer, ids] : scheduledIdsByPeer) {
+		peer->session().api().request(MTPmessages_DeleteScheduledMessages(
+			peer->input,
+			MTP_vector<MTPint>(ids)
+		)).done([peer = peer](const MTPUpdates &result) {
+			peer->session().api().applyUpdates(result);
+		}).send();
+	}
+
+	for (const auto item : remove) {
+		const auto history = item->history();
+		const auto wasLast = (history->lastMessage() == item);
+		const auto wasInChats = (history->chatListMessage() == item);
+		item->destroy();
+
+		if (wasLast || wasInChats) {
+			history->requestChatListMessage();
+		}
+	}
 }
 
 int Histories::sendRequest(
@@ -627,6 +764,9 @@ void Histories::checkPostponed(not_null<History*> history, int id) {
 }
 
 void Histories::cancelRequest(int id) {
+	if (!id) {
+		return;
+	}
 	const auto history = _historyByRequest.take(id);
 	if (!history) {
 		return;

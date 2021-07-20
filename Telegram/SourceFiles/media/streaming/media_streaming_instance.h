@@ -34,6 +34,10 @@ public:
 		not_null<DocumentData*> document,
 		Data::FileOrigin origin,
 		Fn<void()> waitingCallback);
+	Instance(
+		not_null<PhotoData*> photo,
+		Data::FileOrigin origin,
+		Fn<void()> waitingCallback);
 	~Instance();
 
 	[[nodiscard]] bool valid() const;
@@ -65,7 +69,8 @@ public:
 	void callWaitingCallback();
 
 	[[nodiscard]] QImage frame(const FrameRequest &request) const;
-	bool markFrameShown();
+	[[nodiscard]] FrameWithInfo frameWithInfo() const;
+	bool markFrameShown() const;
 
 	void lockPlayer();
 	void unlockPlayer();

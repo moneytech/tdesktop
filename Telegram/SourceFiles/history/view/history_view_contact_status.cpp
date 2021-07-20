@@ -18,6 +18,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_user.h"
 #include "data/data_chat.h"
 #include "data/data_channel.h"
+#include "data/data_session.h"
 #include "window/window_peer_menu.h"
 #include "window/window_controller.h"
 #include "window/window_session_controller.h"
@@ -26,7 +27,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/confirm_box.h"
 #include "boxes/peers/edit_contact_box.h"
 #include "app.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 #include "styles/style_layers.h"
 
 namespace HistoryView {
@@ -39,22 +40,17 @@ bool BarCurrentlyHidden(not_null<PeerData*> peer) {
 	} else if (!(*settings)) {
 		return true;
 	}
-	using Setting = MTPDpeerSettings::Flag;
 	if (const auto user = peer->asUser()) {
 		if (user->isBlocked()) {
 			return true;
 		} else if (user->isContact()
-			&& !((*settings) & Setting::f_share_contact)) {
+			&& !((*settings) & PeerSetting::ShareContact)) {
 			return true;
 		}
-	} else if (!((*settings) & Setting::f_report_spam)) {
+	} else if (!((*settings) & PeerSetting::ReportSpam)) {
 		return true;
 	}
 	return false;
-}
-
-auto MapToEmpty() {
-	return rpl::map([] { return rpl::empty_value(); });
 }
 
 } // namespace
@@ -66,6 +62,10 @@ ContactStatus::Bar::Bar(QWidget *parent, const QString &name)
 	this,
 	QString(),
 	st::historyContactStatusButton)
+, _unarchive(
+	this,
+	tr::lng_new_contact_unarchive(tr::now).toUpper(),
+	st::historyContactStatusButton)
 , _block(
 	this,
 	tr::lng_new_contact_block(tr::now).toUpper(),
@@ -76,7 +76,7 @@ ContactStatus::Bar::Bar(QWidget *parent, const QString &name)
 	st::historyContactStatusButton)
 , _report(
 	this,
-	tr::lng_report_spam_and_leave(tr::now).toUpper(),
+	QString(),
 	st::historyContactStatusBlock)
 , _close(this, st::historyReplyCancel) {
 	resize(_close->size());
@@ -84,33 +84,44 @@ ContactStatus::Bar::Bar(QWidget *parent, const QString &name)
 
 void ContactStatus::Bar::showState(State state) {
 	_add->setVisible(state == State::AddOrBlock || state == State::Add);
-	_block->setVisible(state == State::AddOrBlock);
+	_unarchive->setVisible(state == State::UnarchiveOrBlock
+		|| state == State::UnarchiveOrReport);
+	_block->setVisible(state == State::AddOrBlock
+		|| state == State::UnarchiveOrBlock);
 	_share->setVisible(state == State::SharePhoneNumber);
-	_report->setVisible(state == State::ReportSpam);
+	_report->setVisible(state == State::ReportSpam
+		|| state == State::UnarchiveOrReport);
 	_add->setText((state == State::Add)
 		? tr::lng_new_contact_add_name(tr::now, lt_user, _name).toUpper()
 		: tr::lng_new_contact_add(tr::now).toUpper());
+	_report->setText((state == State::ReportSpam)
+		? tr::lng_report_spam_and_leave(tr::now).toUpper()
+		: tr::lng_report_spam(tr::now).toUpper());
 	updateButtonsGeometry();
 }
 
+rpl::producer<> ContactStatus::Bar::unarchiveClicks() const {
+	return _unarchive->clicks() | rpl::to_empty;
+}
+
 rpl::producer<> ContactStatus::Bar::addClicks() const {
-	return _add->clicks() | MapToEmpty();
+	return _add->clicks() | rpl::to_empty;
 }
 
 rpl::producer<> ContactStatus::Bar::blockClicks() const {
-	return _block->clicks() | MapToEmpty();
+	return _block->clicks() | rpl::to_empty;
 }
 
 rpl::producer<> ContactStatus::Bar::shareClicks() const {
-	return _share->clicks() | MapToEmpty();
+	return _share->clicks() | rpl::to_empty;
 }
 
 rpl::producer<> ContactStatus::Bar::reportClicks() const {
-	return _report->clicks() | MapToEmpty();
+	return _report->clicks() | rpl::to_empty;
 }
 
 rpl::producer<> ContactStatus::Bar::closeClicks() const {
-	return _close->clicks() | MapToEmpty();
+	return _close->clicks() | rpl::to_empty;
 }
 
 void ContactStatus::Bar::resizeEvent(QResizeEvent *e) {
@@ -147,32 +158,34 @@ void ContactStatus::Bar::updateButtonsGeometry() {
 			closeWidth);
 		placeButton(button, full, margin);
 	};
-	if (!_add->isHidden() && !_block->isHidden()) {
-		const auto addWidth = buttonWidth(_add);
-		const auto blockWidth = buttonWidth(_block);
+	const auto &leftButton = _unarchive->isHidden() ? _add : _unarchive;
+	const auto &rightButton = _block->isHidden() ? _report : _block;
+	if (!leftButton->isHidden() && !rightButton->isHidden()) {
+		const auto leftWidth = buttonWidth(leftButton);
+		const auto rightWidth = buttonWidth(rightButton);
 		const auto half = full / 2;
-		if (addWidth <= half
-			&& blockWidth + 2 * closeWidth <= full - half) {
-			placeButton(_add, half);
-			placeButton(_block, full - half);
-		} else if (addWidth + blockWidth <= available) {
+		if (leftWidth <= half
+			&& rightWidth + 2 * closeWidth <= full - half) {
+			placeButton(leftButton, half);
+			placeButton(rightButton, full - half);
+		} else if (leftWidth + rightWidth <= available) {
 			const auto margin = std::clamp(
-				addWidth + blockWidth + closeWidth - available,
+				leftWidth + rightWidth + closeWidth - available,
 				0,
 				closeWidth);
-			const auto realBlockWidth = blockWidth + 2 * closeWidth - margin;
-			if (addWidth > realBlockWidth) {
-				placeButton(_add, addWidth);
-				placeButton(_block, full - addWidth, margin);
+			const auto realBlockWidth = rightWidth + 2 * closeWidth - margin;
+			if (leftWidth > realBlockWidth) {
+				placeButton(leftButton, leftWidth);
+				placeButton(rightButton, full - leftWidth, margin);
 			} else {
-				placeButton(_add, full - realBlockWidth);
-				placeButton(_block, realBlockWidth, margin);
+				placeButton(leftButton, full - realBlockWidth);
+				placeButton(rightButton, realBlockWidth, margin);
 			}
 		} else {
-			const auto forAdd = (available * addWidth)
-				/ (addWidth + blockWidth);
-			placeButton(_add, forAdd);
-			placeButton(_block, full - forAdd, closeWidth);
+			const auto forLeft = (available * leftWidth)
+				/ (leftWidth + rightWidth);
+			placeButton(leftButton, forLeft);
+			placeButton(rightButton, full - forLeft, closeWidth);
 		}
 	} else {
 		placeOne(_add);
@@ -182,10 +195,10 @@ void ContactStatus::Bar::updateButtonsGeometry() {
 }
 
 ContactStatus::ContactStatus(
-	not_null<Window::Controller*> window,
+	not_null<Window::SessionController*> window,
 	not_null<Ui::RpWidget*> parent,
 	not_null<PeerData*> peer)
-: _window(window)
+: _controller(window)
 , _bar(parent, object_ptr<Bar>(parent, peer->shortName()))
 , _shadow(parent) {
 	setupWidgets(parent);
@@ -217,41 +230,34 @@ void ContactStatus::setupWidgets(not_null<Ui::RpWidget*> parent) {
 auto ContactStatus::PeerState(not_null<PeerData*> peer)
 -> rpl::producer<State> {
 	using SettingsChange = PeerData::Settings::Change;
-	using Setting = MTPDpeerSettings::Flag;
 	if (const auto user = peer->asUser()) {
 		using FlagsChange = UserData::Flags::Change;
-		using FullFlagsChange = UserData::FullFlags::Change;
-		using Flag = MTPDuser::Flag;
-		using FullFlag = MTPDuserFull::Flag;
+		using Flag = UserDataFlag;
 
-		auto isContactChanges = user->flagsValue(
+		auto changes = user->flagsValue(
 		) | rpl::filter([](FlagsChange flags) {
 			return flags.diff
-				& (Flag::f_contact | Flag::f_mutual_contact);
-		});
-		auto isBlockedChanges = user->fullFlagsValue(
-		) | rpl::filter([](FullFlagsChange full) {
-			return full.diff & FullFlag::f_blocked;
+				& (Flag::Contact | Flag::MutualContact | Flag::Blocked);
 		});
 		return rpl::combine(
-			std::move(isContactChanges),
-			std::move(isBlockedChanges),
+			std::move(changes),
 			user->settingsValue()
 		) | rpl::map([=](
 				FlagsChange flags,
-				FullFlagsChange full,
 				SettingsChange settings) {
-			if (full.value & FullFlag::f_blocked) {
+			if (flags.value & Flag::Blocked) {
 				return State::None;
 			} else if (user->isContact()) {
-				if (settings.value & Setting::f_share_contact) {
+				if (settings.value & PeerSetting::ShareContact) {
 					return State::SharePhoneNumber;
 				} else {
 					return State::None;
 				}
-			} else if (settings.value & Setting::f_block_contact) {
+			} else if (settings.value & PeerSetting::AutoArchived) {
+				return State::UnarchiveOrBlock;
+			} else if (settings.value & PeerSetting::BlockContact) {
 				return State::AddOrBlock;
-			} else if (settings.value & Setting::f_add_contact) {
+			} else if (settings.value & PeerSetting::AddContact) {
 				return State::Add;
 			} else {
 				return State::None;
@@ -261,7 +267,9 @@ auto ContactStatus::PeerState(not_null<PeerData*> peer)
 
 	return peer->settingsValue(
 	) | rpl::map([=](SettingsChange settings) {
-		return (settings.value & Setting::f_report_spam)
+		return (settings.value & PeerSetting::AutoArchived)
+			? State::UnarchiveOrReport
+			: (settings.value & PeerSetting::ReportSpam)
 			? State::ReportSpam
 			: State::None;
 	});
@@ -291,6 +299,7 @@ void ContactStatus::setupHandlers(not_null<PeerData*> peer) {
 		setupBlockHandler(user);
 		setupShareHandler(user);
 	}
+	setupUnarchiveHandler(peer);
 	setupReportHandler(peer);
 	setupCloseHandler(peer);
 }
@@ -298,23 +307,26 @@ void ContactStatus::setupHandlers(not_null<PeerData*> peer) {
 void ContactStatus::setupAddHandler(not_null<UserData*> user) {
 	_bar.entity()->addClicks(
 	) | rpl::start_with_next([=] {
-		_window->show(Box(EditContactBox, _window, user));
+		_controller->window().show(Box(EditContactBox, _controller, user));
 	}, _bar.lifetime());
 }
 
 void ContactStatus::setupBlockHandler(not_null<UserData*> user) {
 	_bar.entity()->blockClicks(
 	) | rpl::start_with_next([=] {
-		_window->show(
-			Box(Window::PeerMenuBlockUserBox, _window, user, true));
+		_controller->window().show(Box(
+			Window::PeerMenuBlockUserBox,
+			&_controller->window(),
+			user,
+			v::null,
+			Window::ClearChat{}));
 	}, _bar.lifetime());
 }
 
 void ContactStatus::setupShareHandler(not_null<UserData*> user) {
 	_bar.entity()->shareClicks(
 	) | rpl::start_with_next([=] {
-		const auto box = std::make_shared<QPointer<Ui::BoxContent>>();
-		const auto share = [=] {
+		const auto share = [=](Fn<void()> &&close) {
 			user->setSettings(0);
 			user->session().api().request(MTPcontacts_AcceptContact(
 				user->inputUser
@@ -326,11 +338,9 @@ void ContactStatus::setupShareHandler(not_null<UserData*> user) {
 					lt_user,
 					user->shortName()));
 			}).send();
-			if (*box) {
-				(*box)->closeBox();
-			}
+			close();
 		};
-		*box = _window->show(Box<ConfirmBox>(
+		_controller->window().show(Box<ConfirmBox>(
 			tr::lng_new_contact_share_sure(
 				tr::now,
 				lt_phone,
@@ -344,16 +354,27 @@ void ContactStatus::setupShareHandler(not_null<UserData*> user) {
 	}, _bar.lifetime());
 }
 
+void ContactStatus::setupUnarchiveHandler(not_null<PeerData*> peer) {
+	_bar.entity()->unarchiveClicks(
+	) | rpl::start_with_next([=] {
+		Window::ToggleHistoryArchived(peer->owner().history(peer), false);
+		peer->owner().resetNotifySettingsToDefault(peer);
+		if (const auto settings = peer->settings()) {
+			const auto flags = PeerSetting::AutoArchived
+				| PeerSetting::BlockContact
+				| PeerSetting::ReportSpam;
+			peer->setSettings(*settings & ~flags);
+		}
+	}, _bar.lifetime());
+}
+
 void ContactStatus::setupReportHandler(not_null<PeerData*> peer) {
 	_bar.entity()->reportClicks(
 	) | rpl::start_with_next([=] {
 		Expects(!peer->isUser());
 
-		const auto box = std::make_shared<QPointer<Ui::BoxContent>>();
-		const auto callback = crl::guard(&_bar, [=] {
-			if (*box) {
-				(*box)->closeBox();
-			}
+		const auto callback = crl::guard(&_bar, [=](Fn<void()> &&close) {
+			close();
 
 			peer->session().api().request(MTPmessages_ReportSpam(
 				peer->input
@@ -369,15 +390,15 @@ void ContactStatus::setupReportHandler(not_null<PeerData*> peer) {
 			Ui::Toast::Show(tr::lng_report_spam_done(tr::now));
 
 			// Destroys _bar.
-			_window->sessionController()->showBackFromStack();
+			_controller->showBackFromStack();
 		});
 		if (const auto user = peer->asUser()) {
-			peer->session().api().blockUser(user);
+			peer->session().api().blockPeer(user);
 		}
 		const auto text = ((peer->isChat() || peer->isMegagroup())
 			? tr::lng_report_spam_sure_group
 			: tr::lng_report_spam_sure_channel)(tr::now);
-		_window->show(Box<ConfirmBox>(
+		_controller->window().show(Box<ConfirmBox>(
 			text,
 			tr::lng_report_spam_ok(tr::now),
 			st::attentionBoxButton,

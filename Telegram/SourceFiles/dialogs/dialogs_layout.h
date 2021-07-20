@@ -19,10 +19,6 @@ const style::icon *ChatTypeIcon(
 	not_null<PeerData*> peer,
 	bool active,
 	bool selected);
-//const style::icon *FeedTypeIcon( // #feed
-//	not_null<Data::Feed*> feed,
-//	bool active,
-//	bool selected);
 
 class RowPainter {
 public:
@@ -71,14 +67,14 @@ enum UnreadBadgeSize {
 struct UnreadBadgeStyle {
 	UnreadBadgeStyle();
 
-	style::align align;
-	bool active;
-	bool selected;
-	bool muted;
+	style::align align = style::al_right;
+	bool active = false;
+	bool selected = false;
+	bool muted = false;
 	int textTop = 0;
-	int size;
-	int padding;
-	UnreadBadgeSize sizeId;
+	int size = 0;
+	int padding = 0;
+	UnreadBadgeSize sizeId = UnreadBadgeInDialogs;
 	style::font font;
 };
 void paintUnreadCount(

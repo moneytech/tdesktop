@@ -10,6 +10,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "layout.h"
 #include "ui/text/text.h"
 
+class Image;
+
+namespace Ui {
+class PathShiftGradient;
+} // namespace Ui
+
+namespace Data {
+class CloudImageView;
+} // namespace Data
+
 namespace InlineBots {
 
 class Result;
@@ -21,16 +31,23 @@ class ItemBase;
 class PaintContext : public PaintContextBase {
 public:
 	PaintContext(crl::time ms, bool selecting, bool paused, bool lastRow)
-		: PaintContextBase(ms, selecting)
-		, paused(paused)
-		, lastRow(lastRow) {
+	: PaintContextBase(ms, selecting)
+	, paused(paused)
+	, lastRow(lastRow) {
 	}
 	bool paused, lastRow;
+	Ui::PathShiftGradient *pathGradient = nullptr;
 
 };
 
 // this type used as a flag, we dynamic_cast<> to it
 class SendClickHandler : public ClickHandler {
+public:
+	void onClick(ClickContext context) const override {
+	}
+};
+
+class OpenFileClickHandler : public ClickHandler {
 public:
 	void onClick(ClickContext context) const override {
 	}
@@ -50,8 +67,8 @@ public:
 	: _result(result)
 	, _context(context) {
 	}
-	ItemBase(not_null<Context*> context, DocumentData *doc)
-	: _doc(doc)
+	ItemBase(not_null<Context*> context, not_null<DocumentData*> document)
+	: _document(document)
 	, _context(context) {
 	}
 	// Not used anywhere currently.
@@ -80,7 +97,8 @@ public:
 	PhotoData *getPreviewPhoto() const;
 
 	virtual void preload() const;
-	virtual void unloadAnimation() {
+	virtual void unloadHeavyPart() {
+		_thumbnail = nullptr;
 	}
 
 	void update() const;
@@ -94,13 +112,19 @@ public:
 		update();
 	}
 
-	static std::unique_ptr<ItemBase> createLayout(not_null<Context*> context, Result *result, bool forceThumb);
-	static std::unique_ptr<ItemBase> createLayoutGif(not_null<Context*> context, DocumentData *document);
+	static std::unique_ptr<ItemBase> createLayout(
+		not_null<Context*> context,
+		not_null<Result*> result,
+		bool forceThumb);
+	static std::unique_ptr<ItemBase> createLayoutGif(
+		not_null<Context*> context,
+		not_null<DocumentData*> document);
 
 protected:
 	DocumentData *getResultDocument() const;
 	PhotoData *getResultPhoto() const;
-	Image *getResultThumb() const;
+	bool hasResultThumb() const;
+	Image *getResultThumb(Data::FileOrigin origin) const;
 	QPixmap getResultContactAvatar(int width, int height) const;
 	int getResultDuration() const;
 	QString getResultUrl() const;
@@ -114,15 +138,17 @@ protected:
 	Data::FileOrigin fileOrigin() const;
 
 	Result *_result = nullptr;
-	DocumentData *_doc = nullptr;
+	DocumentData *_document = nullptr;
 	PhotoData *_photo = nullptr;
 
 	ClickHandlerPtr _send = ClickHandlerPtr{ new SendClickHandler() };
+	ClickHandlerPtr _open = ClickHandlerPtr{ new OpenFileClickHandler() };
 
 	int _position = 0; // < 0 means removed from layout
 
 private:
 	not_null<Context*> _context;
+	mutable std::shared_ptr<Data::CloudImageView> _thumbnail;
 
 };
 

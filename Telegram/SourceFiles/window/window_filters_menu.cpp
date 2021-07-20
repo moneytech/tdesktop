@@ -10,6 +10,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mainwindow.h"
 #include "window/window_session_controller.h"
 #include "window/window_controller.h"
+#include "window/window_main_menu.h"
+#include "window/window_peer_menu.h"
 #include "main/main_session.h"
 #include "data/data_session.h"
 #include "data/data_chat_filters.h"
@@ -32,8 +34,7 @@ namespace {
 [[nodiscard]] rpl::producer<Dialogs::UnreadState> MainListUnreadState(
 		not_null<Dialogs::MainList*> list) {
 	return rpl::single(rpl::empty_value()) | rpl::then(
-		list->unreadStateChanges(
-			) | rpl::map([] { return rpl::empty_value(); })
+		list->unreadStateChanges() | rpl::to_empty
 	) | rpl::map([=] {
 		return list->unreadState();
 	});
@@ -76,6 +77,8 @@ FiltersMenu::FiltersMenu(
 FiltersMenu::~FiltersMenu() = default;
 
 void FiltersMenu::setup() {
+	setupMainMenuIcon();
+
 	_outer.setAttribute(Qt::WA_OpaquePaintEvent);
 	_outer.show();
 	_outer.paintRequest(
@@ -135,6 +138,18 @@ void FiltersMenu::setup() {
 	});
 }
 
+void FiltersMenu::setupMainMenuIcon() {
+	OtherAccountsUnreadState(
+	) | rpl::start_with_next([=](const OthersUnreadState &state) {
+		const auto icon = !state.count
+			? nullptr
+			: !state.allMuted
+			? &st::windowFiltersMainMenuUnread
+			: &st::windowFiltersMainMenuUnreadMuted;
+		_menu.setIconOverride(icon, icon);
+	}, _outer.lifetime());
+}
+
 void FiltersMenu::scrollToButton(not_null<Ui::RpWidget*> widget) {
 	const auto globalPosition = widget->mapToGlobal(QPoint(0, 0));
 	const auto localTop = _scroll.mapFromGlobal(globalPosition).y();
@@ -173,7 +188,7 @@ void FiltersMenu::refresh() {
 	}
 	_reorder->cancel();
 	auto now = base::flat_map<int, base::unique_qptr<Ui::SideBarButton>>();
-	for (const auto filter : filters->list()) {
+	for (const auto &filter : filters->list()) {
 		now.emplace(
 			filter.id(),
 			prepareButton(
@@ -293,12 +308,26 @@ void FiltersMenu::showMenu(QPoint position, FilterId id) {
 		return;
 	}
 	_popupMenu = base::make_unique_q<Ui::PopupMenu>(i->second.get());
-	_popupMenu->addAction(
+	const auto addAction = [&](const QString &text, Fn<void()> callback) {
+		return _popupMenu->addAction(
+			text,
+			crl::guard(&_outer, std::move(callback)));
+	};
+
+	addAction(
 		tr::lng_filters_context_edit(tr::now),
-		crl::guard(&_outer, [=] { showEditBox(id); }));
-	_popupMenu->addAction(
+		[=] { showEditBox(id); });
+
+	auto filteredChats = [=] {
+		return _session->session().data().chatsFilters().chatsList(id);
+	};
+	Window::MenuAddMarkAsReadChatListAction(
+		std::move(filteredChats),
+		addAction);
+
+	addAction(
 		tr::lng_filters_context_remove(tr::now),
-		crl::guard(&_outer, [=] { showRemoveBox(id); }));
+		[=] { showRemoveBox(id); });
 	_popupMenu->popup(position);
 }
 
@@ -307,11 +336,10 @@ void FiltersMenu::showEditBox(FilterId id) {
 }
 
 void FiltersMenu::showRemoveBox(FilterId id) {
-	const auto box = std::make_shared<QPointer<Ui::BoxContent>>();
-	*box = _session->window().show(Box<ConfirmBox>(
+	_session->window().show(Box<ConfirmBox>(
 		tr::lng_filters_remove_sure(tr::now),
 		tr::lng_filters_remove_yes(tr::now),
-		[=] { (*box)->closeBox(); remove(id); }));
+		[=](Fn<void()> &&close) { close(); remove(id); }));
 }
 
 void FiltersMenu::remove(FilterId id) {
@@ -343,9 +371,9 @@ void FiltersMenu::applyReorder(
 	Assert(i != end(_filters));
 	Assert(i->second == widget);
 
-	auto order = ranges::view::all(
+	auto order = ranges::views::all(
 		list
-	) | ranges::view::transform(
+	) | ranges::views::transform(
 		&Data::ChatFilter::id
 	) | ranges::to_vector;
 	base::reorder(order, oldPosition, newPosition);

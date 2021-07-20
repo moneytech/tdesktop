@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/bytes.h"
 #include "base/invoke_queued.h"
 #include "base/unixtime.h"
+#include "base/qt_adapters.h"
 
 #include <QtCore/QtEndian>
 #include <range/v3/algorithm/reverse.hpp>
@@ -82,12 +83,12 @@ using BigNumContext = openssl::Context;
 	Z(32);
 	S(qstr("\x20"));
 	R(32);
-	S(qstr("\x00\x22"));
+	S(qstr("\x00\x20"));
 	G(0);
 	S(qstr(""
 		"\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\xcc\xa9"
-		"\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x00\x0a"
-		"\x01\x00\x01\x91"));
+		"\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x01\x00"
+		"\x01\x93"));
 	G(2);
 	S(qstr("\x00\x00\x00\x00"));
 	Open();
@@ -103,9 +104,9 @@ using BigNumContext = openssl::Context;
 	S(qstr(""
 		"\x00\x1d\x00\x17\x00\x18\x00\x0b\x00\x02\x01\x00\x00\x23\x00\x00"
 		"\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31"
-		"\x2e\x31\x00\x05\x00\x05\x01\x00\x00\x00\x00\x00\x0d\x00\x14\x00"
-		"\x12\x04\x03\x08\x04\x04\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06"
-		"\x01\x02\x01\x00\x12\x00\x00\x00\x33\x00\x2b\x00\x29"));
+		"\x2e\x31\x00\x05\x00\x05\x01\x00\x00\x00\x00\x00\x0d\x00\x12\x00"
+		"\x10\x04\x03\x08\x04\x04\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06"
+		"\x01\x00\x12\x00\x00\x00\x33\x00\x2b\x00\x29"));
 	G(4);
 	S(qstr("\x00\x01\x00\x00\x1d\x00\x20"));
 	K();
@@ -445,13 +446,22 @@ void ClientHelloGenerator::writeTimestamp() {
 TlsSocket::TlsSocket(
 	not_null<QThread*> thread,
 	const bytes::vector &secret,
-	const QNetworkProxy &proxy)
+	const QNetworkProxy &proxy,
+	bool protocolForFiles)
 : AbstractSocket(thread)
 , _secret(secret) {
 	Expects(_secret.size() >= 21 && _secret[0] == bytes::type(0xEE));
 
 	_socket.moveToThread(thread);
 	_socket.setProxy(proxy);
+	if (protocolForFiles) {
+		_socket.setSocketOption(
+			QAbstractSocket::SendBufferSizeSocketOption,
+			kFilesSendBufferSize);
+		_socket.setSocketOption(
+			QAbstractSocket::ReceiveBufferSizeSocketOption,
+			kFilesReceiveBufferSize);
+	}
 	const auto wrap = [&](auto handler) {
 		return [=](auto &&...args) {
 			InvokeQueued(this, [=] { handler(args...); });
@@ -470,12 +480,9 @@ TlsSocket::TlsSocket(
 		&_socket,
 		&QTcpSocket::readyRead,
 		wrap([=] { plainReadyRead(); }));
-
-	using ErrorSignal = void(QTcpSocket::*)(QAbstractSocket::SocketError);
-	const auto QTcpSocket_error = ErrorSignal(&QAbstractSocket::error);
 	connect(
 		&_socket,
-		QTcpSocket_error,
+		base::QTcpSocket_error,
 		wrap([=](Error e) { handleError(e); }));
 }
 

@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "updater.h"
 
+#include "base/platform/win/base_windows_safe_library.h"
+
 bool _debug = false;
 
 wstring updaterName, updaterDir, updateTo, exeName, customWorkingDir, customKeyFile;
@@ -329,6 +331,8 @@ void updateRegistry() {
 }
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE prevInstance, LPWSTR cmdParamarg, int cmdShow) {
+	base::Platform::InitDynamicLibraries();
+
 	openLog();
 
 	_oldWndExceptionFilter = SetUnhandledExceptionFilter(_exceptionFilter);
@@ -339,7 +343,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE prevInstance, LPWSTR cmdPara
 	LPWSTR *args;
 	int argsCount;
 
-	bool needupdate = false, autostart = false, debug = false, writeprotected = false, startintray = false, testmode = false, externalupdater = false;
+	bool needupdate = false, autostart = false, debug = false, writeprotected = false, startintray = false, testmode = false, freetype = false, externalupdater = false;
 	args = CommandLineToArgvW(GetCommandLine(), &argsCount);
 	if (args) {
 		for (int i = 1; i < argsCount; ++i) {
@@ -355,6 +359,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE prevInstance, LPWSTR cmdPara
 				startintray = true;
 			} else if (equal(args[i], L"-testmode")) {
 				testmode = true;
+			} else if (equal(args[i], L"-freetype")) {
+				freetype = true;
 			} else if (equal(args[i], L"-externalupdater")) {
 				externalupdater = true;
 			} else if (equal(args[i], L"-writeprotected") && ++i < argsCount) {
@@ -427,6 +433,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE prevInstance, LPWSTR cmdPara
 	if (debug) targs += L" -debug";
 	if (startintray) targs += L" -startintray";
 	if (testmode) targs += L" -testmode";
+	if (freetype) targs += L" -freetype";
 	if (externalupdater) targs += L" -externalupdater";
 	if (!customWorkingDir.empty()) {
 		targs += L" -workdir \"" + customWorkingDir + L"\"";

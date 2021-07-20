@@ -9,28 +9,46 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "ui/integration.h"
 
+namespace Main {
+class Session;
+} // namespace Main
+
+namespace HistoryView {
+class ElementDelegate;
+} // namespace HistoryView
+
 namespace Core {
 
-class UiIntegration : public Ui::Integration {
+struct MarkedTextContext {
+	enum class HashtagMentionType : uchar {
+		Telegram,
+		Twitter,
+		Instagram,
+	};
+
+	Main::Session *session = nullptr;
+	HashtagMentionType type = HashtagMentionType::Telegram;
+};
+
+class UiIntegration final : public Ui::Integration {
 public:
 	void postponeCall(FnMut<void()> &&callable) override;
 	void registerLeaveSubscription(not_null<QWidget*> widget) override;
 	void unregisterLeaveSubscription(not_null<QWidget*> widget) override;
 
-	void writeLogEntry(const QString &entry) override;
 	QString emojiCacheFolder() override;
+	QString openglCheckFilePath() override;
+	QString angleBackendFilePath() override;
 
 	void textActionsUpdated() override;
 	void activationFromTopPanel() override;
 
-	void startFontsBegin() override;
-	void startFontsEnd() override;
+	bool screenIsLocked() override;
+	QString timeFormat() override;
 
 	std::shared_ptr<ClickHandler> createLinkHandler(
-		EntityType type,
-		const QString &text,
-		const QString &data,
-		const TextParseOptions &options) override;
+		const EntityLinkData &data,
+		const std::any &context) override;
 	bool handleUrlClick(
 		const QString &url,
 		const QVariant &context) override;
@@ -54,5 +72,7 @@ public:
 	QString phraseFormattingMonospace() override;
 
 };
+
+[[nodiscard]] bool OpenGLLastCheckFailed();
 
 } // namespace Core

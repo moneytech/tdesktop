@@ -7,27 +7,36 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "api/api_common.h"
 #include "ui/rp_widget.h"
 #include "ui/effects/animations.h"
 #include "ui/effects/panel_animation.h"
 #include "mtproto/sender.h"
-#include "main/main_session.h"
 #include "base/object_ptr.h"
 
 namespace InlineBots {
-class Result;
+struct ResultSelected;
 } // namespace InlineBots
+
+namespace Main {
+class Session;
+} // namespace Main
 
 namespace Ui {
 class PlainShadow;
+class PopupMenu;
 class ScrollArea;
 class SettingsSlider;
 class FlatLabel;
-} // namesapce Ui
+} // namespace Ui
 
 namespace Window {
 class SessionController;
 } // namespace Window
+
+namespace SendMenu {
+enum class Type;
+} // namespace SendMenu
 
 namespace ChatHelpers {
 
@@ -35,21 +44,28 @@ enum class SelectorTab {
 	Emoji,
 	Stickers,
 	Gifs,
+	Masks,
 };
 
 class EmojiListWidget;
 class StickersListWidget;
 class GifsListWidget;
 
-class TabbedSelector : public Ui::RpWidget, private base::Subscriber {
+class TabbedSelector : public Ui::RpWidget {
 public:
-	struct InlineChosen {
-		not_null<InlineBots::Result*> result;
-		not_null<UserData*> bot;
+	struct FileChosen {
+		not_null<DocumentData*> document;
+		Api::SendOptions options;
 	};
+	struct PhotoChosen {
+		not_null<PhotoData*> photo;
+		Api::SendOptions options;
+	};
+	using InlineChosen = InlineBots::ResultSelected;
 	enum class Mode {
 		Full,
-		EmojiOnly
+		EmojiOnly,
+		MediaEditor,
 	};
 
 	TabbedSelector(
@@ -61,13 +77,14 @@ public:
 	Main::Session &session() const;
 
 	rpl::producer<EmojiPtr> emojiChosen() const;
-	rpl::producer<not_null<DocumentData*>> fileChosen() const;
-	rpl::producer<not_null<PhotoData*>> photoChosen() const;
+	rpl::producer<FileChosen> fileChosen() const;
+	rpl::producer<PhotoChosen> photoChosen() const;
 	rpl::producer<InlineChosen> inlineResultChosen() const;
 
 	rpl::producer<> cancelled() const;
 	rpl::producer<> checkForHide() const;
 	rpl::producer<> slideFinished() const;
+	rpl::producer<> contextMenuRequested() const;
 
 	void setRoundRadius(int radius);
 	void refreshStickers();
@@ -86,6 +103,7 @@ public:
 	bool isSliding() const {
 		return _a_slide.animating();
 	}
+	bool hasMenu() const;
 
 	void setAfterShownCallback(Fn<void(SelectorTab)> callback) {
 		_afterShownCallback = std::move(callback);
@@ -94,9 +112,11 @@ public:
 		_beforeHidingCallback = std::move(callback);
 	}
 
+	void showMenuWithType(SendMenu::Type type);
+
 	// Float player interface.
-	bool wheelEventFromFloatPlayer(QEvent *e);
-	QRect rectForFloatPlayer() const;
+	bool floatPlayerHandleWheelEvent(QEvent *e);
+	QRect floatPlayerAvailableRect() const;
 
 	auto showRequests() const {
 		return _showRequests.events();
@@ -112,15 +132,16 @@ protected:
 private:
 	class Tab {
 	public:
-		static constexpr auto kCount = 3;
-
-		Tab(SelectorTab type, object_ptr<Inner> widget);
+		Tab(SelectorTab type, int index, object_ptr<Inner> widget);
 
 		object_ptr<Inner> takeWidget();
 		void returnWidget(object_ptr<Inner> widget);
 
 		SelectorTab type() const {
 			return _type;
+		}
+		int index() const {
+			return _index;
 		}
 		Inner *widget() const {
 			return _weak;
@@ -138,7 +159,8 @@ private:
 		}
 
 	private:
-		SelectorTab _type = SelectorTab::Emoji;
+		const SelectorTab _type;
+		const int _index;
 		object_ptr<Inner> _widget = { nullptr };
 		QPointer<Inner> _weak;
 		object_ptr<InnerFooter> _footer;
@@ -147,7 +169,13 @@ private:
 	};
 
 	bool full() const;
-	Tab createTab(SelectorTab type);
+	bool mediaEditor() const;
+	bool tabbed() const;
+	bool hasEmojiTab() const;
+	bool hasStickersTab() const;
+	bool hasGifsTab() const;
+	bool hasMasksTab() const;
+	Tab createTab(SelectorTab type, int index);
 
 	void paintSlideFrame(Painter &p);
 	void paintContent(Painter &p);
@@ -164,25 +192,25 @@ private:
 	void showAll();
 	void hideForSliding();
 
+	SelectorTab typeByIndex(int index) const;
+	int indexByType(SelectorTab type) const;
+
 	bool hasSectionIcons() const;
 	void setWidgetToScrollArea();
 	void createTabsSlider();
+	void fillTabsSliderSections();
+	void updateTabsSliderGeometry();
 	void switchTab();
-	not_null<Tab*> getTab(SelectorTab type) {
-		return &_tabs[static_cast<int>(type)];
-	}
-	not_null<const Tab*> getTab(SelectorTab type) const {
-		return &_tabs[static_cast<int>(type)];
-	}
-	not_null<Tab*> currentTab() {
-		return getTab(_currentTabType);
-	}
-	not_null<const Tab*> currentTab() const {
-		return getTab(_currentTabType);
-	}
+
+	not_null<Tab*> getTab(int index);
+	not_null<const Tab*> getTab(int index) const;
+	not_null<Tab*> currentTab();
+	not_null<const Tab*> currentTab() const;
+
 	not_null<EmojiListWidget*> emoji() const;
 	not_null<StickersListWidget*> stickers() const;
 	not_null<GifsListWidget*> gifs() const;
+	not_null<StickersListWidget*> masks() const;
 
 	const not_null<Window::SessionController*> _controller;
 
@@ -200,8 +228,16 @@ private:
 	object_ptr<Ui::PlainShadow> _bottomShadow;
 	object_ptr<Ui::ScrollArea> _scroll;
 	object_ptr<Ui::FlatLabel> _restrictedLabel = { nullptr };
-	std::array<Tab, Tab::kCount> _tabs;
+	std::vector<Tab> _tabs;
 	SelectorTab _currentTabType = SelectorTab::Emoji;
+
+	const bool _hasEmojiTab;
+	const bool _hasStickersTab;
+	const bool _hasGifsTab;
+	const bool _hasMasksTab;
+	const bool _tabbed;
+
+	base::unique_qptr<Ui::PopupMenu> _menu;
 
 	Fn<void(SelectorTab)> _afterShownCallback;
 	Fn<void(SelectorTab)> _beforeHidingCallback;
@@ -238,6 +274,10 @@ public:
 	}
 	virtual void beforeHiding() {
 	}
+	virtual void fillContextMenu(
+		not_null<Ui::PopupMenu*> menu,
+		SendMenu::Type type) {
+	}
 
 	rpl::producer<int> scrollToRequests() const;
 	rpl::producer<bool> disableScrollRequests() const;
@@ -273,7 +313,7 @@ private:
 
 };
 
-class TabbedSelector::InnerFooter : public TWidget {
+class TabbedSelector::InnerFooter : public Ui::RpWidget {
 public:
 	InnerFooter(QWidget *parent);
 

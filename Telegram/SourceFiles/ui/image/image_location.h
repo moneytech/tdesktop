@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "data/data_peer_id.h"
+
 class FileLoader;
 
 namespace Storage {
@@ -59,22 +61,23 @@ public:
 		Photo           = 0x05,
 		PeerPhoto       = 0x06,
 		StickerSetThumb = 0x07,
+		GroupCallStream = 0x08,
 	};
 
 	StorageFileLocation() = default;
 	StorageFileLocation(
 		int32 dcId,
-		int32 self,
+		UserId self,
 		const MTPInputFileLocation &tl);
 
-	[[nodiscard]] StorageFileLocation convertToModern(
-		Type type,
+	[[nodiscard]] StorageFileLocation convertToModernPeerPhoto(
 		uint64 id,
-		uint64 accessHash) const;
+		uint64 accessHash,
+		uint64 photoId) const;
 
 	[[nodiscard]] int32 dcId() const;
 	[[nodiscard]] uint64 objectId() const;
-	[[nodiscard]] MTPInputFileLocation tl(int32 self) const;
+	[[nodiscard]] MTPInputFileLocation tl(UserId self) const;
 
 	[[nodiscard]] QByteArray serialize() const;
 	[[nodiscard]] int serializeSize() const;
@@ -83,6 +86,7 @@ public:
 
 	[[nodiscard]] Type type() const;
 	[[nodiscard]] bool valid() const;
+	[[nodiscard]] bool isLegacy() const;
 	[[nodiscard]] Storage::Cache::Key cacheKey() const;
 	[[nodiscard]] Storage::Cache::Key bigFileBaseCacheKey() const;
 
@@ -95,7 +99,6 @@ public:
 
 	[[nodiscard]] static const StorageFileLocation &Invalid();
 
-private:
 	friend bool operator==(
 		const StorageFileLocation &a,
 		const StorageFileLocation &b);
@@ -103,6 +106,7 @@ private:
 		const StorageFileLocation &a,
 		const StorageFileLocation &b);
 
+private:
 	uint16 _dcId = 0;
 	Type _type = Type::Legacy;
 	uint8 _sizeLetter = 0;
@@ -110,7 +114,7 @@ private:
 	uint64 _id = 0;
 	uint64 _accessHash = 0;
 	uint64 _volumeId = 0;
-	uint32 _inMessagePeerId = 0; // > 0 'userId', < 0 '-channelId'.
+	PeerId _inMessagePeerId = 0;
 	uint32 _inMessageId = 0;
 	QByteArray _fileReference;
 
@@ -153,12 +157,12 @@ public:
 	[[nodiscard]] static std::optional<StorageImageLocation> FromSerialized(
 		const QByteArray &serialized);
 
-	[[nodiscard]] StorageImageLocation convertToModern(
-			StorageFileLocation::Type type,
+	[[nodiscard]] StorageImageLocation convertToModernPeerPhoto(
 			uint64 id,
-			uint64 accessHash) const {
+			uint64 accessHash,
+			uint64 photoId) const {
 		return StorageImageLocation(
-			_file.convertToModern(type, id, accessHash),
+			_file.convertToModernPeerPhoto(id, accessHash, photoId),
 			_width,
 			_height);
 	}
@@ -184,6 +188,9 @@ public:
 	[[nodiscard]] bool valid() const {
 		return _file.valid();
 	}
+	[[nodiscard]] bool isLegacy() const {
+		return _file.isLegacy();
+	}
 	[[nodiscard]] QByteArray fileReference() const {
 		return _file.fileReference();
 	}
@@ -199,7 +206,6 @@ public:
 		return result;
 	}
 
-private:
 	friend inline bool operator==(
 			const StorageImageLocation &a,
 			const StorageImageLocation &b) {
@@ -211,6 +217,7 @@ private:
 		return (a._file < b._file);
 	}
 
+private:
 	StorageFileLocation _file;
 	int _width = 0;
 	int _height = 0;
@@ -362,20 +369,260 @@ inline bool operator>=(
 	return !(a < b);
 }
 
-class Image;
-class ImagePtr {
+struct PlainUrlLocation {
+	QString url;
+
+	friend inline bool operator==(
+			const PlainUrlLocation &a,
+			const PlainUrlLocation &b) {
+		return (a.url == b.url);
+	}
+	friend inline bool operator<(
+			const PlainUrlLocation &a,
+			const PlainUrlLocation &b) {
+		return (a.url < b.url);
+	}
+};
+
+inline bool operator!=(
+		const PlainUrlLocation &a,
+		const PlainUrlLocation &b) {
+	return !(a == b);
+}
+
+inline bool operator>(
+		const PlainUrlLocation &a,
+		const PlainUrlLocation &b) {
+	return (b < a);
+}
+
+inline bool operator<=(
+		const PlainUrlLocation &a,
+		const PlainUrlLocation &b) {
+	return !(b < a);
+}
+
+inline bool operator>=(
+		const PlainUrlLocation &a,
+		const PlainUrlLocation &b) {
+	return !(a < b);
+}
+
+struct InMemoryLocation {
+	QByteArray bytes;
+
+	friend inline bool operator==(
+			const InMemoryLocation &a,
+			const InMemoryLocation &b) {
+		return (a.bytes == b.bytes);
+	}
+	friend inline bool operator<(
+			const InMemoryLocation &a,
+			const InMemoryLocation &b) {
+		return (a.bytes < b.bytes);
+	}
+};
+
+inline bool operator!=(
+		const InMemoryLocation &a,
+		const InMemoryLocation &b) {
+	return !(a == b);
+}
+
+inline bool operator>(
+		const InMemoryLocation &a,
+		const InMemoryLocation &b) {
+	return (b < a);
+}
+
+inline bool operator<=(
+		const InMemoryLocation &a,
+		const InMemoryLocation &b) {
+	return !(b < a);
+}
+
+inline bool operator>=(
+		const InMemoryLocation &a,
+		const InMemoryLocation &b) {
+	return !(a < b);
+}
+
+class DownloadLocation {
 public:
-	ImagePtr();
-	explicit ImagePtr(not_null<Image*> data);
+	std::variant<
+		StorageFileLocation,
+		WebFileLocation,
+		GeoPointLocation,
+		PlainUrlLocation,
+		InMemoryLocation> data;
 
-	Image *operator->() const;
-	Image *get() const;
+	[[nodiscard]] QByteArray serialize() const;
+	[[nodiscard]] int serializeSize() const;
+	[[nodiscard]] static std::optional<DownloadLocation> FromSerialized(
+		const QByteArray &serialized);
 
-	explicit operator bool() const;
+	[[nodiscard]] DownloadLocation convertToModernPeerPhoto(
+		uint64 id,
+		uint64 accessHash,
+		uint64 photoId) const;
+
+	[[nodiscard]] Storage::Cache::Key cacheKey() const;
+	[[nodiscard]] Storage::Cache::Key bigFileBaseCacheKey() const;
+	[[nodiscard]] bool valid() const;
+	[[nodiscard]] bool isLegacy() const;
+	[[nodiscard]] QByteArray fileReference() const;
+	bool refreshFileReference(const QByteArray &data);
+	bool refreshFileReference(const Data::UpdatedFileReferences &updates);
+
+	friend inline bool operator==(
+			const DownloadLocation &a,
+			const DownloadLocation &b) {
+		return (a.data == b.data);
+	}
+	friend inline bool operator<(
+			const DownloadLocation &a,
+			const DownloadLocation &b) {
+		return (a.data < b.data);
+	}
+
+};
+
+inline bool operator!=(
+		const DownloadLocation &a,
+		const DownloadLocation &b) {
+	return !(a == b);
+}
+
+inline bool operator>(
+		const DownloadLocation &a,
+		const DownloadLocation &b) {
+	return (b < a);
+}
+
+inline bool operator<=(
+		const DownloadLocation &a,
+		const DownloadLocation &b) {
+	return !(b < a);
+}
+
+inline bool operator>=(
+		const DownloadLocation &a,
+		const DownloadLocation &b) {
+	return !(a < b);
+}
+
+class ImageLocation {
+public:
+	ImageLocation() = default;
+	ImageLocation(
+		const DownloadLocation &file,
+		int width,
+		int height);
+
+	[[nodiscard]] QByteArray serialize() const;
+	[[nodiscard]] int serializeSize() const;
+	[[nodiscard]] static std::optional<ImageLocation> FromSerialized(
+		const QByteArray &serialized);
+
+	[[nodiscard]] ImageLocation convertToModernPeerPhoto(
+			uint64 id,
+			uint64 accessHash,
+			uint64 photoId) const {
+		return ImageLocation(
+			_file.convertToModernPeerPhoto(id, accessHash, photoId),
+			_width,
+			_height);
+	}
+
+	[[nodiscard]] const DownloadLocation &file() const {
+		return _file;
+	}
+	[[nodiscard]] int width() const {
+		return _width;
+	}
+	[[nodiscard]] int height() const {
+		return _height;
+	}
+
+	void setSize(int width, int height) {
+		_width = width;
+		_height = height;
+	}
+
+	[[nodiscard]] bool valid() const {
+		return _file.valid();
+	}
+	[[nodiscard]] bool isLegacy() const {
+		return _file.isLegacy();
+	}
+	[[nodiscard]] QByteArray fileReference() const {
+		return _file.fileReference();
+	}
+	bool refreshFileReference(const QByteArray &data) {
+		return _file.refreshFileReference(data);
+	}
+	bool refreshFileReference(const Data::UpdatedFileReferences &updates) {
+		return _file.refreshFileReference(updates);
+	}
+
+	[[nodiscard]] static const ImageLocation &Invalid() {
+		static auto result = ImageLocation();
+		return result;
+	}
+
+	friend inline bool operator==(
+			const ImageLocation &a,
+			const ImageLocation &b) {
+		return (a._file == b._file);
+	}
+	friend inline bool operator<(
+			const ImageLocation &a,
+			const ImageLocation &b) {
+		return (a._file < b._file);
+	}
 
 private:
-	not_null<Image*> _data;
+	DownloadLocation _file;
+	int _width = 0;
+	int _height = 0;
 
+};
+
+inline bool operator!=(
+		const ImageLocation &a,
+		const ImageLocation &b) {
+	return !(a == b);
+}
+
+inline bool operator>(
+		const ImageLocation &a,
+		const ImageLocation &b) {
+	return (b < a);
+}
+
+inline bool operator<=(
+		const ImageLocation &a,
+		const ImageLocation &b) {
+	return !(b < a);
+}
+
+inline bool operator>=(
+		const ImageLocation &a,
+		const ImageLocation &b) {
+	return !(a < b);
+}
+
+struct ImageWithLocation {
+	ImageLocation location;
+	QByteArray bytes;
+	QImage preloaded;
+	int bytesCount = 0;
+	int progressivePartSize = 0;
+};
+
+struct InlineImageLocation {
+	QByteArray bytes;
+	bool isPath = false;
 };
 
 InMemoryKey inMemoryKey(const StorageFileLocation &location);
@@ -384,21 +631,14 @@ inline InMemoryKey inMemoryKey(const StorageImageLocation &location) {
 	return inMemoryKey(location.file());
 }
 
-inline InMemoryKey inMemoryKey(const WebFileLocation &location) {
-	auto result = InMemoryKey();
-	const auto &url = location.url();
-	const auto sha = hashSha1(url.data(), url.size());
-	bytes::copy(
-		bytes::object_as_span(&result),
-		bytes::make_span(sha).subspan(0, sizeof(result)));
-	return result;
-}
+InMemoryKey inMemoryKey(const WebFileLocation &location);
+InMemoryKey inMemoryKey(const GeoPointLocation &location);
+InMemoryKey inMemoryKey(const PlainUrlLocation &location);
+InMemoryKey inMemoryKey(const InMemoryLocation &location);
+InMemoryKey inMemoryKey(const DownloadLocation &location);
 
-inline InMemoryKey inMemoryKey(const GeoPointLocation &location) {
-	return InMemoryKey(
-		(uint64(std::round(std::abs(location.lat + 360.) * 1000000)) << 32)
-		| uint64(std::round(std::abs(location.lon + 360.) * 1000000)),
-		(uint64(location.width) << 32) | uint64(location.height));
+inline InMemoryKey inMemoryKey(const ImageLocation &location) {
+	return inMemoryKey(location.file());
 }
 
 inline QSize shrinkToKeepAspect(int32 width, int32 height, int32 towidth, int32 toheight) {
@@ -411,54 +651,4 @@ inline QSize shrinkToKeepAspect(int32 width, int32 height, int32 towidth, int32 
 		h = toheight;
 	}
 	return QSize(qMax(w, 1), qMax(h, 1));
-}
-
-class PsFileBookmark;
-class ReadAccessEnabler {
-public:
-	ReadAccessEnabler(const PsFileBookmark *bookmark);
-	ReadAccessEnabler(const std::shared_ptr<PsFileBookmark> &bookmark);
-	bool failed() const {
-		return _failed;
-	}
-	~ReadAccessEnabler();
-
-private:
-	const PsFileBookmark *_bookmark;
-	bool _failed;
-
-};
-
-class FileLocation {
-public:
-	FileLocation() = default;
-	explicit FileLocation(const QString &name);
-
-	static FileLocation InMediaCacheLocation();
-
-	[[nodiscard]] bool check() const;
-	[[nodiscard]] const QString &name() const;
-	void setBookmark(const QByteArray &bookmark);
-	QByteArray bookmark() const;
-	[[nodiscard]] bool isEmpty() const {
-		return name().isEmpty();
-	}
-	[[nodiscard]] bool inMediaCache() const;
-
-	bool accessEnable() const;
-	void accessDisable() const;
-
-	QString fname;
-	QDateTime modified;
-	qint32 size;
-
-private:
-	std::shared_ptr<PsFileBookmark> _bookmark;
-
-};
-inline bool operator==(const FileLocation &a, const FileLocation &b) {
-	return (a.name() == b.name()) && (a.modified == b.modified) && (a.size == b.size);
-}
-inline bool operator!=(const FileLocation &a, const FileLocation &b) {
-	return !(a == b);
 }

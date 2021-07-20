@@ -12,10 +12,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_cursor_state.h"
 #include "history/history_item.h"
 #include "history/history_item_components.h"
+#include "lottie/lottie_single_player.h"
+#include "ui/cached_round_corners.h"
 #include "layout.h"
-#include "facades.h"
-#include "app.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 namespace HistoryView {
 namespace {
@@ -24,7 +24,12 @@ constexpr auto kMaxForwardedBarLines = 4;
 
 } // namespace
 
-UnwrappedMedia::Content::~Content() = default;
+auto UnwrappedMedia::Content::stickerTakeLottie(
+	not_null<DocumentData*> data,
+	const Lottie::ColorReplacements *replacements)
+-> std::unique_ptr<Lottie::SinglePlayer> {
+	return nullptr;
+}
 
 UnwrappedMedia::UnwrappedMedia(
 	not_null<Element*> parent,
@@ -44,7 +49,7 @@ QSize UnwrappedMedia::countOptimalSize() {
 	if (_parent->media() == this) {
 		const auto item = _parent->data();
 		const auto via = item->Get<HistoryMessageVia>();
-		const auto reply = item->Get<HistoryMessageReply>();
+		const auto reply = _parent->displayedReply();
 		const auto forwarded = getDisplayedForwardedInfo();
 		if (forwarded) {
 			forwarded->create(via);
@@ -59,6 +64,11 @@ QSize UnwrappedMedia::countOptimalSize() {
 				+ infoHeight;
 			minHeight = std::max(minHeight, minimal);
 		}
+		if (const auto size = _parent->rightActionSize()) {
+			minHeight = std::max(
+				minHeight,
+				st::historyFastShareBottom + size->height());
+		}
 	}
 	return { maxWidth, minHeight };
 }
@@ -67,9 +77,8 @@ QSize UnwrappedMedia::countCurrentSize(int newWidth) {
 	const auto item = _parent->data();
 	accumulate_min(newWidth, maxWidth());
 	if (_parent->media() == this) {
-		const auto infoWidth = _parent->infoWidth() + 2 * st::msgDateImgPadding.x();
 		const auto via = item->Get<HistoryMessageVia>();
-		const auto reply = item->Get<HistoryMessageReply>();
+		const auto reply = _parent->displayedReply();
 		const auto forwarded = getDisplayedForwardedInfo();
 		if (via || reply || forwarded) {
 			int usew = maxWidth() - additionalWidth(via, reply, forwarded);
@@ -83,7 +92,8 @@ QSize UnwrappedMedia::countCurrentSize(int newWidth) {
 		}
 	}
 	auto newHeight = minHeight();
-	if (_parent->hasOutLayout() && !Adaptive::ChatWide()) {
+	if (_parent->hasOutLayout()
+			&& !_parent->delegate()->elementIsChatWide()) {
 		// Add some height to isolated emoji for the timestamp info.
 		const auto infoHeight = st::msgDateImgPadding.y() * 2
 			+ st::msgDateFont->height;
@@ -105,11 +115,12 @@ void UnwrappedMedia::draw(
 	}
 	bool selected = (selection == FullSelection);
 
-	const auto rightAligned = _parent->hasOutLayout() && !Adaptive::ChatWide();
+	const auto rightAligned = _parent->hasOutLayout()
+		&& !_parent->delegate()->elementIsChatWide();
 	const auto inWebPage = (_parent->media() != this);
 	const auto item = _parent->data();
 	const auto via = inWebPage ? nullptr : item->Get<HistoryMessageVia>();
-	const auto reply = inWebPage ? nullptr : item->Get<HistoryMessageReply>();
+	const auto reply = inWebPage ? nullptr : _parent->displayedReply();
 	const auto forwarded = inWebPage ? nullptr : getDisplayedForwardedInfo();
 	auto usex = 0;
 	auto usew = maxWidth();
@@ -173,8 +184,9 @@ void UnwrappedMedia::drawSurrounding(
 		const HistoryMessageVia *via,
 		const HistoryMessageReply *reply,
 		const HistoryMessageForwarded *forwarded) const {
-	const auto rightAligned = _parent->hasOutLayout() && !Adaptive::ChatWide();
-	const auto rightAction = _parent->displayRightAction();
+	const auto rightAligned = _parent->hasOutLayout()
+		&& !_parent->delegate()->elementIsChatWide();
+	const auto rightActionSize = _parent->rightActionSize();
 	const auto fullRight = calculateFullRight(inner);
 	auto fullBottom = height();
 	if (needInfoDisplay()) {
@@ -194,7 +206,7 @@ void UnwrappedMedia::drawSurrounding(
 		int recty = 0;
 		if (rtl()) rectx = width() - rectx - rectw;
 
-		App::roundRect(p, rectx, recty, rectw, recth, selected ? st::msgServiceBgSelected : st::msgServiceBg, selected ? StickerSelectedCorners : StickerCorners);
+		Ui::FillRoundRect(p, rectx, recty, rectw, recth, selected ? st::msgServiceBgSelected : st::msgServiceBg, selected ? Ui::StickerSelectedCorners : Ui::StickerCorners);
 		p.setPen(st::msgServiceFg);
 		rectx += st::msgReplyPadding.left();
 		rectw -= st::msgReplyPadding.left() + st::msgReplyPadding.right();
@@ -217,11 +229,12 @@ void UnwrappedMedia::drawSurrounding(
 		}
 		replyRight = rectx + rectw;
 	}
-	if (rightAction) {
+	if (rightActionSize) {
 		const auto position = calculateFastActionPosition(
 			fullBottom,
 			replyRight,
-			fullRight);
+			fullRight,
+			*rightActionSize);
 		const auto outer = 2 * inner.x() + inner.width();
 		_parent->drawRightAction(p, position.x(), position.y(), outer);
 	}
@@ -232,11 +245,12 @@ PointState UnwrappedMedia::pointState(QPoint point) const {
 		return PointState::Outside;
 	}
 
-	const auto rightAligned = _parent->hasOutLayout() && !Adaptive::ChatWide();
+	const auto rightAligned = _parent->hasOutLayout()
+		&& !_parent->delegate()->elementIsChatWide();
 	const auto inWebPage = (_parent->media() != this);
 	const auto item = _parent->data();
 	const auto via = inWebPage ? nullptr : item->Get<HistoryMessageVia>();
-	const auto reply = inWebPage ? nullptr : item->Get<HistoryMessageReply>();
+	const auto reply = inWebPage ? nullptr : _parent->displayedReply();
 	const auto forwarded = inWebPage ? nullptr : getDisplayedForwardedInfo();
 	auto usex = 0;
 	auto usew = maxWidth();
@@ -272,11 +286,12 @@ TextState UnwrappedMedia::textState(QPoint point, StateRequest request) const {
 		return result;
 	}
 
-	const auto rightAligned = _parent->hasOutLayout() && !Adaptive::ChatWide();
+	const auto rightAligned = _parent->hasOutLayout()
+		&& !_parent->delegate()->elementIsChatWide();
 	const auto inWebPage = (_parent->media() != this);
 	const auto item = _parent->data();
 	const auto via = inWebPage ? nullptr : item->Get<HistoryMessageVia>();
-	const auto reply = inWebPage ? nullptr : item->Get<HistoryMessageReply>();
+	const auto reply = inWebPage ? nullptr : _parent->displayedReply();
 	const auto forwarded = inWebPage ? nullptr : getDisplayedForwardedInfo();
 	auto usex = 0;
 	auto usew = maxWidth();
@@ -348,18 +363,18 @@ TextState UnwrappedMedia::textState(QPoint point, StateRequest request) const {
 			replyRight = rectx + rectw - st::msgReplyPadding.right();
 		}
 		const auto fullRight = calculateFullRight(inner);
-		const auto rightAction = _parent->displayRightAction();
+		const auto rightActionSize = _parent->rightActionSize();
 		auto fullBottom = height();
 		if (_parent->pointInTime(fullRight, fullBottom, point, InfoDisplayType::Background)) {
 			result.cursor = CursorState::Date;
 		}
-		if (rightAction) {
-			const auto size = st::historyFastShareSize;
+		if (rightActionSize) {
 			const auto position = calculateFastActionPosition(
 				fullBottom,
 				replyRight,
-				fullRight);
-			if (QRect(position.x(), position.y(), size, size).contains(point)) {
+				fullRight,
+				*rightActionSize);
+			if (QRect(position.x(), position.y(), rightActionSize->width(), rightActionSize->height()).contains(point)) {
 				result.link = _parent->rightActionLink();
 				return result;
 			}
@@ -378,14 +393,22 @@ TextState UnwrappedMedia::textState(QPoint point, StateRequest request) const {
 	return result;
 }
 
+std::unique_ptr<Lottie::SinglePlayer> UnwrappedMedia::stickerTakeLottie(
+		not_null<DocumentData*> data,
+		const Lottie::ColorReplacements *replacements) {
+	return _content->stickerTakeLottie(data, replacements);
+}
+
 int UnwrappedMedia::calculateFullRight(const QRect &inner) const {
-	const auto rightAligned = _parent->hasOutLayout() && !Adaptive::ChatWide();
+	const auto rightAligned = _parent->hasOutLayout()
+		&& !_parent->delegate()->elementIsChatWide();
 	const auto infoWidth = _parent->infoWidth()
 		+ st::msgDateImgPadding.x() * 2
 		+ st::msgReplyPadding.left();
-	const auto rightActionWidth = _parent->displayRightAction()
+	const auto rightActionSize = _parent->rightActionSize();
+	const auto rightActionWidth = rightActionSize
 		? (st::historyFastShareLeft * 2
-			+ st::historyFastShareSize
+			+ rightActionSize->width()
 			+ st::msgPadding.left()
 			+ (_parent->hasFromPhoto()
 				? st::msgMargin.right()
@@ -401,13 +424,13 @@ int UnwrappedMedia::calculateFullRight(const QRect &inner) const {
 }
 
 QPoint UnwrappedMedia::calculateFastActionPosition(
-	int fullBottom,
-	int replyRight,
-	int fullRight) const {
-	const auto size = st::historyFastShareSize;
+		int fullBottom,
+		int replyRight,
+		int fullRight,
+		QSize size) const {
 	const auto fastShareTop = (fullBottom
 		- st::historyFastShareBottom
-		- size);
+		- size.height());
 	const auto doesRightActionHitReply = replyRight && (fastShareTop <
 		st::msgReplyBarSize.height()
 		+ st::msgReplyPadding.top()
@@ -421,10 +444,10 @@ QPoint UnwrappedMedia::calculateFastActionPosition(
 bool UnwrappedMedia::needInfoDisplay() const {
 	return (_parent->data()->id < 0)
 		|| (_parent->isUnderCursor())
-		|| (_parent->displayRightAction())
+		|| (_parent->rightActionSize())
 		|| (_parent->isLastAndSelfMessage())
 		|| (_parent->hasOutLayout()
-			&& !Adaptive::ChatWide()
+			&& !_parent->delegate()->elementIsChatWide()
 			&& _content->alwaysShowOutTimestamp());
 }
 

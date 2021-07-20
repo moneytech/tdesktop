@@ -48,14 +48,14 @@ public:
 	bool showInternal(
 		not_null<Window::SectionMemento*> memento,
 		const Window::SectionShow &params) override;
-	std::unique_ptr<Window::SectionMemento> createMemento() override;
+	std::shared_ptr<Window::SectionMemento> createMemento() override;
 
 	object_ptr<Ui::LayerWidget> moveContentToLayer(
 		QRect bodyGeometry) override;
 
 	// Float player interface.
-	bool wheelEventFromFloatPlayer(QEvent *e) override;
-	QRect rectForFloatPlayer() const override;
+	bool floatPlayerHandleWheelEvent(QEvent *e) override;
+	QRect floatPlayerAvailableRect() override;
 
 protected:
 	void doSetInnerFocus() override;

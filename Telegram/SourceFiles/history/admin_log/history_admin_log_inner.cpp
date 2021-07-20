@@ -7,7 +7,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/admin_log/history_admin_log_inner.h"
 
-#include "styles/style_history.h"
 #include "history/history.h"
 #include "history/view/media/history_view_media.h"
 #include "history/view/media/history_view_web_page.h"
@@ -22,30 +21,38 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "chat_helpers/message_field.h"
 #include "boxes/sticker_set_box.h"
 #include "base/platform/base_platform_info.h"
+#include "base/unixtime.h"
 #include "mainwindow.h"
 #include "mainwidget.h"
 #include "core/application.h"
 #include "apiwrap.h"
+#include "api/api_attached_stickers.h"
 #include "layout.h"
 #include "window/window_session_controller.h"
 #include "main/main_session.h"
+#include "main/main_session_settings.h"
 #include "ui/widgets/popup_menu.h"
 #include "ui/image/image.h"
 #include "ui/text/text_utilities.h"
 #include "ui/inactive_press.h"
+#include "ui/effects/path_shift_gradient.h"
 #include "core/file_utilities.h"
 #include "lang/lang_keys.h"
 #include "boxes/peers/edit_participant_box.h"
 #include "boxes/peers/edit_participants_box.h"
 #include "data/data_session.h"
 #include "data/data_photo.h"
+#include "data/data_photo_media.h"
 #include "data/data_document.h"
 #include "data/data_media_types.h"
+#include "data/data_file_click_handler.h"
 #include "data/data_file_origin.h"
+#include "data/data_cloud_file.h"
 #include "data/data_channel.h"
 #include "data/data_user.h"
 #include "facades.h"
 #include "app.h"
+#include "styles/style_chat.h"
 
 #include <QtWidgets/QApplication>
 #include <QtGui/QClipboard>
@@ -58,6 +65,7 @@ constexpr auto kMaxChannelAdmins = 200;
 constexpr auto kScrollDateHideTimeout = 1000;
 constexpr auto kEventsFirstPage = 20;
 constexpr auto kEventsPerPage = 50;
+constexpr auto kClearUserpicsAfter = 50;
 
 } // namespace
 
@@ -226,7 +234,8 @@ InnerWidget::InnerWidget(
 , _controller(controller)
 , _channel(channel)
 , _history(channel->owner().history(channel))
-, _api(_channel->session().api().instance())
+, _api(&_channel->session().mtp())
+, _pathGradient(HistoryView::MakePathShiftGradient([=] { update(); }))
 , _scrollDateCheck([=] { scrollDateCheck(); })
 , _emptyText(
 		st::historyAdminLogEmptyWidth
@@ -310,6 +319,11 @@ void InnerWidget::visibleTopBottomUpdated(
 	_visibleTop = visibleTop;
 	_visibleBottom = visibleBottom;
 
+	// Unload userpics.
+	if (_userpics.size() > kClearUserpicsAfter) {
+		_userpicsCache = std::move(_userpics);
+	}
+
 	updateVisibleTopItem();
 	checkPreloadMore();
 	if (scrolledUp) {
@@ -317,7 +331,7 @@ void InnerWidget::visibleTopBottomUpdated(
 	} else {
 		scrollDateHideByTimer();
 	}
-	_controller->floatPlayerAreaUpdated().notify(true);
+	_controller->floatPlayerAreaUpdated();
 }
 
 void InnerWidget::updateVisibleTopItem() {
@@ -420,9 +434,14 @@ void InnerWidget::requestAdmins() {
 				const QVector<MTPChannelParticipant> &list) {
 			auto filtered = (
 				list
-			) | ranges::view::transform([&](const MTPChannelParticipant &p) {
-				const auto userId = p.match([](const auto &data) {
-					return data.vuser_id().v;
+			) | ranges::views::transform([&](const MTPChannelParticipant &p) {
+				const auto participantId = p.match([](
+						const MTPDchannelParticipantBanned &data) {
+					return peerFromMTP(data.vpeer());
+				}, [](const MTPDchannelParticipantLeft &data) {
+					return peerFromMTP(data.vpeer());
+				}, [](const auto &data) {
+					return peerFromUser(data.vuser_id());
 				});
 				const auto canEdit = p.match([](
 						const MTPDchannelParticipantAdmin &data) {
@@ -430,12 +449,15 @@ void InnerWidget::requestAdmins() {
 				}, [](const auto &) {
 					return false;
 				});
-				return std::make_pair(userId, canEdit);
-			}) | ranges::view::transform([&](auto &&pair) {
+				return std::make_pair(participantId, canEdit);
+			}) | ranges::views::transform([&](auto &&pair) {
 				return std::make_pair(
-					session().data().userLoaded(pair.first),
+					(peerIsUser(pair.first)
+						? session().data().userLoaded(
+							peerToUser(pair.first))
+						: nullptr),
 					pair.second);
-			}) | ranges::view::filter([&](auto &&pair) {
+			}) | ranges::views::filter([&](auto &&pair) {
 				return (pair.first != nullptr);
 			});
 
@@ -459,7 +481,8 @@ void InnerWidget::showFilter(Fn<void(FilterValue &&filter)> callback) {
 	if (_admins.empty()) {
 		_showFilterCallback = std::move(callback);
 	} else {
-		Ui::show(Box<FilterBox>(_channel, _admins, _filter, std::move(callback)));
+		_controller->show(
+			Box<FilterBox>(_channel, _admins, _filter, std::move(callback)));
 	}
 }
 
@@ -478,7 +501,7 @@ void InnerWidget::updateEmptyText() {
 	options.flags |= TextParseMarkdown;
 	auto hasSearch = !_searchQuery.isEmpty();
 	auto hasFilter = (_filter.flags != 0) || !_filter.allUsers;
-	auto text = Ui::Text::Bold((hasSearch || hasFilter)
+	auto text = Ui::Text::Semibold((hasSearch || hasFilter)
 		? tr::lng_admin_log_no_results_title(tr::now)
 		: tr::lng_admin_log_no_events_title(tr::now));
 	auto description = hasSearch
@@ -488,7 +511,9 @@ void InnerWidget::updateEmptyText() {
 			TextUtilities::Clean(_searchQuery))
 		: hasFilter
 		? tr::lng_admin_log_no_results_text(tr::now)
-		: tr::lng_admin_log_no_events_text(tr::now);
+		: _channel->isMegagroup()
+		? tr::lng_admin_log_no_events_text(tr::now)
+		: tr::lng_admin_log_no_events_text_channel(tr::now);
 	text.text.append(qstr("\n\n") + description);
 	_emptyText.setMarkedText(st::defaultTextStyle, text, options);
 }
@@ -497,8 +522,17 @@ QString InnerWidget::tooltipText() const {
 	if (_mouseCursorState == CursorState::Date
 		&& _mouseAction == MouseAction::None) {
 		if (const auto view = App::hoveredItem()) {
-			auto dateText = view->dateTime().toString(
-				QLocale::system().dateTimeFormat(QLocale::LongFormat));
+			const auto format = QLocale::system().dateTimeFormat(
+				QLocale::LongFormat);
+			auto dateText = HistoryView::DateTooltipText(view);
+
+			const auto sentIt = _itemDates.find(view->data());
+			if (sentIt != end(_itemDates)) {
+				dateText += '\n' + tr::lng_sent_date(
+					tr::now,
+					lt_date,
+					base::unixtime::parse(sentIt->second).toString(format));
+			}
 			return dateText;
 		}
 	} else if (_mouseCursorState == CursorState::Forwarded
@@ -527,13 +561,15 @@ HistoryView::Context InnerWidget::elementContext() {
 }
 
 std::unique_ptr<HistoryView::Element> InnerWidget::elementCreate(
-		not_null<HistoryMessage*> message) {
-	return std::make_unique<HistoryView::Message>(this, message);
+		not_null<HistoryMessage*> message,
+		Element *replacing) {
+	return std::make_unique<HistoryView::Message>(this, message, replacing);
 }
 
 std::unique_ptr<HistoryView::Element> InnerWidget::elementCreate(
-		not_null<HistoryService*> message) {
-	return std::make_unique<HistoryView::Service>(this, message);
+		not_null<HistoryService*> message,
+		Element *replacing) {
+	return std::make_unique<HistoryView::Service>(this, message, replacing);
 }
 
 bool InnerWidget::elementUnderCursor(
@@ -541,21 +577,8 @@ bool InnerWidget::elementUnderCursor(
 	return (App::hoveredItem() == view);
 }
 
-void InnerWidget::elementAnimationAutoplayAsync(
-		not_null<const HistoryView::Element*> view) {
-	crl::on_main(this, [this, msgId = view->data()->fullId()] {
-		if (const auto item = session().data().message(msgId)) {
-			if (const auto view = viewForItem(item)) {
-				if (const auto media = view->media()) {
-					media->autoplayAnimation();
-				}
-			}
-		}
-	});
-}
-
 crl::time InnerWidget::elementHighlightTime(
-		not_null<const HistoryView::Element*> element) {
+		not_null<const HistoryItem*> item) {
 	return crl::time(0);
 }
 
@@ -582,9 +605,56 @@ void InnerWidget::elementShowPollResults(
 	FullMsgId context) {
 }
 
+void InnerWidget::elementOpenPhoto(
+		not_null<PhotoData*> photo,
+		FullMsgId context) {
+	_controller->openPhoto(photo, context);
+}
+
+void InnerWidget::elementOpenDocument(
+		not_null<DocumentData*> document,
+		FullMsgId context,
+		bool showInMediaView) {
+	_controller->openDocument(document, context, showInMediaView);
+}
+
+void InnerWidget::elementCancelUpload(const FullMsgId &context) {
+	if (const auto item = session().data().message(context)) {
+		_controller->cancelUploadLayer(item);
+	}
+}
+
 void InnerWidget::elementShowTooltip(
 	const TextWithEntities &text,
 	Fn<void()> hiddenCallback) {
+}
+
+bool InnerWidget::elementIsGifPaused() {
+	return _controller->isGifPausedAtLeastFor(Window::GifPauseReason::Any);
+}
+
+bool InnerWidget::elementHideReply(not_null<const Element*> view) {
+	return true;
+}
+
+bool InnerWidget::elementShownUnread(not_null<const Element*> view) {
+	return view->data()->unread();
+}
+
+void InnerWidget::elementSendBotCommand(
+	const QString &command,
+	const FullMsgId &context) {
+}
+
+void InnerWidget::elementHandleViaClick(not_null<UserData*> bot) {
+}
+
+bool InnerWidget::elementIsChatWide() {
+	return _controller->adaptive().isChatWide();
+}
+
+not_null<Ui::PathShiftGradient*> InnerWidget::elementPathShiftGradient() {
+	return _pathGradient.get();
 }
 
 void InnerWidget::saveState(not_null<SectionMemento*> memento) {
@@ -593,6 +663,9 @@ void InnerWidget::saveState(not_null<SectionMemento*> memento) {
 	memento->setAdminsCanEdit(std::move(_adminsCanEdit));
 	memento->setSearchQuery(std::move(_searchQuery));
 	if (!_filterChanged) {
+		for (auto &item : _items) {
+			item.clearView();
+		}
 		memento->setItems(
 			base::take(_items),
 			base::take(_eventIds),
@@ -666,7 +739,7 @@ void InnerWidget::preloadMore(Direction direction) {
 		if (!loadedFlag) {
 			addEvents(direction, results.vevents().v);
 		}
-	}).fail([this, &requestId, &loadedFlag](const RPCError &error) {
+	}).fail([this, &requestId, &loadedFlag](const MTP::Error &error) {
 		requestId = 0;
 		loadedFlag = true;
 		update();
@@ -701,7 +774,10 @@ void InnerWidget::addEvents(Direction direction, const QVector<MTPChannelAdminLo
 			}
 
 			auto count = 0;
-			const auto addOne = [&](OwnedItem item) {
+			const auto addOne = [&](OwnedItem item, TimeId sentDate) {
+				if (sentDate) {
+					_itemDates.emplace(item->data(), sentDate);
+				}
 				_eventIds.emplace(id);
 				_itemsByData.emplace(item->data(), item.get());
 				addToItems.push_back(std::move(item));
@@ -784,7 +860,7 @@ int InnerWidget::resizeGetHeight(int newWidth) {
 
 	const auto resizeAllItems = (_itemsWidth != newWidth);
 	auto newHeight = 0;
-	for (const auto &item : ranges::view::reverse(_items)) {
+	for (const auto &item : ranges::views::reverse(_items)) {
 		item->setY(newHeight);
 		if (item->pendingResize() || resizeAllItems) {
 			newHeight += item->resizeGetHeight(newWidth);
@@ -810,6 +886,10 @@ void InnerWidget::paintEvent(QPaintEvent *e) {
 		return;
 	}
 
+	const auto guard = gsl::finally([&] {
+		_userpicsCache.clear();
+	});
+
 	Painter p(this);
 
 	auto ms = crl::now();
@@ -818,6 +898,11 @@ void InnerWidget::paintEvent(QPaintEvent *e) {
 	if (_items.empty() && _upLoaded && _downLoaded) {
 		paintEmpty(p);
 	} else {
+		_pathGradient->startFrame(
+			0,
+			width(),
+			std::min(st::msgMaxWidth / 2, width() / 2));
+
 		auto begin = std::rbegin(_items), end = std::rend(_items);
 		auto from = std::lower_bound(begin, end, clip.top(), [this](auto &elem, int top) {
 			return this->itemTop(elem) + elem->height() <= top;
@@ -834,7 +919,6 @@ void InnerWidget::paintEvent(QPaintEvent *e) {
 					? _selectedText
 					: TextSelection();
 				view->draw(p, clip.translated(0, -top), selection, ms);
-				const auto item = view->data();
 				auto height = view->height();
 				top += height;
 				p.translate(0, height);
@@ -852,7 +936,14 @@ void InnerWidget::paintEvent(QPaintEvent *e) {
 					const auto message = view->data()->toHistoryMessage();
 					Assert(message != nullptr);
 
-					message->from()->paintUserpicLeft(p, st::historyPhotoLeft, userpicTop, view->width(), st::msgPhotoSize);
+					const auto from = message->from();
+					from->paintUserpicLeft(
+						p,
+						_userpics[from],
+						st::historyPhotoLeft,
+						userpicTop,
+						view->width(),
+						st::msgPhotoSize);
 				}
 				return true;
 			});
@@ -885,14 +976,17 @@ void InnerWidget::paintEvent(QPaintEvent *e) {
 						p.setOpacity(opacity);
 						const auto dateY = /*noFloatingDate ? itemtop :*/ (dateTop - st::msgServiceMargin.top());
 						const auto width = view->width();
+						const auto chatWide =
+							_controller->adaptive().isChatWide();
 						if (const auto date = view->Get<HistoryView::DateBadge>()) {
-							date->paint(p, dateY, width);
+							date->paint(p, dateY, width, chatWide);
 						} else {
 							HistoryView::ServiceMessagePainter::paintDate(
 								p,
 								view->dateTime(),
 								dateY,
-								width);
+								width,
+								chatWide);
 						}
 					}
 				}
@@ -929,7 +1023,6 @@ auto InnerWidget::viewForItem(const HistoryItem *item) -> Element* {
 }
 
 void InnerWidget::paintEmpty(Painter &p) {
-	style::font font(st::msgServiceFont);
 	auto rectWidth = st::historyAdminLogEmptyWidth;
 	auto innerWidth = rectWidth - st::historyAdminLogEmptyPadding.left() - st::historyAdminLogEmptyPadding.right();
 	auto rectHeight = st::historyAdminLogEmptyPadding.top() + _emptyText.countHeight(innerWidth) + st::historyAdminLogEmptyPadding.bottom();
@@ -1043,12 +1136,25 @@ void InnerWidget::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 		}
 		if (lnkPhoto) {
 			const auto photo = lnkPhoto->photo();
-			_menu->addAction(tr::lng_context_save_image(tr::now), App::LambdaDelayed(st::defaultDropdownMenu.menu.ripple.hideDuration, this, [=] {
-				savePhotoToFile(photo);
-			}));
-			_menu->addAction(tr::lng_context_copy_image(tr::now), [=] {
-				copyContextImage(photo);
-			});
+			const auto media = photo->activeMediaView();
+			if (!photo->isNull() && media && media->loaded()) {
+				_menu->addAction(tr::lng_context_save_image(tr::now), App::LambdaDelayed(st::defaultDropdownMenu.menu.ripple.hideDuration, this, [=] {
+					savePhotoToFile(photo);
+				}));
+				_menu->addAction(tr::lng_context_copy_image(tr::now), [=] {
+					copyContextImage(photo);
+				});
+			}
+			if (photo->hasAttachedStickers()) {
+				const auto controller = _controller;
+				auto callback = [=] {
+					auto &attached = session().api().attachedStickers();
+					attached.requestAttachedStickerSets(controller, photo);
+				};
+				_menu->addAction(
+					tr::lng_context_attached_stickers(tr::now),
+					std::move(callback));
+			}
 		} else {
 			auto document = lnkDocument->document();
 			if (document->loading()) {
@@ -1073,7 +1179,7 @@ void InnerWidget::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 						});
 					}
 				}
-				if (!document->filepath(DocumentData::FilePathResolve::Checked).isEmpty()) {
+				if (!document->filepath(true).isEmpty()) {
 					_menu->addAction(Platform::IsMac() ? tr::lng_context_show_in_finder(tr::now) : tr::lng_context_show_in_folder(tr::now), [=] {
 						showContextInFolder(document);
 					});
@@ -1081,6 +1187,16 @@ void InnerWidget::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 				_menu->addAction(lnkIsVideo ? tr::lng_context_save_video(tr::now) : (lnkIsVoice ?  tr::lng_context_save_audio(tr::now) : (lnkIsAudio ?  tr::lng_context_save_audio_file(tr::now) :  tr::lng_context_save_file(tr::now))), App::LambdaDelayed(st::defaultDropdownMenu.menu.ripple.hideDuration, this, [this, document] {
 					saveDocumentToFile(document);
 				}));
+				if (document->hasAttachedStickers()) {
+					const auto controller = _controller;
+					auto callback = [=, doc = document] {
+						auto &attached = session().api().attachedStickers();
+						attached.requestAttachedStickerSets(controller, doc);
+					};
+					_menu->addAction(
+						tr::lng_context_attached_stickers(tr::now),
+						std::move(callback));
+				}
 			}
 		}
 	} else if (lnkPeer) { // suggest to block
@@ -1090,8 +1206,6 @@ void InnerWidget::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 	} else { // maybe cursor on some text history item?
 		const auto item = view ? view->data().get() : nullptr;
 		const auto itemId = item ? item->fullId() : FullMsgId();
-		bool canDelete = item && item->canDelete() && (item->id > 0 || !item->serviceMsg());
-		bool canForward = item && item->allowsForward();
 
 		auto msg = dynamic_cast<HistoryMessage*>(item);
 		if (isUponSelected > 0) {
@@ -1127,7 +1241,7 @@ void InnerWidget::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 		}
 	}
 
-	if (_menu->actions().empty()) {
+	if (_menu->empty()) {
 		_menu = nullptr;
 	} else {
 		_menu->popup(e->globalPos());
@@ -1135,11 +1249,13 @@ void InnerWidget::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 	}
 }
 
-void InnerWidget::savePhotoToFile(PhotoData *photo) {
-	if (!photo || photo->isNull() || !photo->loaded()) {
+void InnerWidget::savePhotoToFile(not_null<PhotoData*> photo) {
+	const auto media = photo->activeMediaView();
+	if (photo->isNull() || !media || !media->loaded()) {
 		return;
 	}
 
+	const auto image = media->image(Data::PhotoSize::Large)->original();
 	auto filter = qsl("JPEG Image (*.jpg);;") + FileDialog::AllFilesFilter();
 	FileDialog::GetWritePath(
 		this,
@@ -1148,22 +1264,26 @@ void InnerWidget::savePhotoToFile(PhotoData *photo) {
 		filedialogDefaultName(qsl("photo"), qsl(".jpg")),
 		crl::guard(this, [=](const QString &result) {
 			if (!result.isEmpty()) {
-				photo->large()->original().save(result, "JPG");
+				image.save(result, "JPG");
 			}
 		}));
 }
 
-void InnerWidget::saveDocumentToFile(DocumentData *document) {
+void InnerWidget::saveDocumentToFile(not_null<DocumentData*> document) {
 	DocumentSaveClickHandler::Save(
 		Data::FileOrigin(),
 		document,
 		DocumentSaveClickHandler::Mode::ToNewFile);
 }
 
-void InnerWidget::copyContextImage(PhotoData *photo) {
-	if (!photo || photo->isNull() || !photo->loaded()) return;
+void InnerWidget::copyContextImage(not_null<PhotoData*> photo) {
+	const auto media = photo->activeMediaView();
+	if (photo->isNull() || !media || !media->loaded()) {
+		return;
+	}
 
-	QGuiApplication::clipboard()->setImage(photo->large()->original());
+	const auto image = media->image(Data::PhotoSize::Large)->original();
+	QGuiApplication::clipboard()->setImage(image);
 }
 
 void InnerWidget::copySelectedText() {
@@ -1179,8 +1299,7 @@ void InnerWidget::cancelContextDownload(not_null<DocumentData*> document) {
 }
 
 void InnerWidget::showContextInFolder(not_null<DocumentData*> document) {
-	const auto filepath = document->filepath(
-		DocumentData::FilePathResolve::Checked);
+	const auto filepath = document->filepath(true);
 	if (!filepath.isEmpty()) {
 		File::ShowInFolder(filepath);
 	}
@@ -1190,7 +1309,7 @@ void InnerWidget::openContextGif(FullMsgId itemId) {
 	if (const auto item = session().data().message(itemId)) {
 		if (const auto media = item->media()) {
 			if (const auto document = media->document()) {
-				Core::App().showDocument(document, item);
+				_controller->openDocument(document, itemId, true);
 			}
 		}
 	}
@@ -1214,13 +1333,13 @@ void InnerWidget::suggestRestrictUser(not_null<UserData*> user) {
 		}
 	}
 	_menu->addAction(tr::lng_context_restrict_user(tr::now), [=] {
-		auto editRestrictions = [=](bool hasAdminRights, const MTPChatBannedRights &currentRights) {
+		auto editRestrictions = [=](bool hasAdminRights, ChatRestrictionsInfo currentRights) {
 			auto weak = QPointer<InnerWidget>(this);
 			auto weakBox = std::make_shared<QPointer<EditRestrictedBox>>();
 			auto box = Box<EditRestrictedBox>(_channel, user, hasAdminRights, currentRights);
 			box->setSaveCallback([=](
-					const MTPChatBannedRights &oldRights,
-					const MTPChatBannedRights &newRights) {
+					ChatRestrictionsInfo oldRights,
+					ChatRestrictionsInfo newRights) {
 				if (weak) {
 					weak->restrictUser(user, oldRights, newRights);
 				}
@@ -1228,16 +1347,17 @@ void InnerWidget::suggestRestrictUser(not_null<UserData*> user) {
 					(*weakBox)->closeBox();
 				}
 			});
-			*weakBox = Ui::show(
+			*weakBox = QPointer<EditRestrictedBox>(box.data());
+			_controller->show(
 				std::move(box),
 				Ui::LayerOption::KeepOther);
 		};
 		if (base::contains(_admins, user)) {
-			editRestrictions(true, MTP_chatBannedRights(MTP_flags(0), MTP_int(0)));
+			editRestrictions(true, ChatRestrictionsInfo());
 		} else {
 			_api.request(MTPchannels_GetParticipant(
 				_channel->inputChannel,
-				user->inputUser
+				user->input
 			)).done([=](const MTPchannels_ChannelParticipant &result) {
 				Expects(result.type() == mtpc_channels_channelParticipant);
 
@@ -1246,20 +1366,16 @@ void InnerWidget::suggestRestrictUser(not_null<UserData*> user) {
 				auto type = participant.vparticipant().type();
 				if (type == mtpc_channelParticipantBanned) {
 					auto &banned = participant.vparticipant().c_channelParticipantBanned();
-					editRestrictions(false, banned.vbanned_rights());
+					editRestrictions(
+						false,
+						ChatRestrictionsInfo(banned.vbanned_rights()));
 				} else {
 					auto hasAdminRights = (type == mtpc_channelParticipantAdmin)
 						|| (type == mtpc_channelParticipantCreator);
-					auto bannedRights = MTP_chatBannedRights(
-						MTP_flags(0),
-						MTP_int(0));
-					editRestrictions(hasAdminRights, bannedRights);
+					editRestrictions(hasAdminRights, ChatRestrictionsInfo());
 				}
-			}).fail([=](const RPCError &error) {
-				auto bannedRights = MTP_chatBannedRights(
-					MTP_flags(0),
-					MTP_int(0));
-				editRestrictions(false, bannedRights);
+			}).fail([=](const MTP::Error &error) {
+				editRestrictions(false, ChatRestrictionsInfo());
 			}).send();
 		}
 	});
@@ -1267,9 +1383,9 @@ void InnerWidget::suggestRestrictUser(not_null<UserData*> user) {
 
 void InnerWidget::restrictUser(
 		not_null<UserData*> user,
-		const MTPChatBannedRights &oldRights,
-		const MTPChatBannedRights &newRights) {
-	const auto done = [=](const MTPChatBannedRights &newRights) {
+		ChatRestrictionsInfo oldRights,
+		ChatRestrictionsInfo newRights) {
+	const auto done = [=](ChatRestrictionsInfo newRights) {
 		restrictUserDone(user, newRights);
 	};
 	const auto callback = SaveRestrictedCallback(
@@ -1280,11 +1396,16 @@ void InnerWidget::restrictUser(
 	callback(oldRights, newRights);
 }
 
-void InnerWidget::restrictUserDone(not_null<UserData*> user, const MTPChatBannedRights &rights) {
-	Expects(rights.type() == mtpc_chatBannedRights);
-	if (rights.c_chatBannedRights().vflags().v) {
-		_admins.erase(std::remove(_admins.begin(), _admins.end(), user), _admins.end());
-		_adminsCanEdit.erase(std::remove(_adminsCanEdit.begin(), _adminsCanEdit.end(), user), _adminsCanEdit.end());
+void InnerWidget::restrictUserDone(
+		not_null<UserData*> user,
+		ChatRestrictionsInfo rights) {
+	if (rights.flags) {
+		_admins.erase(
+			std::remove(_admins.begin(), _admins.end(), user),
+			_admins.end());
+		_adminsCanEdit.erase(
+			std::remove(_adminsCanEdit.begin(), _adminsCanEdit.end(), user),
+			_adminsCanEdit.end());
 	}
 	_downLoaded = false;
 	checkPreloadMore();
@@ -1447,7 +1568,7 @@ void InnerWidget::mouseActionFinish(const QPoint &screenPos, Qt::MouseButton but
 		if (_selectedItem && !_pressWasInactive) {
 			if (_selectedText.from == _selectedText.to) {
 				_selectedItem = nullptr;
-				App::wnd()->setInnerFocus();
+				_controller->widget()->setInnerFocus();
 			}
 		}
 	}
@@ -1456,18 +1577,20 @@ void InnerWidget::mouseActionFinish(const QPoint &screenPos, Qt::MouseButton but
 	_mouseSelectType = TextSelectType::Letters;
 	//_widget->noSelectingScroll(); // TODO
 
-#if defined Q_OS_LINUX32 || defined Q_OS_LINUX64
-	if (_selectedItem && _selectedText.from != _selectedText.to) {
+	if (QGuiApplication::clipboard()->supportsSelection()
+		&& _selectedItem
+		&& _selectedText.from != _selectedText.to) {
 		TextUtilities::SetClipboardText(
 			_selectedItem->selectedText(_selectedText),
 			QClipboard::Selection);
 	}
-#endif // Q_OS_LINUX32 || Q_OS_LINUX64
 }
 
 void InnerWidget::updateSelected() {
 	auto mousePosition = mapFromGlobal(_mousePosition);
-	auto point = QPoint(snap(mousePosition.x(), 0, width()), snap(mousePosition.y(), _visibleTop, _visibleBottom));
+	auto point = QPoint(
+		std::clamp(mousePosition.x(), 0, width()),
+		std::clamp(mousePosition.y(), _visibleTop, _visibleBottom));
 
 	auto itemPoint = QPoint();
 	auto begin = std::rbegin(_items), end = std::rend(_items);
@@ -1514,7 +1637,7 @@ void InnerWidget::updateSelected() {
 		dragState = view->textState(itemPoint, request);
 		lnkhost = view;
 		if (!dragState.link && itemPoint.x() >= st::historyPhotoLeft && itemPoint.x() < st::historyPhotoLeft + st::msgPhotoSize) {
-			if (auto message = item->toHistoryMessage()) {
+			if (item->toHistoryMessage()) {
 				if (view->hasFromPhoto()) {
 					enumerateUserpics([&](not_null<Element*> view, int userpicTop) {
 						// stop enumeration if the userpic is below our point
@@ -1609,7 +1732,7 @@ void InnerWidget::updateSelected() {
 void InnerWidget::performDrag() {
 	if (_mouseAction != MouseAction::Dragging) return;
 
-	auto uponSelected = false;
+	//auto uponSelected = false;
 	//if (_mouseActionItem) {
 	//	if (!_selected.isEmpty() && _selected.cbegin().value() == FullSelection) {
 	//		uponSelected = _selected.contains(_mouseActionItem);
@@ -1689,7 +1812,7 @@ void InnerWidget::performDrag() {
 	//		auto mimeData = std::make_unique<QMimeData>();
 	//		mimeData->setData(forwardMimeType, "1");
 	//		if (auto document = (pressedMedia ? pressedMedia->getDocument() : nullptr)) {
-	//			auto filepath = document->filepath(DocumentData::FilePathResolve::Checked);
+	//			auto filepath = document->filepath(true);
 	//			if (!filepath.isEmpty()) {
 	//				QList<QUrl> urls;
 	//				urls.push_back(QUrl::fromLocalFile(filepath));

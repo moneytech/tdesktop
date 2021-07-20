@@ -30,7 +30,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/file_upload.h"
 #include "storage/file_download_mtproto.h"
 #include "app.h"
-#include "apiwrap.h"
 
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonArray>
@@ -293,7 +292,6 @@ bool ValueChanged(not_null<const Value*> value, const ValueMap &data) {
 		return file.deleted;
 	};
 
-	auto filesCount = 0;
 	for (const auto &scan : value->filesInEdit(FileType::Scan)) {
 		if (FileChanged(scan)) {
 			return true;
@@ -339,6 +337,7 @@ FormRequest::FormRequest(
 }
 
 EditFile::EditFile(
+	not_null<Main::Session*> session,
 	not_null<const Value*> value,
 	FileType type,
 	const File &fields,
@@ -346,13 +345,15 @@ EditFile::EditFile(
 : value(value)
 , type(type)
 , fields(std::move(fields))
-, uploadData(std::move(uploadData))
+, uploadData(session, std::move(uploadData))
 , guard(std::make_shared<bool>(true)) {
 }
 
 UploadScanDataPointer::UploadScanDataPointer(
+	not_null<Main::Session*> session,
 	std::unique_ptr<UploadScanData> &&value)
-: _value(std::move(value)) {
+: _session(session)
+, _value(std::move(value)) {
 }
 
 UploadScanDataPointer::UploadScanDataPointer(
@@ -364,7 +365,7 @@ UploadScanDataPointer &UploadScanDataPointer::operator=(
 UploadScanDataPointer::~UploadScanDataPointer() {
 	if (const auto value = _value.get()) {
 		if (const auto fullId = value->fullId) {
-			Auth().uploader().cancel(fullId);
+			_session->uploader().cancel(fullId);
 		}
 	}
 }
@@ -460,12 +461,12 @@ int Value::whatNotFilled() const {
 	return result;
 }
 
-void Value::saveInEdit() {
+void Value::saveInEdit(not_null<Main::Session*> session) {
 	const auto saveList = [&](FileType type) {
-		filesInEdit(type) = ranges::view::all(
+		filesInEdit(type) = ranges::views::all(
 			files(type)
-		) | ranges::view::transform([=](const File &file) {
-			return EditFile(this, type, file, nullptr);
+		) | ranges::views::transform([=](const File &file) {
+			return EditFile(session, this, type, file, nullptr);
 		}) | ranges::to_vector;
 	};
 	saveList(FileType::Scan);
@@ -474,6 +475,7 @@ void Value::saveInEdit() {
 	specialScansInEdit.clear();
 	for (const auto &[type, scan] : specialScans) {
 		specialScansInEdit.emplace(type, EditFile(
+			session,
 			this,
 			type,
 			scan,
@@ -499,15 +501,15 @@ bool Value::uploadingScan() const {
 	};
 	const auto uploadingInList = [&](FileType type) {
 		const auto &list = filesInEdit(type);
-		return ranges::find_if(list, uploading) != end(list);
+		return ranges::any_of(list, uploading);
 	};
 	if (uploadingInList(FileType::Scan)
 		|| uploadingInList(FileType::Translation)) {
 		return true;
 	}
-	if (ranges::find_if(specialScansInEdit, [&](const auto &pair) {
+	if (ranges::any_of(specialScansInEdit, [&](const auto &pair) {
 		return uploading(pair.second);
-	}) != end(specialScansInEdit)) {
+	})) {
 		return true;
 	}
 	return false;
@@ -621,10 +623,14 @@ FormController::FormController(
 	not_null<Window::SessionController*> controller,
 	const FormRequest &request)
 : _controller(controller)
-, _api(_controller->session().api().instance())
+, _api(&_controller->session().mtp())
 , _request(PreprocessRequest(request))
 , _shortPollTimer([=] { reloadPassword(); })
 , _view(std::make_unique<PanelController>(this)) {
+}
+
+Main::Session &FormController::session() const {
+	return _controller->session();
 }
 
 void FormController::show() {
@@ -744,7 +750,7 @@ std::vector<not_null<const Value*>> FormController::submitGetErrors() {
 		bytes::make_span(_request.publicKey.toUtf8()));
 
 	_submitRequestId = _api.request(MTPaccount_AcceptAuthorization(
-		MTP_int(_request.botId),
+		MTP_int(_request.botId.bare), // #TODO ids
 		MTP_string(_request.scope),
 		MTP_string(_request.publicKey),
 		MTP_vector<MTPSecureValueHash>(prepared.hashes),
@@ -764,7 +770,7 @@ std::vector<not_null<const Value*>> FormController::submitGetErrors() {
 				+ st::defaultToast.durationFadeOut),
 			this,
 			[=] { cancel(); });
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_submitRequestId = 0;
 		if (handleAppUpdateError(error.type())) {
 		} else if (AcceptErrorRequiresRestart(error.type())) {
@@ -859,7 +865,7 @@ void FormController::submitPassword(
 			const auto &settings = wrapped->c_secureSecretSettings();
 			const auto algo = Core::ParseSecureSecretAlgo(
 				settings.vsecure_algo());
-			if (!algo) {
+			if (v::is_null(algo)) {
 				_view->showUpdateAppBox();
 				return;
 			}
@@ -876,7 +882,7 @@ void FormController::submitPassword(
 				saved.hashForAuth = base::take(_passwordCheckHash);
 				saved.hashForSecret = hashForSecret;
 				saved.secretId = _secretId;
-				Auth().data().rememberPassportCredentials(
+				session().data().rememberPassportCredentials(
 					std::move(saved),
 					kRememberCredentialsDelay);
 			}
@@ -887,7 +893,7 @@ void FormController::submitPassword(
 				bytes::make_span(password),
 				0); // secure_secret_id
 		}
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_passwordCheckRequestId = 0;
 		if (error.type() == qstr("SRP_ID_INVALID")) {
 			handleSrpIdInvalid(_passwordCheckRequestId);
@@ -895,7 +901,7 @@ void FormController::submitPassword(
 			// Force reload and show form.
 			_password = PasswordSettings();
 			reloadPassword();
-		} else if (MTP::isFloodError(error)) {
+		} else if (MTP::IsFloodError(error)) {
 			_passwordError.fire(tr::lng_flood_error(tr::now));
 		} else if (error.type() == qstr("PASSWORD_HASH_INVALID")
 			|| error.type() == qstr("SRP_PASSWORD_CHANGED")) {
@@ -949,7 +955,7 @@ void FormController::checkSavedPasswordSettings(
 			const auto &settings = wrapped->c_secureSecretSettings();
 			const auto algo = Core::ParseSecureSecretAlgo(
 				settings.vsecure_algo());
-			if (!algo) {
+			if (v::is_null(algo)) {
 				_view->showUpdateAppBox();
 				return;
 			} else if (!settings.vsecure_secret().v.isEmpty()
@@ -963,15 +969,15 @@ void FormController::checkSavedPasswordSettings(
 			}
 		}
 		if (_secret.empty()) {
-			Auth().data().forgetPassportCredentials();
+			session().data().forgetPassportCredentials();
 			showForm();
 		}
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_passwordCheckRequestId = 0;
 		if (error.type() != qstr("SRP_ID_INVALID")
 			|| !handleSrpIdInvalid(_passwordCheckRequestId)) {
 		} else {
-			Auth().data().forgetPassportCredentials();
+			session().data().forgetPassportCredentials();
 			showForm();
 		}
 	}).send();
@@ -993,6 +999,7 @@ void FormController::recoverPassword() {
 		const auto &data = result.c_auth_passwordRecovery();
 		const auto pattern = qs(data.vemail_pattern());
 		const auto box = _view->show(Box<RecoverBox>(
+			&_controller->session(),
 			pattern,
 			_password.notEmptyPassport));
 
@@ -1005,7 +1012,7 @@ void FormController::recoverPassword() {
 		) | rpl::start_with_next([=] {
 			box->closeBox();
 		}, box->lifetime());
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_recoverRequestId = 0;
 		_view->show(Box<InformBox>(Lang::Hard::ServerError()
 			+ '\n'
@@ -1030,7 +1037,7 @@ void FormController::cancelPassword() {
 	)).done([=](const MTPBool &result) {
 		_passwordRequestId = 0;
 		reloadPassword();
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_passwordRequestId = 0;
 		reloadPassword();
 	}).send();
@@ -1110,7 +1117,7 @@ void FormController::resetSecret(
 	)).done([=](const MTPBool &result) {
 		_saveSecretRequestId = 0;
 		generateSecret(password);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_saveSecretRequestId = 0;
 		if (error.type() != qstr("SRP_ID_INVALID")
 			|| !handleSrpIdInvalid(_saveSecretRequestId)) {
@@ -1131,7 +1138,6 @@ void FormController::decryptValues() {
 
 void FormController::fillErrors() {
 	const auto find = [&](const MTPSecureValueType &type) -> Value* {
-		const auto converted = ConvertType(type);
 		const auto i = _form.values.find(ConvertType(type));
 		if (i != end(_form.values)) {
 			return &i->second;
@@ -1167,7 +1173,7 @@ void FormController::fillErrors() {
 			}
 		}
 	};
-	for (const auto &error : _form.pendingErrors) {
+	for (const auto &error : std::as_const(_form.pendingErrors)) {
 		error.match([&](const MTPDsecureValueError &data) {
 			if (const auto value = find(data.vtype())) {
 				if (CanHaveErrors(value->type)) {
@@ -1298,7 +1304,7 @@ void FormController::decryptValue(Value &value) const {
 		}
 		const auto fields = DeserializeData(decrypted);
 		value.data.parsed.fields.clear();
-		for (const auto [key, text] : fields) {
+		for (const auto &[key, text] : fields) {
 			value.data.parsed.fields[key] = { text };
 		}
 	}
@@ -1366,10 +1372,14 @@ void FormController::uploadScan(
 	}
 	const auto nonconst = findValue(value);
 	const auto fileIndex = [&]() -> std::optional<int> {
-		auto scanInEdit = EditFile{ nonconst, type, File(), nullptr };
+		auto scanInEdit = EditFile(
+			&session(),
+			nonconst,
+			type,
+			File(),
+			nullptr);
 		if (type == FileType::Scan || type == FileType::Translation) {
 			auto &list = nonconst->filesInEdit(type);
-			auto scanIndex = int(list.size());
 			list.push_back(std::move(scanInEdit));
 			return list.size() - 1;
 		}
@@ -1408,10 +1418,10 @@ void FormController::restoreScan(
 void FormController::prepareFile(
 		EditFile &file,
 		const QByteArray &content) {
-	const auto fileId = rand_value<uint64>();
+	const auto fileId = openssl::RandomValue<uint64>();
 	file.fields.size = content.size();
 	file.fields.id = fileId;
-	file.fields.dcId = MTP::maindc();
+	file.fields.dcId = _controller->session().mainDcId();
 	file.fields.secret = GenerateSecretBytes();
 	file.fields.date = base::unixtime::now();
 	file.fields.image = ReadImage(bytes::make_span(content));
@@ -1494,17 +1504,17 @@ void FormController::subscribeToUploader() {
 
 	using namespace Storage;
 
-	Auth().uploader().secureReady(
+	session().uploader().secureReady(
 	) | rpl::start_with_next([=](const UploadSecureDone &data) {
 		scanUploadDone(data);
 	}, _uploaderSubscriptions);
 
-	Auth().uploader().secureProgress(
+	session().uploader().secureProgress(
 	) | rpl::start_with_next([=](const UploadSecureProgress &data) {
 		scanUploadProgress(data);
 	}, _uploaderSubscriptions);
 
-	Auth().uploader().secureFailed(
+	session().uploader().secureFailed(
 	) | rpl::start_with_next([=](const FullMsgId &fullId) {
 		scanUploadFail(fullId);
 	}, _uploaderSubscriptions);
@@ -1515,12 +1525,14 @@ void FormController::uploadEncryptedFile(
 		UploadScanData &&data) {
 	subscribeToUploader();
 
-	file.uploadData = std::make_unique<UploadScanData>(std::move(data));
+	file.uploadData = UploadScanDataPointer(
+		&session(),
+		std::make_unique<UploadScanData>(std::move(data)));
 
 	auto prepared = std::make_shared<FileLoadResult>(
 		TaskId(),
 		file.uploadData->fileId,
-		FileLoadTo(PeerId(0), Api::SendOptions(), MsgId(0)),
+		FileLoadTo(PeerId(0), Api::SendOptions(), MsgId(0), MsgId(0)),
 		TextWithTags(),
 		std::shared_ptr<SendingAlbum>(nullptr));
 	prepared->type = SendMediaType::Secure;
@@ -1532,8 +1544,10 @@ void FormController::uploadEncryptedFile(
 
 	file.uploadData->fullId = FullMsgId(
 		0,
-		Auth().data().nextLocalMessageId());
-	Auth().uploader().upload(file.uploadData->fullId, std::move(prepared));
+		session().data().nextLocalMessageId());
+	session().uploader().upload(
+		file.uploadData->fullId,
+		std::move(prepared));
 }
 
 void FormController::scanUploadDone(const Storage::UploadSecureDone &data) {
@@ -1583,7 +1597,7 @@ QString FormController::defaultEmail() const {
 }
 
 QString FormController::defaultPhoneNumber() const {
-	return Auth().user()->phone();
+	return session().user()->phone();
 }
 
 auto FormController::scanUpdated() const
@@ -1634,7 +1648,7 @@ void FormController::verify(
 			)).done([=](const MTPBool &result) {
 				savePlainTextValue(nonconst);
 				clearValueVerification(nonconst);
-			}).fail([=](const RPCError &error) {
+			}).fail([=](const MTP::Error &error) {
 				nonconst->verification.requestId = 0;
 				if (error.type() == qstr("PHONE_CODE_INVALID")) {
 					verificationError(
@@ -1651,7 +1665,7 @@ void FormController::verify(
 			)).done([=](const MTPBool &result) {
 				savePlainTextValue(nonconst);
 				clearValueVerification(nonconst);
-			}).fail([=](const RPCError &error) {
+			}).fail([=](const MTP::Error &error) {
 				nonconst->verification.requestId = 0;
 				if (error.type() == qstr("CODE_INVALID")) {
 					verificationError(
@@ -1705,7 +1719,7 @@ void FormController::startValueEdit(not_null<const Value*> value) {
 			loadFile(scan);
 		}
 	}
-	nonconst->saveInEdit();
+	nonconst->saveInEdit(&session());
 }
 
 void FormController::loadFile(File &file) {
@@ -1723,9 +1737,10 @@ void FormController::loadFile(File &file) {
 	const auto [j, ok] = _fileLoaders.emplace(
 		key,
 		std::make_unique<mtpFileLoader>(
+			&_controller->session(),
 			StorageFileLocation(
 				file.dcId,
-				Auth().userId(),
+				session().userId(),
 				MTP_inputSecureFileLocation(
 					MTP_long(file.id),
 					MTP_long(file.accessHash))),
@@ -1733,21 +1748,20 @@ void FormController::loadFile(File &file) {
 			SecureFileLocation,
 			QString(),
 			file.size,
+			file.size,
 			LoadToCacheAsWell,
 			LoadFromCloudOrLocal,
 			false,
 			Data::kImageCacheTag));
 	const auto loader = j->second.get();
-	loader->connect(loader, &mtpFileLoader::progress, [=] {
-		if (loader->finished()) {
-			fileLoadDone(key, loader->bytes());
-		} else {
-			fileLoadProgress(key, loader->currentOffset());
-		}
-	});
-	loader->connect(loader, &mtpFileLoader::failed, [=] {
+	loader->updates(
+	) | rpl::start_with_next_error_done([=] {
+		fileLoadProgress(key, loader->currentOffset());
+	}, [=](bool started) {
 		fileLoadFail(key);
-	});
+	}, [=] {
+		fileLoadDone(key, loader->bytes());
+	}, loader->lifetime());
 	loader->start();
 }
 
@@ -1879,7 +1893,7 @@ void FormController::deleteValueEdit(not_null<const Value*> value) {
 	)).done([=](const MTPBool &result) {
 		resetValue(*nonconst);
 		_valueSaveFinished.fire_copy(value);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		nonconst->saveRequestId = 0;
 		valueSaveShowError(nonconst, error);
 	}).send();
@@ -2032,7 +2046,7 @@ void FormController::sendSaveRequest(
 		value->fillDataFrom(std::move(refreshed));
 
 		_valueSaveFinished.fire_copy(value);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		value->saveRequestId = 0;
 		const auto code = error.type();
 		if (handleAppUpdateError(code)) {
@@ -2144,7 +2158,7 @@ void FormController::startPhoneVerification(not_null<Value*> value) {
 		} break;
 		}
 		_verificationNeeded.fire_copy(value);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		value->verification.requestId = 0;
 		valueSaveShowError(value, error);
 	}).send();
@@ -2162,7 +2176,7 @@ void FormController::startEmailVerification(not_null<Value*> value) {
 			? data.vlength().v
 			: -1;
 		_verificationNeeded.fire_copy(value);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		valueSaveShowError(value, error);
 	}).send();
 }
@@ -2183,7 +2197,7 @@ void FormController::requestPhoneCall(not_null<Value*> value) {
 
 void FormController::valueSaveShowError(
 		not_null<Value*> value,
-		const RPCError &error) {
+		const MTP::Error &error) {
 	_view->show(Box<InformBox>(
 		Lang::Hard::SecureSaveError() + "\n" + error.type()));
 	valueSaveFailed(value);
@@ -2237,7 +2251,7 @@ void FormController::saveSecret(
 				MTP_bytes(encryptedSecret),
 				MTP_long(saved.secretId)))
 	)).done([=](const MTPBool &result) {
-		Auth().data().rememberPassportCredentials(
+		session().data().rememberPassportCredentials(
 			std::move(saved),
 			kRememberCredentialsDelay);
 
@@ -2248,7 +2262,7 @@ void FormController::saveSecret(
 		for (const auto &callback : base::take(_secretCallbacks)) {
 			callback();
 		}
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_saveSecretRequestId = 0;
 		if (error.type() != qstr("SRP_ID_INVALID")
 			|| !handleSrpIdInvalid(_saveSecretRequestId)) {
@@ -2273,13 +2287,13 @@ void FormController::requestForm() {
 		return;
 	}
 	_formRequestId = _api.request(MTPaccount_GetAuthorizationForm(
-		MTP_int(_request.botId),
+		MTP_int(_request.botId.bare), // #TODO ids
 		MTP_string(_request.scope),
 		MTP_string(_request.publicKey)
 	)).done([=](const MTPaccount_AuthorizationForm &result) {
 		_formRequestId = 0;
 		formDone(result);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		formFail(error.type());
 	}).send();
 }
@@ -2344,7 +2358,7 @@ void FormController::fillDownloadedFile(
 	if (bytes.size() > Storage::kMaxFileInMemory) {
 		return;
 	}
-	Auth().data().cache().put(
+	session().data().cache().put(
 		Data::DocumentCacheKey(destination.dcId, destination.id),
 		Storage::Cache::Database::TaggedValue(
 			QByteArray(
@@ -2486,7 +2500,7 @@ void FormController::requestConfig() {
 		_configRequestId = 0;
 		ConfigInstance() = ParseConfig(result);
 		showForm();
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_configRequestId = 0;
 		showForm();
 	}).send();
@@ -2497,7 +2511,7 @@ bool FormController::parseForm(const MTPaccount_AuthorizationForm &result) {
 
 	const auto &data = result.c_account_authorizationForm();
 
-	Auth().data().processUsers(data.vusers());
+	session().data().processUsers(data.vusers());
 
 	for (const auto &value : data.vvalues().v) {
 		auto parsed = parseValue(value);
@@ -2524,14 +2538,14 @@ bool FormController::parseForm(const MTPaccount_AuthorizationForm &result) {
 			value.nativeNames = requested.nativeNames;
 		}
 		_form.request.push_back(row.values
-			| ranges::view::transform([](const RequestedValue &value) {
+			| ranges::views::transform([](const RequestedValue &value) {
 				return value.type;
 			}) | ranges::to_vector);
 	}
 	if (!ValidateForm(_form)) {
 		return false;
 	}
-	_bot = Auth().data().userLoaded(_request.botId);
+	_bot = session().data().userLoaded(_request.botId);
 	_form.pendingErrors = data.verrors().v;
 	return true;
 }
@@ -2561,7 +2575,7 @@ void FormController::requestPassword() {
 	)).done([=](const MTPaccount_Password &result) {
 		_passwordRequestId = 0;
 		passwordDone(result);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		formFail(error.type());
 	}).send();
 }
@@ -2592,14 +2606,14 @@ void FormController::showForm() {
 		return;
 	}
 	if (_password.unknownAlgo
-		|| !_password.newAlgo
-		|| !_password.newSecureAlgo) {
+		|| v::is_null(_password.newAlgo)
+		|| v::is_null(_password.newSecureAlgo)) {
 		_view->showUpdateAppBox();
 		return;
 	} else if (_password.request) {
 		if (!_savedPasswordValue.isEmpty()) {
 			submitPassword(base::duplicate(_savedPasswordValue));
-		} else if (const auto saved = Auth().data().passportCredentials()) {
+		} else if (const auto saved = session().data().passportCredentials()) {
 			checkSavedPasswordSettings(*saved);
 		} else {
 			_view->showAskPassword();

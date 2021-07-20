@@ -26,6 +26,10 @@ class PlaybackProgress;
 } // namespace Clip
 } // namespace Media
 
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace Media {
 namespace Player {
 
@@ -35,9 +39,10 @@ struct TrackState;
 
 class Widget : public Ui::RpWidget, private base::Subscriber {
 public:
-	Widget(QWidget *parent);
+	Widget(QWidget *parent, not_null<Main::Session*> session);
 
 	void setCloseCallback(Fn<void()> callback);
+	void setShowItemCallback(Fn<void(not_null<const HistoryItem*>)> callback);
 	void stopAndClose();
 	void setShadowGeometryToLeft(int x, int y, int w, int h);
 	void showShadow();
@@ -85,6 +90,8 @@ private:
 	void updateTimeText(const TrackState &state);
 	void updateTimeLabel();
 
+	const not_null<Main::Session*> _session;
+
 	crl::time _seekPositionMs = -1;
 	crl::time _lastDurationMs = 0;
 	QString _time;
@@ -97,6 +104,7 @@ private:
 	AudioMsgId _lastSongId;
 	bool _voiceIsActive = false;
 	Fn<void()> _closeCallback;
+	Fn<void(not_null<const HistoryItem*>)> _showItemCallback;
 
 	bool _labelsOver = false;
 	bool _labelsDown = false;

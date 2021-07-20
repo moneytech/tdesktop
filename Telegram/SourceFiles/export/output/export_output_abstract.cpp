@@ -7,7 +7,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "export/output/export_output_abstract.h"
 
-#include "export/output/export_output_text.h"
 #include "export/output/export_output_html.h"
 #include "export/output/export_output_json.h"
 #include "export/output/export_output_stats.h"
@@ -33,11 +32,9 @@ QString NormalizePath(const Settings &settings) {
 	}
 	const auto date = QDate::currentDate();
 	const auto base = QString(settings.onlySinglePeer()
-		? "ChatExport_%1_%2_%3"
-		: "DataExport_%1_%2_%3"
-	).arg(date.day(), 2, 10, QChar('0')
-	).arg(date.month(), 2, 10, QChar('0')
-	).arg(date.year());
+		? "ChatExport_%1"
+		: "DataExport_%1"
+	).arg(date.toString(Qt::ISODate));
 	const auto add = [&](int i) {
 		return base + (i ? " (" + QString::number(i) + ')' : QString());
 	};
@@ -52,7 +49,6 @@ QString NormalizePath(const Settings &settings) {
 std::unique_ptr<AbstractWriter> CreateWriter(Format format) {
 	switch (format) {
 	case Format::Html: return std::make_unique<HtmlWriter>();
-	case Format::Text: return std::make_unique<TextWriter>();
 	case Format::Json: return std::make_unique<JsonWriter>();
 	}
 	Unexpected("Format in Export::Output::CreateWriter.");
@@ -135,7 +131,7 @@ Stats AbstractWriter::produceTestExample(
 	topUser.rating = 0.5;
 	auto topChat = Data::TopPeer();
 	auto chat = Data::Chat();
-	chat.id = counter();
+	chat.bareId = counter();
 	chat.title = "Group chat";
 	auto peerChat = Data::Peer{ chat };
 	topChat.peer = peerChat;
@@ -152,7 +148,7 @@ Stats AbstractWriter::produceTestExample(
 	topBot.peer = peerBot;
 	topBot.rating = 0.125;
 
-	auto peers = std::map<Data::PeerId, Data::Peer>();
+	auto peers = std::map<PeerId, Data::Peer>();
 	peers.emplace(peerUser.id(), peerUser);
 	peers.emplace(peerBot.id(), peerBot);
 	peers.emplace(peerChat.id(), peerChat);
@@ -201,7 +197,7 @@ Stats AbstractWriter::produceTestExample(
 		message.edited = date();
 		static auto count = 0;
 		if (++count % 3 == 0) {
-			message.forwardedFromId = Data::UserPeerId(user.info.userId);
+			message.forwardedFromId = peerFromUser(user.info.userId);
 			message.forwardedDate = date();
 		} else if (count % 3 == 2) {
 			message.forwardedFromName = "Test hidden forward";
@@ -361,14 +357,14 @@ Stats AbstractWriter::produceTestExample(
 	sliceChat1.list.push_back([&] {
 		auto message = serviceMessage();
 		auto action = Data::ActionChatMigrateTo();
-		action.channelId = chat.id;
+		action.channelId = ChannelId(chat.bareId);
 		message.action.content = action;
 		return message;
 	}());
 	sliceChat1.list.push_back([&] {
 		auto message = serviceMessage();
 		auto action = Data::ActionChannelMigrateFrom();
-		action.chatId = chat.id;
+		action.chatId = ChatId(chat.bareId);
 		action.title = "Supergroup now";
 		message.action.content = action;
 		return message;

@@ -18,12 +18,18 @@ class IconButton;
 class MediaSlider;
 } // namespace Ui
 
+namespace Window {
+class SessionController;
+} // namespace Window
+
 namespace Media {
 namespace Player {
 
-class VolumeController : public TWidget, private base::Subscriber {
+class VolumeController final : public Ui::RpWidget {
 public:
-	VolumeController(QWidget *parent);
+	VolumeController(
+		QWidget *parent,
+		not_null<Window::SessionController*> controller);
 
 	void setIsVertical(bool vertical);
 
@@ -42,7 +48,9 @@ class VolumeWidget : public Ui::RpWidget {
 	Q_OBJECT
 
 public:
-	VolumeWidget(QWidget *parent);
+	VolumeWidget(
+		QWidget *parent,
+		not_null<Window::SessionController*> controller);
 
 	bool overlaps(const QRect &globalRect);
 
@@ -56,7 +64,7 @@ protected:
 
 	bool eventFilter(QObject *obj, QEvent *e) override;
 
-private slots:
+private Q_SLOTS:
 	void onShowStart();
 	void onHideStart();
 

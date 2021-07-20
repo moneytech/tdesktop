@@ -23,6 +23,10 @@ namespace Window {
 class SessionController;
 } // namespace Window
 
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace Passport {
 
 struct Config {
@@ -73,7 +77,9 @@ struct UploadScanData {
 
 class UploadScanDataPointer {
 public:
-	UploadScanDataPointer(std::unique_ptr<UploadScanData> &&value);
+	UploadScanDataPointer(
+		not_null<Main::Session*> session,
+		std::unique_ptr<UploadScanData> &&value);
 	UploadScanDataPointer(UploadScanDataPointer &&other);
 	UploadScanDataPointer &operator=(UploadScanDataPointer &&other);
 	~UploadScanDataPointer();
@@ -84,6 +90,7 @@ public:
 	UploadScanData *operator->() const;
 
 private:
+	not_null<Main::Session*> _session;
 	std::unique_ptr<UploadScanData> _value;
 
 };
@@ -115,6 +122,7 @@ struct File {
 
 struct EditFile {
 	EditFile(
+		not_null<Main::Session*> session,
 		not_null<const Value*> value,
 		FileType type,
 		const File &fields,
@@ -188,7 +196,7 @@ struct Value {
 	bool requiresSpecialScan(FileType type) const;
 	bool requiresScan(FileType type) const;
 	bool scansAreFilled() const;
-	void saveInEdit();
+	void saveInEdit(not_null<Main::Session*> session);
 	void clearEditData();
 	bool uploadingScan() const;
 	bool saving() const;
@@ -279,9 +287,11 @@ struct PasswordSettings {
 // different random parts added on the client to the server salts.
 //			&& (newAlgo == other.newAlgo)
 //			&& (newSecureAlgo == other.newSecureAlgo)
-			&& ((!newAlgo && !other.newAlgo) || (newAlgo && other.newAlgo))
-			&& ((!newSecureAlgo && !other.newSecureAlgo)
-				|| (newSecureAlgo && other.newSecureAlgo))
+			&& ((v::is_null(newAlgo) && v::is_null(other.newAlgo))
+				|| (!v::is_null(newAlgo) && !v::is_null(other.newAlgo)))
+			&& ((v::is_null(newSecureAlgo) && v::is_null(other.newSecureAlgo))
+				|| (!v::is_null(newSecureAlgo)
+					&& !v::is_null(other.newSecureAlgo)))
 			&& (hint == other.hint)
 			&& (unconfirmedPattern == other.unconfirmedPattern)
 			&& (confirmedEmail == other.confirmedEmail)
@@ -324,9 +334,10 @@ public:
 		not_null<Window::SessionController*> controller,
 		const FormRequest &request);
 
-	not_null<Window::SessionController*> window() const {
+	[[nodiscard]] not_null<Window::SessionController*> window() const {
 		return _controller;
 	}
+	[[nodiscard]] Main::Session &session() const;
 
 	void show();
 	UserData *bot() const;
@@ -485,7 +496,7 @@ private:
 	QString getPlainTextFromValue(not_null<const Value*> value) const;
 	void startPhoneVerification(not_null<Value*> value);
 	void startEmailVerification(not_null<Value*> value);
-	void valueSaveShowError(not_null<Value*> value, const RPCError &error);
+	void valueSaveShowError(not_null<Value*> value, const MTP::Error &error);
 	void valueSaveFailed(not_null<Value*> value);
 	void requestPhoneCall(not_null<Value*> value);
 	void verificationError(
@@ -529,7 +540,7 @@ private:
 	Form _form;
 	bool _cancelled = false;
 	mtpRequestId _recoverRequestId = 0;
-	std::map<FileKey, std::unique_ptr<mtpFileLoader>> _fileLoaders;
+	base::flat_map<FileKey, std::unique_ptr<mtpFileLoader>> _fileLoaders;
 
 	rpl::event_stream<not_null<const EditFile*>> _scanUpdated;
 	rpl::event_stream<not_null<const Value*>> _valueSaveFinished;

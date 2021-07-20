@@ -107,9 +107,8 @@ void TopBar::enableBackButton() {
 	_back->setDuration(st::infoTopBarDuration);
 	_back->toggle(!selectionMode(), anim::type::instant);
 	_back->entity()->clicks(
-	) | rpl::map([] {
-		return rpl::empty_value();
-	}) | rpl::start_to_stream(_backClicks, _back->lifetime());
+	) | rpl::to_empty
+	| rpl::start_to_stream(_backClicks, _back->lifetime());
 	registerToggleControlCallback(_back.data(), [=] {
 		return !selectionMode();
 	});
@@ -444,9 +443,8 @@ void TopBar::createSelectionControls() {
 		st::infoTopBarScale));
 	_cancelSelection->setDuration(st::infoTopBarDuration);
 	_cancelSelection->entity()->clicks(
-	) | rpl::map([] {
-		return rpl::empty_value();
-	}) | rpl::start_to_stream(
+	) | rpl::to_empty
+	| rpl::start_to_stream(
 		_cancelSelectionClicks,
 		_cancelSelection->lifetime());
 	_selectionText = wrap(Ui::CreateChild<Ui::FadeWrap<Ui::LabelWithNumbers>>(
@@ -480,10 +478,7 @@ void TopBar::createSelectionControls() {
 }
 
 bool TopBar::computeCanDelete() const {
-	return ranges::find_if(
-		_selectedItems.list,
-		[](const SelectedItem &item) { return !item.canDelete; }
-	) == _selectedItems.list.end();
+	return ranges::all_of(_selectedItems.list, &SelectedItem::canDelete);
 }
 
 Ui::StringWithNumbers TopBar::generateSelectedText() const {
@@ -515,11 +510,11 @@ bool TopBar::searchMode() const {
 }
 
 MessageIdsList TopBar::collectItems() const {
-	return ranges::view::all(
+	return ranges::views::all(
 		_selectedItems.list
-	) | ranges::view::transform([](auto &&item) {
+	) | ranges::views::transform([](auto &&item) {
 		return item.msgId;
-	}) | ranges::view::filter([&](FullMsgId msgId) {
+	}) | ranges::views::filter([&](FullMsgId msgId) {
 		return _navigation->session().data().message(msgId) != nullptr;
 	}) | ranges::to_vector;
 }
@@ -545,14 +540,15 @@ void TopBar::performDelete() {
 	if (items.empty()) {
 		_cancelSelectionClicks.fire({});
 	} else {
-		const auto box = Ui::show(Box<DeleteMessagesBox>(
+		auto box = Box<DeleteMessagesBox>(
 			&_navigation->session(),
-			std::move(items)));
+			std::move(items));
 		box->setDeleteConfirmedCallback([weak = Ui::MakeWeak(this)] {
 			if (weak) {
 				weak->_cancelSelectionClicks.fire({});
 			}
 		});
+		_navigation->parentController()->show(std::move(box));
 	}
 }
 
@@ -564,9 +560,7 @@ rpl::producer<QString> TitleValue(
 
 	switch (section.type()) {
 	case Section::Type::Profile:
-		/*if (const auto feed = key.feed()) {
-			return tr::lng_info_feed_title();
-		} else */if (const auto user = peer->asUser()) {
+		if (const auto user = peer->asUser()) {
 			return (user->isBot() && !user->isSupport())
 				? tr::lng_info_bot_title()
 				: tr::lng_info_user_title();
@@ -580,7 +574,7 @@ rpl::producer<QString> TitleValue(
 		Unexpected("Bad peer type in Info::TitleValue()");
 
 	case Section::Type::Media:
-		if (peer->isSelf() && isStackBottom) {
+		if (peer->sharedMediaInfo() && isStackBottom) {
 			return tr::lng_profile_shared_media();
 		}
 		switch (section.mediaType()) {
@@ -611,9 +605,6 @@ rpl::producer<QString> TitleValue(
 				: tr::lng_profile_subscribers_section();
 		}
 		return tr::lng_profile_participants_section();
-
-	//case Section::Type::Channels: // #feed
-	//	return tr::lng_info_feed_channels();
 
 	case Section::Type::Settings:
 		switch (section.settingsType()) {

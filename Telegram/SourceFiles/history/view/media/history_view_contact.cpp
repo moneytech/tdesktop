@@ -18,13 +18,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_cursor_state.h"
 #include "window/window_session_controller.h"
 #include "ui/empty_userpic.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
 #include "data/data_media_types.h"
+#include "data/data_cloud_file.h"
 #include "main/main_session.h"
 #include "app.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 namespace HistoryView {
 namespace {
@@ -79,6 +80,10 @@ Contact::Contact(
 
 Contact::~Contact() {
 	history()->owner().unregisterContactView(_userId, _parent);
+	if (_userpic) {
+		_userpic = nullptr;
+		_parent->checkHeavyPart();
+	}
 }
 
 void Contact::updateSharedContactUserId(UserId userId) {
@@ -115,29 +120,27 @@ QSize Contact::countOptimalSize() {
 	}
 	_linkw = _link.isEmpty() ? 0 : st::semiboldFont->width(_link);
 
-	auto tleft = 0;
-	auto tright = 0;
+	const auto &st = _userId ? st::msgFileThumbLayout : st::msgFileLayout;
+
+	const auto tleft = st.padding.left() + st.thumbSize + st.padding.right();
+	const auto tright = st.padding.left();
 	if (_userId) {
-		tleft = st::msgFileThumbPadding.left() + st::msgFileThumbSize + st::msgFileThumbPadding.right();
-		tright = st::msgFileThumbPadding.left();
 		accumulate_max(maxWidth, tleft + _phonew + tright);
 	} else {
-		tleft = st::msgFilePadding.left() + st::msgFileSize + st::msgFilePadding.right();
-		tright = st::msgFileThumbPadding.left();
 		accumulate_max(maxWidth, tleft + _phonew + _parent->skipBlockWidth() + st::msgPadding.right());
 	}
 
 	accumulate_max(maxWidth, tleft + _name.maxWidth() + tright);
 	accumulate_min(maxWidth, st::msgMaxWidth);
-	auto minHeight = 0;
+	auto minHeight = st.padding.top() + st.thumbSize + st.padding.bottom();
 	if (_userId) {
-		minHeight = st::msgFileThumbPadding.top() + st::msgFileThumbSize + st::msgFileThumbPadding.bottom();
-		if (item->Has<HistoryMessageSigned>()
-			|| item->Has<HistoryMessageViews>()) {
+		const auto msgsigned = item->Get<HistoryMessageSigned>();
+		const auto views = item->Get<HistoryMessageViews>();
+		if ((msgsigned && !msgsigned->isAnonymousRank)
+			|| (views
+				&& (views->views.count >= 0 || views->replies.count > 0))) {
 			minHeight += st::msgDateFont->height - st::msgDateDelta.y();
 		}
-	} else {
-		minHeight = st::msgFilePadding.top() + st::msgFileSize + st::msgFilePadding.bottom();
 	}
 	if (!isBubbleTop()) {
 		minHeight -= st::msgFileTopMinus;
@@ -147,27 +150,30 @@ QSize Contact::countOptimalSize() {
 
 void Contact::draw(Painter &p, const QRect &r, TextSelection selection, crl::time ms) const {
 	if (width() < st::msgPadding.left() + st::msgPadding.right() + 1) return;
-	auto paintx = 0, painty = 0, paintw = width(), painth = height();
+	auto paintw = width();
 
 	auto outbg = _parent->hasOutLayout();
 	bool selected = (selection == FullSelection);
 
 	accumulate_min(paintw, maxWidth());
 
-	auto nameleft = 0, nametop = 0, nameright = 0, statustop = 0, linktop = 0;
-	auto topMinus = isBubbleTop() ? 0 : st::msgFileTopMinus;
+	const auto &st = _userId ? st::msgFileThumbLayout : st::msgFileLayout;
+	const auto topMinus = isBubbleTop() ? 0 : st::msgFileTopMinus;
+	const auto nameleft = st.padding.left() + st.thumbSize + st.padding.right();
+	const auto nametop = st.nameTop - topMinus;
+	const auto nameright = st.padding.left();
+	const auto statustop = st.statusTop - topMinus;
+	const auto linktop = st.linkTop - topMinus;
 	if (_userId) {
-		nameleft = st::msgFileThumbPadding.left() + st::msgFileThumbSize + st::msgFileThumbPadding.right();
-		nametop = st::msgFileThumbNameTop - topMinus;
-		nameright = st::msgFileThumbPadding.left();
-		statustop = st::msgFileThumbStatusTop - topMinus;
-		linktop = st::msgFileThumbLinkTop - topMinus;
-
-		QRect rthumb(style::rtlrect(st::msgFileThumbPadding.left(), st::msgFileThumbPadding.top() - topMinus, st::msgFileThumbSize, st::msgFileThumbSize, paintw));
+		QRect rthumb(style::rtlrect(st.padding.left(), st.padding.top() - topMinus, st.thumbSize, st.thumbSize, paintw));
 		if (_contact) {
-			_contact->paintUserpic(p, rthumb.x(), rthumb.y(), st::msgFileThumbSize);
+			const auto was = (_userpic != nullptr);
+			_contact->paintUserpic(p, _userpic, rthumb.x(), rthumb.y(), st.thumbSize);
+			if (!was && _userpic) {
+				history()->owner().registerHeavyViewPart(_parent);
+			}
 		} else {
-			_photoEmpty->paint(p, st::msgFileThumbPadding.left(), st::msgFileThumbPadding.top() - topMinus, paintw, st::msgFileThumbSize);
+			_photoEmpty->paint(p, st.padding.left(), st.padding.top() - topMinus, paintw, st.thumbSize);
 		}
 		if (selected) {
 			PainterHighQualityEnabler hq(p);
@@ -181,14 +187,9 @@ void Contact::draw(Painter &p, const QRect &r, TextSelection selection, crl::tim
 		p.setPen(outbg ? (selected ? st::msgFileThumbLinkOutFgSelected : st::msgFileThumbLinkOutFg) : (selected ? st::msgFileThumbLinkInFgSelected : st::msgFileThumbLinkInFg));
 		p.drawTextLeft(nameleft, linktop, paintw, _link, _linkw);
 	} else {
-		nameleft = st::msgFilePadding.left() + st::msgFileSize + st::msgFilePadding.right();
-		nametop = st::msgFileNameTop - topMinus;
-		nameright = st::msgFilePadding.left();
-		statustop = st::msgFileStatusTop - topMinus;
-
-		_photoEmpty->paint(p, st::msgFilePadding.left(), st::msgFilePadding.top() - topMinus, paintw, st::msgFileSize);
+		_photoEmpty->paint(p, st.padding.left(), st.padding.top() - topMinus, paintw, st.thumbSize);
 	}
-	auto namewidth = paintw - nameleft - nameright;
+	const auto namewidth = paintw - nameleft - nameright;
 
 	p.setFont(st::semiboldFont);
 	p.setPen(outbg ? (selected ? st::historyFileNameOutFgSelected : st::historyFileNameOutFg) : (selected ? st::historyFileNameInFgSelected : st::historyFileNameInFg));
@@ -203,11 +204,11 @@ void Contact::draw(Painter &p, const QRect &r, TextSelection selection, crl::tim
 TextState Contact::textState(QPoint point, StateRequest request) const {
 	auto result = TextState(_parent);
 
-	auto nameleft = 0, nametop = 0, nameright = 0, statustop = 0, linktop = 0;
-	auto topMinus = isBubbleTop() ? 0 : st::msgFileTopMinus;
 	if (_userId) {
-		nameleft = st::msgFileThumbPadding.left() + st::msgFileThumbSize + st::msgFileThumbPadding.right();
-		linktop = st::msgFileThumbLinkTop - topMinus;
+		const auto &st = _userId ? st::msgFileThumbLayout : st::msgFileLayout;
+		const auto topMinus = isBubbleTop() ? 0 : st::msgFileTopMinus;
+		const auto nameleft = st.padding.left() + st.thumbSize + st.padding.right();
+		const auto linktop = st.linkTop - topMinus;
 		if (style::rtlrect(nameleft, linktop, _linkw, st::semiboldFont->height, width()).contains(point)) {
 			result.link = _linkl;
 			return result;
@@ -218,6 +219,14 @@ TextState Contact::textState(QPoint point, StateRequest request) const {
 		return result;
 	}
 	return result;
+}
+
+void Contact::unloadHeavyPart() {
+	_userpic = nullptr;
+}
+
+bool Contact::hasHeavyPart() const {
+	return (_userpic != nullptr);
 }
 
 } // namespace HistoryView

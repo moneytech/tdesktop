@@ -21,6 +21,8 @@ constexpr auto kRequestPartsCount = 8;
 } // namespace
 
 StreamedFileDownloader::StreamedFileDownloader(
+	not_null<Main::Session*> session,
+
 	uint64 objectId,
 	MTP::DcId dcId,
 	Data::FileOrigin origin,
@@ -37,7 +39,9 @@ StreamedFileDownloader::StreamedFileDownloader(
 	bool autoLoading,
 	uint8 cacheTag)
 : FileLoader(
+	session,
 	toFile,
+	size,
 	size,
 	locationType,
 	toCache,
@@ -63,7 +67,11 @@ StreamedFileDownloader::StreamedFileDownloader(
 }
 
 StreamedFileDownloader::~StreamedFileDownloader() {
-	cancelHook();
+	if (!_finished) {
+		cancel();
+	} else {
+		_reader->cancelForDownloader(this);
+	}
 }
 
 uint64 StreamedFileDownloader::objId() const {
@@ -100,7 +108,7 @@ void StreamedFileDownloader::requestPart() {
 }
 
 QByteArray StreamedFileDownloader::readLoadedPart(int offset) {
-	Expects(offset >= 0 && offset < _size);
+	Expects(offset >= 0 && offset < _fullSize);
 	Expects(!(offset % kPartSize));
 
 	const auto index = (offset / kPartSize);
@@ -151,14 +159,13 @@ void StreamedFileDownloader::savePart(const LoadedPart &part) {
 	if (!writeResultPart(offset, bytes::make_span(part.bytes))) {
 		return;
 	}
-	if (_partsSaved == _partsCount) {
-		if (!finalizeResult()) {
-			return;
-		}
-	}
 	_reader->doneForDownloader(offset);
-	requestParts();
-	notifyAboutProgress();
+	if (_partsSaved == _partsCount) {
+		finalizeResult();
+	} else {
+		requestParts();
+		notifyAboutProgress();
+	}
 }
 
 } // namespace Storage

@@ -7,7 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "mtproto/dc_options.h"
+#include "mtproto/mtproto_dc_options.h"
 #include "mtproto/mtproto_proxy_data.h"
 #include "base/bytes.h"
 
@@ -81,7 +81,8 @@ public:
 		const QString &ip,
 		int port,
 		const bytes::vector &protocolSecret,
-		int16 protocolDcId) = 0;
+		int16 protocolDcId,
+		bool protocolForFiles) = 0;
 	virtual void timedOut() {
 	}
 	[[nodiscard]] virtual bool isConnected() const = 0;
@@ -89,9 +90,6 @@ public:
 		return false;
 	}
 	[[nodiscard]] virtual bool needHttpWait() {
-		return false;
-	}
-	[[nodiscard]] virtual bool requiresExtendedPadding() const {
 		return false;
 	}
 
@@ -127,7 +125,7 @@ public:
 	// Used to emit error(...) with no real code from the server.
 	static constexpr auto kErrorCodeOther = -499;
 
-signals:
+Q_SIGNALS:
 	void receivedData();
 	void receivedSome(); // to stop restart timer
 

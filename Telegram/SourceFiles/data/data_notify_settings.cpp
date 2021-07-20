@@ -13,7 +13,6 @@ namespace Data {
 namespace {
 
 MTPinputPeerNotifySettings DefaultSettings() {
-	const auto flags = MTPDpeerNotifySettings::Flag::f_show_previews;
 	return MTP_inputPeerNotifySettings(
 		MTP_flags(0),
 		MTPBool(),
@@ -178,7 +177,7 @@ bool NotifySettings::change(
 		MTP_flags(flags),
 		MTPBool(),
 		silentPosts ? MTP_bool(*silentPosts) : MTPBool(),
-		muteForSeconds ? MTP_int(base::unixtime::now() + *muteForSeconds) : MTPint(),
+		MTP_int(muteUntil),
 		MTPstring()));
 }
 

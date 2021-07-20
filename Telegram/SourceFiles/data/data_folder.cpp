@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_channel.h"
 #include "data/data_histories.h"
+#include "data/data_changes.h"
 #include "dialogs/dialogs_key.h"
 #include "history/history.h"
 #include "history/history_item.h"
@@ -17,12 +18,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/storage_facade.h"
 #include "core/application.h"
 #include "main/main_account.h"
-//#include "storage/storage_feed_messages.h" // #feed
 #include "main/main_session.h"
-#include "observer_peer.h"
+#include "mtproto/mtproto_config.h"
 #include "apiwrap.h"
 #include "mainwidget.h"
-#include "facades.h"
 #include "styles/style_dialogs.h"
 
 namespace Data {
@@ -31,46 +30,26 @@ namespace {
 constexpr auto kLoadedChatsMinCount = 20;
 constexpr auto kShowChatNamesCount = 8;
 
-rpl::producer<int> PinnedDialogsInFolderMaxValue(
-		not_null<Main::Session*> session) {
-	return rpl::single(
-		rpl::empty_value()
-	) | rpl::then(
-		session->account().configUpdates()
-	) | rpl::map([=] {
-		return Global::PinnedDialogsInFolderMax();
-	});
-}
-
 } // namespace
 
-// #feed
-//MessagePosition FeedPositionFromMTP(const MTPFeedPosition &position) {
-//	Expects(position.type() == mtpc_feedPosition);
-//
-//	const auto &data = position.c_feedPosition();
-//	return MessagePosition(data.vdate().v, FullMsgId(
-//		peerToChannel(peerFromMTP(data.vpeer())),
-//		data.vid().v));
-//}
-
 Folder::Folder(not_null<Data::Session*> owner, FolderId id)
-: Entry(owner, this)
+: Entry(owner, Type::Folder)
 , _id(id)
-, _chatsList(FilterId(), PinnedDialogsInFolderMaxValue(&owner->session()))
-, _name(tr::lng_archived_name(tr::now)) {
+, _chatsList(
+	&owner->session(),
+	FilterId(),
+	owner->session().serverConfig().pinnedDialogsInFolderMax.value())
+, _name(tr::lng_archived_name(tr::now))
+, _chatListNameSortKey(owner->nameSortKey(_name)) {
 	indexNameParts();
 
-	Notify::PeerUpdateViewer(
-		Notify::PeerUpdate::Flag::NameChanged
-	) | rpl::start_with_next([=](const Notify::PeerUpdate &update) {
-		for (const auto history : _lastHistories) {
-			if (history->peer == update.peer) {
-				++_chatListViewVersion;
-				updateChatListEntryPostponed();
-				return;
-			}
-		}
+	session().changes().peerUpdates(
+		PeerUpdate::Flag::Name
+	) | rpl::filter([=](const PeerUpdate &update) {
+		return ranges::contains(_lastHistories, update.peer, &History::peer);
+	}) | rpl::start_with_next([=] {
+		++_chatListViewVersion;
+		updateChatListEntryPostponed();
 	}, _lifetime);
 
 	_chatsList.setAllAreMuted(true);
@@ -177,9 +156,9 @@ bool Folder::applyChatListMessage(HistoryItem *item) {
 }
 
 void Folder::computeChatListMessage() {
-	auto &&items = ranges::view::all(
+	auto &&items = ranges::views::all(
 		*_chatsList.indexed()
-	) | ranges::view::filter([](not_null<Dialogs::Row*> row) {
+	) | ranges::views::filter([](not_null<Dialogs::Row*> row) {
 		return row->entry()->chatListMessage() != nullptr;
 	});
 	const auto chatListDate = [](not_null<Dialogs::Row*> row) {
@@ -208,13 +187,13 @@ void Folder::reorderLastHistories() {
 	};
 	_lastHistories.erase(_lastHistories.begin(), _lastHistories.end());
 	_lastHistories.reserve(kShowChatNamesCount + 1);
-	auto &&histories = ranges::view::all(
+	auto &&histories = ranges::views::all(
 		*_chatsList.indexed()
-	) | ranges::view::transform([](not_null<Dialogs::Row*> row) {
+	) | ranges::views::transform([](not_null<Dialogs::Row*> row) {
 		return row->history();
-	}) | ranges::view::filter([](History *history) {
+	}) | ranges::views::filter([](History *history) {
 		return (history != nullptr);
-	}) | ranges::view::transform([](History *history) {
+	}) | ranges::views::transform([](History *history) {
 		return not_null<History*>(history);
 	});
 	for (const auto history : histories) {
@@ -236,18 +215,11 @@ not_null<Dialogs::MainList*> Folder::chatsList() {
 }
 
 void Folder::loadUserpic() {
-	//constexpr auto kPaintUserpicsCount = 4; // #feed
-	//auto load = kPaintUserpicsCount;
-	//for (const auto history : _histories) {
-	//	history->peer->loadUserpic();
-	//	if (!--load) {
-	//		break;
-	//	}
-	//}
 }
 
 void Folder::paintUserpic(
 		Painter &p,
+		std::shared_ptr<Data::CloudImageView> &view,
 		int x,
 		int y,
 		int size) const {
@@ -304,18 +276,6 @@ void Folder::paintUserpic(
 		}
 		p.restore();
 	}
-	//const auto small = (size - st::lineWidth) / 2; // #feed
-	//const auto delta = size - small;
-	//auto index = 0;
-	//for (const auto history : _histories) {
-	//	history->peer->paintUserpic(p, x, y, small);
-	//	switch (++index) {
-	//	case 1:
-	//	case 3: x += delta; break;
-	//	case 2: x -= delta; y += delta; break;
-	//	case 4: return;
-	//	}
-	//}
 }
 
 const std::vector<not_null<History*>> &Folder::lastHistories() const {
@@ -361,15 +321,6 @@ void Folder::applyPinnedUpdate(const MTPDupdateDialogPinned &data) {
 	owner().setChatPinned(this, FilterId(), data.is_pinned());
 }
 
-// #feed
-//MessagePosition Folder::unreadPosition() const {
-//	return _unreadPosition.current();
-//}
-//
-//rpl::producer<MessagePosition> Folder::unreadPositionChanges() const {
-//	return _unreadPosition.changes();
-//}
-
 int Folder::fixedOnTopIndex() const {
 	return kArchiveFixOnTopIndex;
 }
@@ -381,7 +332,7 @@ bool Folder::shouldBeInChatList() const {
 int Folder::chatListUnreadCount() const {
 	const auto state = chatListUnreadState();
 	return state.marks
-		+ (session().settings().countUnreadMessages()
+		+ (Core::App().settings().countUnreadMessages()
 			? state.messages
 			: state.chats);
 }
@@ -391,7 +342,7 @@ Dialogs::UnreadState Folder::chatListUnreadState() const {
 }
 
 bool Folder::chatListUnreadMark() const {
-	return false; // #feed unread mark
+	return false;
 }
 
 bool Folder::chatListMutedBadge() const {
@@ -416,6 +367,10 @@ const base::flat_set<QString> &Folder::chatListNameWords() const {
 
 const base::flat_set<QChar> &Folder::chatListFirstLetters() const {
 	return _nameFirstLetters;
+}
+
+const QString &Folder::chatListNameSortKey() const {
+	return _chatListNameSortKey;
 }
 
 } // namespace Data

@@ -41,7 +41,13 @@ class Message : public Element, public base::has_weak_ptr {
 public:
 	Message(
 		not_null<ElementDelegate*> delegate,
-		not_null<HistoryMessage*> data);
+		not_null<HistoryMessage*> data,
+		Element *replacing);
+	~Message();
+
+	void clickHandlerPressedChanged(
+		const ClickHandlerPtr &handler,
+		bool pressed) override;
 
 	int marginTop() const override;
 	int marginBottom() const override;
@@ -72,6 +78,9 @@ public:
 		TextSelection selection,
 		TextSelectType type) const override;
 
+	bool hasHeavyPart() const override;
+	void unloadHeavyPart() override;
+
 	// hasFromPhoto() returns true even if we don't display the photo
 	// but we need to skip a place at the left side for this photo
 	bool hasFromPhoto() const override;
@@ -82,9 +91,11 @@ public:
 	bool hasOutLayout() const override;
 	bool drawBubble() const override;
 	bool hasBubble() const override;
+	int minWidthForMedia() const override;
 	bool hasFastReply() const override;
 	bool displayFastReply() const override;
-	bool displayRightAction() const override;
+	bool displayRightActionComments() const;
+	std::optional<QSize> rightActionSize() const override;
 	void drawRightAction(
 		Painter &p,
 		int left,
@@ -93,14 +104,22 @@ public:
 	ClickHandlerPtr rightActionLink() const override;
 	bool displayEditedBadge() const override;
 	TimeId displayedEditDate() const override;
+	HistoryMessageReply *displayedReply() const override;
+	bool toggleSelectionByHandlerClick(
+		const ClickHandlerPtr &handler) const override;
 	int infoWidth() const override;
 
 	VerticalRepaintRange verticalRepaintRange() const override;
+
+	void applyGroupAdminChanges(
+		const base::flat_set<UserId> &changes) override;
 
 protected:
 	void refreshDataIdHook() override;
 
 private:
+	struct CommentsButton;
+
 	not_null<HistoryMessage*> message() const;
 
 	void initLogEntryOriginal();
@@ -108,11 +127,16 @@ private:
 	void refreshEditedBadge();
 	void fromNameUpdated(int width) const;
 
+	[[nodiscard]] bool showForwardsFromSender(
+		not_null<HistoryMessageForwarded*> forwarded) const;
 	[[nodiscard]] TextSelection skipTextSelection(
 		TextSelection selection) const;
 	[[nodiscard]] TextSelection unskipTextSelection(
 		TextSelection selection) const;
 
+	void toggleCommentsButtonRipple(bool pressed);
+
+	void paintCommentsButton(Painter &p, QRect &g, bool selected) const;
 	void paintFromName(Painter &p, QRect &trect, bool selected) const;
 	void paintForwardedInfo(Painter &p, QRect &trect, bool selected) const;
 	void paintReplyInfo(Painter &p, QRect &trect, bool selected) const;
@@ -120,6 +144,10 @@ private:
 	void paintViaBotIdInfo(Painter &p, QRect &trect, bool selected) const;
 	void paintText(Painter &p, QRect &trect, TextSelection selection) const;
 
+	bool getStateCommentsButton(
+		QPoint point,
+		QRect &g,
+		not_null<TextState*> outResult) const;
 	bool getStateFromName(
 		QPoint point,
 		QRect &trect,
@@ -151,22 +179,34 @@ private:
 	QSize performCountCurrentSize(int newWidth) override;
 	bool hasVisibleText() const override;
 
-	bool displayFastShare() const;
-	bool displayGoToOriginal() const;
-	ClickHandlerPtr fastReplyLink() const;
-	const HistoryMessageEdited *displayedEditBadge() const;
-	HistoryMessageEdited *displayedEditBadge();
+	[[nodiscard]] bool isPinnedContext() const;
+
+	[[nodiscard]] bool displayFastShare() const;
+	[[nodiscard]] bool displayGoToOriginal() const;
+	[[nodiscard]] ClickHandlerPtr fastReplyLink() const;
+	[[nodiscard]] const HistoryMessageEdited *displayedEditBadge() const;
+	[[nodiscard]] HistoryMessageEdited *displayedEditBadge();
+	[[nodiscard]] bool displayPinIcon() const;
+
 	void initTime();
-	int timeLeft() const;
-	int plainMaxWidth() const;
+	[[nodiscard]] int timeLeft() const;
+	[[nodiscard]] int plainMaxWidth() const;
+	[[nodiscard]] int monospaceMaxWidth() const;
 
 	WebPage *logEntryOriginal() const;
 
+	[[nodiscard]] ClickHandlerPtr createGoToCommentsLink() const;
 	[[nodiscard]] ClickHandlerPtr psaTooltipLink() const;
 	void psaTooltipToggled(bool shown) const;
 
+	void refreshRightBadge();
+
 	mutable ClickHandlerPtr _rightActionLink;
 	mutable ClickHandlerPtr _fastReplyLink;
+	mutable std::unique_ptr<CommentsButton> _comments;
+
+	Ui::Text::String _rightBadge;
+	int _bubbleWidthLimit = 0;
 
 };
 
