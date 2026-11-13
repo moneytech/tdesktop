@@ -10,28 +10,43 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/flags.h"
 #include "base/binary_guard.h"
 #include "data/data_types.h"
-#include "ui/image/image.h"
+#include "data/data_cloud_file.h"
+#include "core/file_location.h"
 
+class HistoryItem;
+class PhotoData;
+enum class ChatRestriction;
 class mtpFileLoader;
 
 namespace Images {
 class Source;
 } // namespace Images
 
+namespace Core {
+enum class NameType : uchar;
+} // namespace Core
+
 namespace Storage {
+class StreamedFileDownloader;
 namespace Cache {
 struct Key;
 } // namespace Cache
 } // namespace Storage
 
 namespace Media {
-namespace Streaming {
-class Loader;
-} // namespace Streaming
+struct VideoQuality;
 } // namespace Media
+
+namespace Media::Streaming {
+class Loader;
+class Reader;
+} // namespace Media::Streaming
 
 namespace Data {
 class Session;
+class DocumentMedia;
+class ReplyPreview;
+enum class StickersType : uchar;
 } // namespace Data
 
 namespace Main {
@@ -53,62 +68,81 @@ struct DocumentAdditionalData {
 
 };
 
-struct StickerData : public DocumentAdditionalData {
-	Data::FileOrigin setOrigin() const;
+enum class StickerType : uchar {
+	Webp,
+	Tgs,
+	Webm,
+};
 
-	std::unique_ptr<Image> image;
-	bool animated = false;
+struct StickerData : public DocumentAdditionalData {
+	[[nodiscard]] Data::FileOrigin setOrigin() const;
+	[[nodiscard]] bool isStatic() const;
+	[[nodiscard]] bool isLottie() const;
+	[[nodiscard]] bool isAnimated() const;
+	[[nodiscard]] bool isWebm() const;
+
 	QString alt;
-	MTPInputStickerSet set = MTP_inputStickerSetEmpty();
-	StorageImageLocation loc; // doc thumb location
+	StickerSetIdentifier set;
+	StickerType type = StickerType::Webp;
+	Data::StickersType setType = Data::StickersType();
 };
 
 struct SongData : public DocumentAdditionalData {
-	int32 duration = 0;
 	QString title, performer;
-
 };
 
 struct VoiceData : public DocumentAdditionalData {
 	~VoiceData();
 
-	int duration = 0;
 	VoiceWaveform waveform;
 	char wavemax = 0;
 };
 
-bool fileIsImage(const QString &name, const QString &mime);
+struct VideoData : public DocumentAdditionalData {
+	QString codec;
+	std::vector<not_null<DocumentData*>> qualities;
+	QSize realVideoSize;
+	crl::time startTs = 0;
+};
+
+using RoundData = VoiceData;
 
 namespace Serialize {
 class Document;
 } // namespace Serialize;
 
-class DocumentData {
+class DocumentData final {
 public:
 	DocumentData(not_null<Data::Session*> owner, DocumentId id);
+	~DocumentData();
 
 	[[nodiscard]] Data::Session &owner() const;
 	[[nodiscard]] Main::Session &session() const;
 
 	void setattributes(
 		const QVector<MTPDocumentAttribute> &attributes);
+	void setVideoQualities(const QVector<MTPDocument> &list);
 
-	void automaticLoad(
-		Data::FileOrigin origin,
-		const HistoryItem *item);
 	void automaticLoadSettingsChanged();
+	void setVideoQualities(std::vector<not_null<DocumentData*>> qualities);
+	[[nodiscard]] int resolveVideoQuality() const;
+	[[nodiscard]] int resolveOriginalVideoQuality() const;
+	[[nodiscard]] Media::VideoQuality initialPlaybackVideoQuality(
+		Media::VideoQuality request) const;
+	[[nodiscard]] auto resolveQualities(HistoryItem *context) const
+		-> const std::vector<not_null<DocumentData*>> &;
+	[[nodiscard]] not_null<DocumentData*> chooseQuality(
+		HistoryItem *context,
+		Media::VideoQuality request);
 
-	enum class FilePathResolve {
-		Cached,
-		Checked,
-		SaveFromData,
-		SaveFromDataSilent,
-	};
-	[[nodiscard]] bool loaded(
-		FilePathResolve resolve = FilePathResolve::Cached) const;
 	[[nodiscard]] bool loading() const;
+	void permitLoadFromCloud();
 	[[nodiscard]] QString loadingFilePath() const;
 	[[nodiscard]] bool displayLoading() const;
+
+	void setForbidsFileSave();
+	[[nodiscard]] bool forbidsFileSave() const;
+
 	void save(
 		Data::FileOrigin origin,
 		const QString &toFile,
@@ -116,32 +150,38 @@ public:
 		bool autoLoading = false);
 	void cancel();
 	[[nodiscard]] bool cancelled() const;
+	void resetCancelled();
 	[[nodiscard]] float64 progress() const;
-	[[nodiscard]] int loadOffset() const;
+	[[nodiscard]] int64 loadOffset() const;
 	[[nodiscard]] bool uploading() const;
 	[[nodiscard]] bool loadedInMediaCache() const;
 	void setLoadedInMediaCache(bool loaded);
 
+	[[nodiscard]] ChatRestriction requiredSendRight() const;
+
 	void setWaitingForAlbum();
 	[[nodiscard]] bool waitingForAlbum() const;
 
-	[[nodiscard]] QByteArray data() const;
-	[[nodiscard]] const FileLocation &location(bool check = false) const;
-	void setLocation(const FileLocation &loc);
+	[[nodiscard]] const Core::FileLocation &location(
+		bool check = false) const;
+	void setLocation(const Core::FileLocation &loc);
 
-	[[nodiscard]] QString filepath(
-		FilePathResolve resolve = FilePathResolve::Cached) const;
+	bool saveFromData();
+	bool saveFromDataSilent();
+	[[nodiscard]] QString filepath(bool check = false) const;
 
+	void forceToCache(bool force);
 	[[nodiscard]] bool saveToCache() const;
 
-	void unload();
-	[[nodiscard]] Image *getReplyPreview(Data::FileOrigin origin);
+	[[nodiscard]] Image *getReplyPreview(
+		Data::FileOrigin origin,
+		not_null<PeerData*> context,
+		bool spoiler,
+		bool skipCover = false);
+	[[nodiscard]] Image *getReplyPreview(not_null<HistoryItem*> item);
+	[[nodiscard]] bool replyPreviewLoaded(bool spoiler) const;
 
 	[[nodiscard]] StickerData *sticker() const;
-	void checkStickerLarge();
-	void checkStickerSmall();
-	[[nodiscard]] Image *getStickerSmall();
-	[[nodiscard]] Image *getStickerLarge();
 	[[nodiscard]] Data::FileOrigin stickerSetOrigin() const;
 	[[nodiscard]] Data::FileOrigin stickerOrGifOrigin() const;
 	[[nodiscard]] bool isStickerSetInstalled() const;
@@ -149,45 +189,89 @@ public:
 	[[nodiscard]] const SongData *song() const;
 	[[nodiscard]] VoiceData *voice();
 	[[nodiscard]] const VoiceData *voice() const;
+	[[nodiscard]] RoundData *round();
+	[[nodiscard]] const RoundData *round() const;
+	[[nodiscard]] VideoData *video();
+	[[nodiscard]] const VideoData *video() const;
 
+	void forceIsStreamedAnimation();
+	[[nodiscard]] bool isMusicForProfile() const;
 	[[nodiscard]] bool isVoiceMessage() const;
 	[[nodiscard]] bool isVideoMessage() const;
 	[[nodiscard]] bool isSong() const;
+	[[nodiscard]] bool isSongWithCover() const;
 	[[nodiscard]] bool isAudioFile() const;
 	[[nodiscard]] bool isVideoFile() const;
+	[[nodiscard]] bool isSilentVideo() const;
 	[[nodiscard]] bool isAnimation() const;
 	[[nodiscard]] bool isGifv() const;
 	[[nodiscard]] bool isTheme() const;
 	[[nodiscard]] bool isSharedMediaMusic() const;
-	[[nodiscard]] TimeId getDuration() const;
+	[[nodiscard]] crl::time duration() const;
+	[[nodiscard]] bool hasDuration() const;
 	[[nodiscard]] bool isImage() const;
 	void recountIsImage();
 	[[nodiscard]] bool supportsStreaming() const;
 	void setNotSupportsStreaming();
-	void setData(const QByteArray &data) {
-		_data = data;
-	}
 	void setDataAndCache(const QByteArray &data);
 	bool checkWallPaperProperties();
 	[[nodiscard]] bool isWallPaper() const;
 	[[nodiscard]] bool isPatternWallPaper() const;
+	[[nodiscard]] bool isPatternWallPaperPNG() const;
+	[[nodiscard]] bool isPatternWallPaperSVG() const;
+	[[nodiscard]] bool isSvgImage() const;
+	[[nodiscard]] bool isPremiumSticker() const;
+	[[nodiscard]] bool isPremiumEmoji() const;
+	[[nodiscard]] bool emojiUsesTextColor() const;
+	void overrideEmojiUsesTextColor(bool value);
 
 	[[nodiscard]] bool hasThumbnail() const;
+	[[nodiscard]] bool thumbnailLoading() const;
+	[[nodiscard]] bool thumbnailFailed() const;
 	void loadThumbnail(Data::FileOrigin origin);
-	[[nodiscard]] Image *thumbnailInline() const;
-	[[nodiscard]] Image *thumbnail() const;
+	[[nodiscard]] const ImageLocation &thumbnailLocation() const;
+	[[nodiscard]] int thumbnailByteSize() const;
+
+	[[nodiscard]] bool hasVideoThumbnail() const;
+	[[nodiscard]] bool videoThumbnailLoading() const;
+	void loadVideoThumbnail(Data::FileOrigin origin);
+	[[nodiscard]] const ImageLocation &videoThumbnailLocation() const;
+	[[nodiscard]] int videoThumbnailByteSize() const;
+
 	void updateThumbnails(
-		ImagePtr thumbnailInline,
-		ImagePtr thumbnail);
+		const InlineImageLocation &inlineThumbnail,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &videoThumbnail,
+		bool isPremiumSticker);
 
-	[[nodiscard]] Image *goodThumbnail() const;
+	[[nodiscard]] QByteArray inlineThumbnailBytes() const {
+		return _inlineThumbnailBytes;
+	}
+	[[nodiscard]] bool inlineThumbnailIsPath() const {
+		return (_flags & Flag::InlineThumbnailIsPath);
+	}
+	void clearInlineThumbnailBytes() {
+		_inlineThumbnailBytes = QByteArray();
+	}
+
 	[[nodiscard]] Storage::Cache::Key goodThumbnailCacheKey() const;
-	void setGoodThumbnailOnUpload(QImage &&image, QByteArray &&bytes);
-	void refreshGoodThumbnail();
-	void replaceGoodThumbnail(std::unique_ptr<Images::Source> &&source);
+	[[nodiscard]] bool goodThumbnailChecked() const;
+	[[nodiscard]] bool goodThumbnailGenerating() const;
+	[[nodiscard]] bool goodThumbnailNoData() const;
+	void setGoodThumbnailGenerating();
+	void setGoodThumbnailDataReady();
+	void setGoodThumbnailChecked(bool hasData);
 
-	[[nodiscard]] auto bigFileBaseCacheKey() const
-	-> std::optional<Storage::Cache::Key>;
+	[[nodiscard]] std::shared_ptr<Data::DocumentMedia> createMediaView();
+	[[nodiscard]] auto activeMediaView() const
+		-> std::shared_ptr<Data::DocumentMedia>;
+	void setGoodThumbnailPhoto(not_null<PhotoData*> photo);
+	[[nodiscard]] PhotoData *goodThumbnailPhoto() const;
+
+	[[nodiscard]] Storage::Cache::Key bigFileBaseCacheKey() const;
+
+	void setStoryMedia(bool value);
+	[[nodiscard]] bool storyMedia() const;
 
 	void setRemoteLocation(
 		int32 dc,
@@ -201,7 +285,6 @@ public:
 	[[nodiscard]] MTPInputDocument mtpInput() const;
 	[[nodiscard]] QByteArray fileReference() const;
 	void refreshFileReference(const QByteArray &value);
-	void refreshStickerThumbFileReference();
 
 	// When we have some client-side generated document
 	// (for example for displaying an external inline bot result)
@@ -210,53 +293,79 @@ public:
 	void collectLocalData(not_null<DocumentData*> local);
 
 	[[nodiscard]] QString filename() const;
+	[[nodiscard]] Core::NameType nameType() const;
 	[[nodiscard]] QString mimeString() const;
-	[[nodiscard]] bool hasMimeType(QLatin1String mime) const;
+	[[nodiscard]] bool hasMimeType(const QString &mime) const;
 	void setMimeString(const QString &mime);
+
+	[[nodiscard]] bool hasAttachedStickers() const;
 
 	[[nodiscard]] MediaKey mediaKey() const;
 	[[nodiscard]] Storage::Cache::Key cacheKey() const;
+	[[nodiscard]] LocationType locationType() const;
 	[[nodiscard]] uint8 cacheTag() const;
 
-	[[nodiscard]] static QString ComposeNameString(
-		const QString &filename,
-		const QString &songTitle,
-		const QString &songPerformer);
-	[[nodiscard]] QString composeNameString() const;
-
-	[[nodiscard]] bool canBePlayed() const;
 	[[nodiscard]] bool canBeStreamed() const;
 	[[nodiscard]] auto createStreamingLoader(
 		Data::FileOrigin origin,
 		bool forceRemoteLoader) const
 	-> std::unique_ptr<Media::Streaming::Loader>;
+	[[nodiscard]] bool useStreamingLoader() const;
+	[[nodiscard]] auto createStreamedDownloader(
+		std::shared_ptr<Media::Streaming::Reader> reader,
+		Data::FileOrigin origin,
+		std::optional<MediaKey> fileLocationKey,
+		const QString &toFile,
+		LoadToCacheSetting toCache,
+		LoadFromCloudSetting fromCloud,
+		bool autoLoading) const
+	-> std::unique_ptr<Storage::StreamedFileDownloader>;
 
 	void setInappPlaybackFailed();
 	[[nodiscard]] bool inappPlaybackFailed() const;
-
-	~DocumentData();
+	[[nodiscard]] int videoPreloadPrefix() const;
+	[[nodiscard]] StorageFileLocation videoPreloadLocation() const;
 
 	DocumentId id = 0;
-	DocumentType type = FileDocument;
+	int64 size = 0;
 	QSize dimensions;
 	int32 date = 0;
-	int32 size = 0;
-
+	DocumentType type = FileDocument;
 	FileStatus status = FileReady;
 
 	std::unique_ptr<Data::UploadState> uploadingData;
 
 private:
-	enum class Flag : uchar {
-		StreamingMaybeYes = 0x01,
-		StreamingMaybeNo = 0x02,
-		StreamingPlaybackFailed = 0x04,
-		ImageType = 0x08,
-		DownloadCancelled = 0x10,
-		LoadedInMediaCache = 0x20,
+	enum class Flag : ushort {
+		StreamingMaybeYes = 0x0001,
+		StreamingMaybeNo = 0x0002,
+		StreamingPlaybackFailed = 0x0004,
+		ImageType = 0x0008,
+		DownloadCancelled = 0x0010,
+		LoadedInMediaCache = 0x0020,
+		HasAttachedStickers = 0x0040,
+		InlineThumbnailIsPath = 0x0080,
+		ForceToCache = 0x0100,
+		PremiumSticker = 0x0200,
+		PossibleCoverThumbnail = 0x0400,
+		UseTextColor = 0x0800,
+		StoryDocument = 0x1000,
+		SilentVideo = 0x2000,
+		FileSaveForbidden = 0x4000,
 	};
 	using Flags = base::flags<Flag>;
 	friend constexpr bool is_flag_type(Flag) { return true; };
+
+	enum class GoodThumbnailFlag : uchar {
+		Checked = 0x01,
+		Generating = 0x02,
+		NoData = 0x03,
+		Mask = 0x03,
+
+		DataReady = 0x04,
+	};
+	using GoodThumbnailState = base::flags<GoodThumbnailFlag>;
+	friend constexpr bool is_flag_type(GoodThumbnailFlag) { return true; };
 
 	static constexpr Flags kStreamingSupportedMask = Flags()
 		| Flag::StreamingMaybeYes
@@ -272,17 +381,23 @@ private:
 
 	friend class Serialize::Document;
 
-	LocationType locationType() const;
 	void validateLottieSticker();
-	void validateGoodThumbnail();
 	void setMaybeSupportsStreaming(bool supports);
 	void setLoadedInMediaCacheLocation();
+	void setFileName(const QString &remoteFileName);
+	bool enforceNameType(Core::NameType nameType);
 
-	void destroyLoader() const;
+	void finishLoad();
+	void handleLoaderUpdates();
+	void destroyLoader();
 
-	[[nodiscard]] bool useStreamingLoader() const;
-	[[nodiscard]] bool thumbnailEnoughForSticker() const;
+	bool saveFromDataChecked();
 
+	void refreshPossibleCoverThumbnail();
+
+	const not_null<Data::Session*> _owner;
+
+	int _videoPreloadPrefix = 0;
 	// Two types of location: from MTProto by dc+access or from web by url
 	int32 _dc = 0;
 	uint64 _access = 0;
@@ -292,125 +407,32 @@ private:
 	QString _mimeString;
 	WebFileLocation _urlLocation;
 
-	ImagePtr _thumbnailInline;
-	ImagePtr _thumbnail;
-	std::unique_ptr<Image> _goodThumbnail;
-	Data::ReplyPreview _replyPreview;
+	QByteArray _inlineThumbnailBytes;
+	Data::CloudFile _thumbnail;
+	Data::CloudFile _videoThumbnail;
+	std::unique_ptr<Data::ReplyPreview> _replyPreview;
+	std::weak_ptr<Data::DocumentMedia> _media;
+	PhotoData *_goodThumbnailPhoto = nullptr;
+	crl::time _duration = -1;
 
-	not_null<Data::Session*> _owner;
-
-	FileLocation _location;
-	QByteArray _data;
+	Core::FileLocation _location;
 	std::unique_ptr<DocumentAdditionalData> _additional;
-	int32 _duration = -1;
 	mutable Flags _flags = kStreamingSupportedUnknown;
-	mutable std::unique_ptr<FileLoader> _loader;
+	GoodThumbnailState _goodThumbnailState = GoodThumbnailState();
+	Core::NameType _nameType = Core::NameType();
+	std::unique_ptr<FileLoader> _loader;
 
 };
+
+[[nodiscard]] PhotoData *LookupVideoCover(
+	not_null<DocumentData*> document,
+	HistoryItem *item);
 
 VoiceWaveform documentWaveformDecode(const QByteArray &encoded5bit);
 QByteArray documentWaveformEncode5bit(const VoiceWaveform &waveform);
 
-class DocumentClickHandler : public FileClickHandler {
-public:
-	DocumentClickHandler(
-		not_null<DocumentData*> document,
-		FullMsgId context = FullMsgId())
-	: FileClickHandler(context)
-	, _document(document) {
-	}
-	not_null<DocumentData*> document() const {
-		return _document;
-	}
-
-private:
-	not_null<DocumentData*> _document;
-
-};
-
-class DocumentSaveClickHandler : public DocumentClickHandler {
-public:
-	enum class Mode {
-		ToCacheOrFile,
-		ToFile,
-		ToNewFile,
-	};
-	using DocumentClickHandler::DocumentClickHandler;
-	static void Save(
-		Data::FileOrigin origin,
-		not_null<DocumentData*> document,
-		Mode mode = Mode::ToCacheOrFile);
-
-protected:
-	void onClickImpl() const override;
-
-};
-
-class DocumentOpenClickHandler : public DocumentClickHandler {
-public:
-	using DocumentClickHandler::DocumentClickHandler;
-	static void Open(
-		Data::FileOrigin origin,
-		not_null<DocumentData*> document,
-		HistoryItem *context);
-
-protected:
-	void onClickImpl() const override;
-
-};
-
-class DocumentCancelClickHandler : public DocumentClickHandler {
-public:
-	using DocumentClickHandler::DocumentClickHandler;
-
-protected:
-	void onClickImpl() const override;
-
-};
-
-class DocumentOpenWithClickHandler : public DocumentClickHandler {
-public:
-	using DocumentClickHandler::DocumentClickHandler;
-	static void Open(
-		Data::FileOrigin origin,
-		not_null<DocumentData*> document);
-
-protected:
-	void onClickImpl() const override;
-
-};
-
-class VoiceSeekClickHandler : public DocumentOpenClickHandler {
-public:
-	using DocumentOpenClickHandler::DocumentOpenClickHandler;
-
-protected:
-	void onClickImpl() const override {
-	}
-
-};
-
-class DocumentWrappedClickHandler : public DocumentClickHandler {
-public:
-	DocumentWrappedClickHandler(
-		ClickHandlerPtr wrapped,
-		not_null<DocumentData*> document,
-		FullMsgId context = FullMsgId())
-	: DocumentClickHandler(document, context)
-	, _wrapped(wrapped) {
-	}
-
-protected:
-	void onClickImpl() const override {
-		_wrapped->onClick({ Qt::LeftButton });
-	}
-
-private:
-	ClickHandlerPtr _wrapped;
-
-};
-
 QString FileNameForSave(
+	not_null<Main::Session*> session,
 	const QString &title,
 	const QString &filter,
 	const QString &prefix,
@@ -418,14 +440,8 @@ QString FileNameForSave(
 	bool savingAs,
 	const QDir &dir = QDir());
 
-namespace Data {
-
-QString FileExtension(const QString &filepath);
-bool IsValidMediaFile(const QString &filepath);
-bool IsExecutableName(const QString &filepath);
-base::binary_guard ReadImageAsync(
-	not_null<DocumentData*> document,
-	FnMut<QImage(QImage)> postprocess,
-	FnMut<void(QImage&&)> done);
-
-} // namespace Data
+QString DocumentFileNameForSave(
+	not_null<const DocumentData*> data,
+	bool forceSavingAs = false,
+	const QString &already = QString(),
+	const QDir &dir = QDir());

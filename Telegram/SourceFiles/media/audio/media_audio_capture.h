@@ -7,83 +7,77 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include <QtCore/QThread>
 #include <QtCore/QTimer>
-
-struct AVFrame;
 
 namespace Media {
 namespace Capture {
 
+struct Update {
+	int samples = 0;
+	ushort level = 0;
+
+	bool finished = false;
+};
+
+enum class Error : uchar {
+	Other,
+	AudioInit,
+	VideoInit,
+	AudioTimeout,
+	VideoTimeout,
+	Encoding,
+};
+
+struct Chunk {
+	crl::time finished = 0;
+	QByteArray samples;
+	int frequency = 0;
+};
+
+struct Result;
+
 void Start();
 void Finish();
 
-class Instance : public QObject {
-	Q_OBJECT
-
+class Instance final : public QObject {
 public:
 	Instance();
+	~Instance();
 
 	void check();
-	bool available() const {
+	[[nodiscard]] bool available() const {
 		return _available;
 	}
 
-	~Instance();
+	[[nodiscard]] rpl::producer<Update, Error> updated() const {
+		return _updates.events();
+	}
 
-signals:
-	void start();
-	void stop(bool needResult);
+	[[nodiscard]] bool started() const {
+		return _started.current();
+	}
+	[[nodiscard]] rpl::producer<bool> startedChanges() const {
+		return _started.changes();
+	}
 
-	void done(QByteArray data, VoiceWaveform waveform, qint32 samples);
-	void updated(quint16 level, qint32 samples);
-	void error();
+	void start(Fn<void(Chunk)> externalProcessing = nullptr);
+	void stop(Fn<void(Result&&)> callback = nullptr);
+	void pause(bool value, Fn<void(Result&&)> callback = nullptr);
 
 private:
 	class Inner;
 	friend class Inner;
 
 	bool _available = false;
+	rpl::variable<bool> _started = false;
+	rpl::event_stream<Update, Error> _updates;
 	QThread _thread;
-	Inner *_inner;
+	std::unique_ptr<Inner> _inner;
 
 };
 
-Instance *instance();
-
-class Instance::Inner : public QObject {
-	Q_OBJECT
-
-public:
-	Inner(QThread *thread);
-	~Inner();
-
-signals:
-	void error();
-	void updated(quint16 level, qint32 samples);
-	void done(QByteArray data, VoiceWaveform waveform, qint32 samples);
-
-public slots:
-	void onInit();
-	void onStart();
-	void onStop(bool needResult);
-
-	void onTimeout();
-
-private:
-	void processFrame(int32 offset, int32 framesize);
-
-	void writeFrame(AVFrame *frame);
-
-	// Writes the packets till EAGAIN is got from av_receive_packet()
-	// Returns number of packets written or -1 on error
-	int writePackets();
-
-	struct Private;
-	Private *d;
-	QTimer _timer;
-	QByteArray _captured;
-
-};
+[[nodiscard]] Instance *instance();
 
 } // namespace Capture
 } // namespace Media

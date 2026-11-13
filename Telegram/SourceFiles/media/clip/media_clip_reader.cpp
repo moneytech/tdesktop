@@ -7,136 +7,245 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "media/clip/media_clip_reader.h"
 
-#include "data/data_document.h"
-#include "storage/file_download.h"
 #include "media/clip/media_clip_ffmpeg.h"
 #include "media/clip/media_clip_check_streaming.h"
-#include "mainwidget.h"
-#include "mainwindow.h"
+#include "ui/chat/attach/attach_prepare.h"
+#include "ui/painter.h"
+#include "core/file_location.h"
+#include "base/random.h"
+#include "base/invoke_queued.h"
+#include "logs.h"
 
 #include <QtCore/QBuffer>
 #include <QtCore/QAbstractEventDispatcher>
 #include <QtCore/QCoreApplication>
+#include <QtCore/QThread>
+#include <QtCore/QFileInfo>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
-}
+} // extern "C"
 
 namespace Media {
 namespace Clip {
 namespace {
 
-QVector<QThread*> threads;
-QVector<Manager*> managers;
+constexpr auto kClipThreadsCount = 8;
+constexpr auto kAverageGifSize = 320 * 240;
+constexpr auto kWaitBeforeGifPause = crl::time(200);
 
-QImage PrepareFrameImage(const FrameRequest &request, const QImage &original, bool hasAlpha, QImage &cache) {
-	auto needResize = (original.width() != request.framew) || (original.height() != request.frameh);
-	auto needOuterFill = (request.outerw != request.framew) || (request.outerh != request.frameh);
-	auto needRounding = (request.radius != ImageRoundRadius::None);
-	if (!needResize && !needOuterFill && !hasAlpha && !needRounding) {
+QImage PrepareFrame(
+		const FrameRequest &request,
+		const QImage &original,
+		bool hasAlpha,
+		QImage &cache) {
+	const auto needResize = (original.size() != request.frame);
+	const auto needOuterFill = request.outer.isValid()
+		&& (request.outer != request.frame);
+	const auto needRounding = (request.radius != ImageRoundRadius::None);
+	const auto colorizing = (request.colored.alpha() != 0);
+	if (!needResize
+		&& !needOuterFill
+		&& !hasAlpha
+		&& !needRounding
+		&& !colorizing) {
 		return original;
 	}
 
-	auto factor = request.factor;
-	auto needNewCache = (cache.width() != request.outerw || cache.height() != request.outerh);
+	const auto factor = request.factor;
+	const auto size = request.outer.isValid() ? request.outer : request.frame;
+	const auto needNewCache = (cache.size() != size);
 	if (needNewCache) {
-		cache = QImage(request.outerw, request.outerh, QImage::Format_ARGB32_Premultiplied);
+		cache = QImage(size, QImage::Format_ARGB32_Premultiplied);
 		cache.setDevicePixelRatio(factor);
 	}
+	if (hasAlpha && request.keepAlpha) {
+		cache.fill(Qt::transparent);
+	}
 	{
-		Painter p(&cache);
-		if (needNewCache) {
-			if (request.framew < request.outerw) {
-				p.fillRect(0, 0, (request.outerw - request.framew) / (2 * factor), cache.height() / factor, st::imageBg);
-				p.fillRect((request.outerw - request.framew) / (2 * factor) + (request.framew / factor), 0, (cache.width() / factor) - ((request.outerw - request.framew) / (2 * factor) + (request.framew / factor)), cache.height() / factor, st::imageBg);
+		auto p = QPainter(&cache);
+		const auto framew = request.frame.width();
+		const auto outerw = size.width();
+		const auto frameh = request.frame.height();
+		const auto outerh = size.height();
+		if (needNewCache && (!hasAlpha || !request.keepAlpha)) {
+			if (framew < outerw) {
+				p.fillRect(0, 0, (outerw - framew) / (2 * factor), cache.height() / factor, st::imageBg);
+				p.fillRect((outerw - framew) / (2 * factor) + (framew / factor), 0, (cache.width() / factor) - ((outerw - framew) / (2 * factor) + (framew / factor)), cache.height() / factor, st::imageBg);
 			}
-			if (request.frameh < request.outerh) {
-				p.fillRect(qMax(0, (request.outerw - request.framew) / (2 * factor)), 0, qMin(cache.width(), request.framew) / factor, (request.outerh - request.frameh) / (2 * factor), st::imageBg);
-				p.fillRect(qMax(0, (request.outerw - request.framew) / (2 * factor)), (request.outerh - request.frameh) / (2 * factor) + (request.frameh / factor), qMin(cache.width(), request.framew) / factor, (cache.height() / factor) - ((request.outerh - request.frameh) / (2 * factor) + (request.frameh / factor)), st::imageBg);
+			if (frameh < outerh) {
+				p.fillRect(
+					std::max(0, (outerw - framew) / (2 * factor)),
+					0,
+					std::min(cache.width(), framew) / factor,
+					(outerh - frameh) / (2 * factor),
+					st::imageBg);
+				p.fillRect(
+					std::max(0, (outerw - framew) / (2 * factor)),
+					(outerh - frameh) / (2 * factor) + (frameh / factor),
+					std::min(cache.width(), framew) / factor,
+					(cache.height() / factor)
+						- ((outerh - frameh) / (2 * factor)
+							+ (frameh / factor)),
+					st::imageBg);
 			}
 		}
-		if (hasAlpha) {
-			p.fillRect(qMax(0, (request.outerw - request.framew) / (2 * factor)), qMax(0, (request.outerh - request.frameh) / (2 * factor)), qMin(cache.width(), request.framew) / factor, qMin(cache.height(), request.frameh) / factor, st::imageBgTransparent);
+		if (hasAlpha && !request.keepAlpha) {
+			p.fillRect(
+				std::max(0, (outerw - framew) / (2 * factor)),
+				std::max(0, (outerh - frameh) / (2 * factor)),
+				std::min(cache.width(), framew) / factor,
+				std::min(cache.height(), frameh) / factor,
+				st::imageBgTransparent);
 		}
-		auto position = QPoint((request.outerw - request.framew) / (2 * factor), (request.outerh - request.frameh) / (2 * factor));
+		const auto position = QPoint((outerw - framew) / (2 * factor), (outerh - frameh) / (2 * factor));
 		if (needResize) {
 			PainterHighQualityEnabler hq(p);
 
-			auto dst = QRect(position, QSize(request.framew / factor, request.frameh / factor));
-			auto src = QRect(0, 0, original.width(), original.height());
+			const auto dst = QRect(position, QSize(framew / factor, frameh / factor));
+			const auto src = QRect(0, 0, original.width(), original.height());
 			p.drawImage(dst, original, src, Qt::ColorOnly);
 		} else {
 			p.drawImage(position, original);
 		}
 	}
 	if (needRounding) {
-		Images::prepareRound(cache, request.radius, request.corners);
+		cache = Images::Round(
+			std::move(cache),
+			request.radius,
+			request.corners);
+	}
+	if (colorizing) {
+		cache = Images::Colored(std::move(cache), request.colored);
 	}
 	return cache;
 }
 
-QPixmap PrepareFrame(const FrameRequest &request, const QImage &original, bool hasAlpha, QImage &cache) {
-	return QPixmap::fromImage(PrepareFrameImage(request, original, hasAlpha, cache), Qt::ColorOnly);
-}
+} // namespace
+
+enum class ProcessResult {
+	Error,
+	Started,
+	Finished,
+	Paused,
+	Repaint,
+	CopyFrame,
+	Wait,
+};
+
+class Manager final : public QObject {
+public:
+	explicit Manager(not_null<QThread*> thread);
+	~Manager();
+
+	int loadLevel() const {
+		return _loadLevel;
+	}
+	void append(Reader *reader, const Core::FileLocation &location, const QByteArray &data);
+	void start(Reader *reader);
+	void update(Reader *reader);
+	void stop(Reader *reader);
+	bool carries(Reader *reader) const;
+
+private:
+	void process();
+	void finish();
+	void callback(Reader *reader, Notification notification);
+	void clear();
+	void deletePrivate(ReaderPrivate *reader);
+
+	QAtomicInt _loadLevel;
+	using ReaderPointers = QMap<Reader*, QAtomicInt>;
+	ReaderPointers _readerPointers;
+	mutable QMutex _readerPointersMutex;
+
+	ReaderPointers::const_iterator constUnsafeFindReaderPointer(ReaderPrivate *reader) const;
+	ReaderPointers::iterator unsafeFindReaderPointer(ReaderPrivate *reader);
+
+	bool handleProcessResult(ReaderPrivate *reader, ProcessResult result, crl::time ms);
+
+	enum ResultHandleState {
+		ResultHandleRemove,
+		ResultHandleStop,
+		ResultHandleContinue,
+	};
+	ResultHandleState handleResult(ReaderPrivate *reader, ProcessResult result, crl::time ms);
+
+	using Readers = QMap<ReaderPrivate*, crl::time>;
+	Readers _readers;
+
+	QTimer _timer;
+	QThread *_processingInThread = nullptr;
+	bool _needReProcess = false;
+
+};
+
+namespace {
+
+struct Worker {
+	Worker() : manager(&thread) {
+		thread.start();
+	}
+	~Worker() {
+		thread.quit();
+		thread.wait();
+	}
+
+	QThread thread;
+	Manager manager;
+};
+
+std::vector<std::unique_ptr<Worker>> Workers;
 
 } // namespace
 
-Reader::Reader(const QString &filepath, Callback &&callback, Mode mode, crl::time seekMs)
-: _callback(std::move(callback))
-, _mode(mode)
-, _seekPositionMs(seekMs) {
-	init(FileLocation(filepath), QByteArray());
+Reader::Reader(
+	const Core::FileLocation &location,
+	const QByteArray &data,
+	Callback &&callback)
+: _callback(std::move(callback)) {
+	init(location, data);
 }
 
-Reader::Reader(not_null<DocumentData*> document, FullMsgId msgId, Callback &&callback, Mode mode, crl::time seekMs)
-: _callback(std::move(callback))
-, _mode(mode)
-, _audioMsgId(
-	document,
-	msgId,
-	(mode == Mode::Video) ? AudioMsgId::CreateExternalPlayId() : 0)
-, _seekPositionMs(seekMs) {
-	init(document->location(), document->data());
+Reader::Reader(const QString &filepath, Callback &&callback)
+: _callback(std::move(callback)) {
+	init(Core::FileLocation(filepath), QByteArray());
 }
 
-Reader::Reader(const QByteArray &data, Callback &&callback, Mode mode, crl::time seekMs)
-: _callback(std::move(callback))
-, _mode(mode)
-, _seekPositionMs(seekMs) {
-	init(FileLocation(QString()), data);
+Reader::Reader(const QByteArray &data, Callback &&callback)
+: _callback(std::move(callback)) {
+	init(Core::FileLocation(QString()), data);
 }
 
-void Reader::init(const FileLocation &location, const QByteArray &data) {
-	if (threads.size() < ClipThreadsCount) {
-		_threadIndex = threads.size();
-		threads.push_back(new QThread());
-		managers.push_back(new Manager(threads.back()));
-		threads.back()->start();
+void Reader::init(const Core::FileLocation &location, const QByteArray &data) {
+	if (Workers.size() < kClipThreadsCount) {
+		_threadIndex = Workers.size();
+		Workers.push_back(std::make_unique<Worker>());
 	} else {
-		_threadIndex = int32(rand_value<uint32>() % threads.size());
-		int32 loadLevel = 0x7FFFFFFF;
-		for (int32 i = 0, l = threads.size(); i < l; ++i) {
-			int32 level = managers.at(i)->loadLevel();
+		_threadIndex = base::RandomIndex(Workers.size());
+		auto loadLevel = 0x7FFFFFFF;
+		for (int i = 0, l = int(Workers.size()); i < l; ++i) {
+			const auto level = Workers[i]->manager.loadLevel();
 			if (level < loadLevel) {
 				_threadIndex = i;
 				loadLevel = level;
 			}
 		}
 	}
-	managers.at(_threadIndex)->append(this, location, data);
+	Workers[_threadIndex]->manager.append(this, location, data);
 }
 
 Reader::Frame *Reader::frameToShow(int32 *index) const { // 0 means not ready
 	int step = _step.loadAcquire(), i;
-	if (step == WaitingForDimensionsStep) {
+	if (step == kWaitingForDimensionsStep) {
 		if (index) *index = 0;
 		return nullptr;
-	} else if (step == WaitingForRequestStep) {
+	} else if (step == kWaitingForRequestStep) {
 		i = 0;
-	} else if (step == WaitingForFirstFrameStep) {
+	} else if (step == kWaitingForFirstFrameStep) {
 		i = 0;
 	} else {
 		i = (step / 2) % 3;
@@ -147,12 +256,12 @@ Reader::Frame *Reader::frameToShow(int32 *index) const { // 0 means not ready
 
 Reader::Frame *Reader::frameToWrite(int32 *index) const { // 0 means not ready
 	int32 step = _step.loadAcquire(), i;
-	if (step == WaitingForDimensionsStep) {
+	if (step == kWaitingForDimensionsStep) {
 		i = 0;
-	} else if (step == WaitingForRequestStep) {
+	} else if (step == kWaitingForRequestStep) {
 		if (index) *index = 0;
 		return nullptr;
-	} else if (step == WaitingForFirstFrameStep) {
+	} else if (step == kWaitingForFirstFrameStep) {
 		i = 0;
 	} else {
 		i = ((step + 2) / 2) % 3;
@@ -163,7 +272,9 @@ Reader::Frame *Reader::frameToWrite(int32 *index) const { // 0 means not ready
 
 Reader::Frame *Reader::frameToWriteNext(bool checkNotWriting, int32 *index) const {
 	int32 step = _step.loadAcquire(), i;
-	if (step == WaitingForDimensionsStep || step == WaitingForRequestStep || (checkNotWriting && (step % 2))) {
+	if (step == kWaitingForDimensionsStep
+		|| step == kWaitingForRequestStep
+		|| (checkNotWriting && (step % 2))) {
 		if (index) *index = 0;
 		return nullptr;
 	}
@@ -172,23 +283,26 @@ Reader::Frame *Reader::frameToWriteNext(bool checkNotWriting, int32 *index) cons
 	return _frames + i;
 }
 
-void Reader::moveToNextShow() const {
-	int32 step = _step.loadAcquire();
-	if (step == WaitingForDimensionsStep) {
-	} else if (step == WaitingForRequestStep) {
-		_step.storeRelease(WaitingForFirstFrameStep);
-	} else if (step == WaitingForFirstFrameStep) {
+bool Reader::moveToNextShow() const {
+	const auto step = _step.loadAcquire();
+	if (step == kWaitingForDimensionsStep) {
+	} else if (step == kWaitingForRequestStep) {
+		_step.storeRelease(kWaitingForFirstFrameStep);
+		return true;
+	} else if (step == kWaitingForFirstFrameStep) {
 	} else if (!(step % 2)) {
 		_step.storeRelease(step + 1);
+		return true;
 	}
+	return false;
 }
 
 void Reader::moveToNextWrite() const {
 	int32 step = _step.loadAcquire();
-	if (step == WaitingForDimensionsStep) {
-		_step.storeRelease(WaitingForRequestStep);
-	} else if (step == WaitingForRequestStep) {
-	} else if (step == WaitingForFirstFrameStep) {
+	if (step == kWaitingForDimensionsStep) {
+		_step.storeRelease(kWaitingForRequestStep);
+	} else if (step == kWaitingForRequestStep) {
+	} else if (step == kWaitingForFirstFrameStep) {
 		_step.storeRelease(0);
 
 		// Force paint the first frame so moveToNextShow() is called.
@@ -198,101 +312,106 @@ void Reader::moveToNextWrite() const {
 	}
 }
 
-void Reader::callback(Reader *reader, qint32 threadIndex, qint32 notification) {
+void Reader::SafeCallback(
+		Reader *reader,
+		int threadIndex,
+		Notification notification) {
 	// Check if reader is not deleted already
-	if (managers.size() > threadIndex && managers.at(threadIndex)->carries(reader) && reader->_callback) {
+	if (Workers.size() > threadIndex
+		&& Workers[threadIndex]->manager.carries(reader)
+		&& reader->_callback) {
 		reader->_callback(Notification(notification));
 	}
 }
 
-void Reader::start(int32 framew, int32 frameh, int32 outerw, int32 outerh, ImageRoundRadius radius, RectParts corners) {
-	if (managers.size() <= _threadIndex) error();
-	if (_state == State::Error) return;
-
-	if (_step.loadAcquire() == WaitingForRequestStep) {
-		int factor = cIntRetinaFactor();
-		FrameRequest request;
-		request.factor = factor;
-		request.framew = framew * factor;
-		request.frameh = frameh * factor;
-		request.outerw = outerw * factor;
-		request.outerh = outerh * factor;
-		request.radius = radius;
-		request.corners = corners;
-		_frames[0].request = _frames[1].request = _frames[2].request = request;
-		moveToNextShow();
-		managers.at(_threadIndex)->start(this);
+void Reader::start(FrameRequest request) {
+	if (Workers.size() <= _threadIndex) {
+		error();
 	}
+	if (_state == State::Error
+		|| (_step.loadAcquire() != kWaitingForRequestStep)) {
+		return;
+	}
+	const auto factor = style::DevicePixelRatio();
+	request.factor = factor;
+	request.frame *= factor;
+	if (request.outer.isValid()) {
+		request.outer *= factor;
+	}
+	_frames[0].request = _frames[1].request = _frames[2].request = request;
+	moveToNextShow();
+	Workers[_threadIndex]->manager.start(this);
 }
 
-QPixmap Reader::current(int32 framew, int32 frameh, int32 outerw, int32 outerh, ImageRoundRadius radius, RectParts corners, crl::time ms) {
-	Expects(outerw > 0);
-	Expects(outerh > 0);
+Reader::FrameInfo Reader::frameInfo(FrameRequest request, crl::time now) {
+	Expects(!(request.outer.isValid()
+		? request.outer
+		: request.frame).isEmpty());
 
-	auto frame = frameToShow();
+	const auto frame = frameToShow();
 	Assert(frame != nullptr);
 
-	auto shouldBePaused = !ms;
+	const auto shouldBePaused = !now;
 	if (!shouldBePaused) {
 		frame->displayed.storeRelease(1);
 		if (_autoPausedGif.loadAcquire()) {
 			_autoPausedGif.storeRelease(0);
-			if (managers.size() <= _threadIndex) error();
-			if (_state != State::Error) {
-				managers.at(_threadIndex)->update(this);
+			if (Workers.size() <= _threadIndex) {
+				error();
+			} else if (_state != State::Error) {
+				Workers[_threadIndex]->manager.update(this);
 			}
 		}
 	} else {
 		frame->displayed.storeRelease(-1);
 	}
 
-	auto factor = cIntRetinaFactor();
-	if (frame->pix.width() == outerw * factor
-		&& frame->pix.height() == outerh * factor
-		&& frame->request.radius == radius
-		&& frame->request.corners == corners) {
-		moveToNextShow();
-		return frame->pix;
+	const auto factor = style::DevicePixelRatio();
+	request.factor = factor;
+	request.frame *= factor;
+	if (request.outer.isValid()) {
+		request.outer *= factor;
 	}
+	const auto size = request.outer.isValid()
+		? request.outer
+		: request.frame;
+	Assert(frame->request.radius == request.radius
+		&& frame->request.corners == request.corners
+		&& frame->request.keepAlpha == request.keepAlpha);
+	if (frame->prepared.size() != size
+		|| frame->preparedColored != request.colored) {
+		frame->request.frame = request.frame;
+		frame->request.outer = request.outer;
+		frame->request.colored = request.colored;
 
-	frame->request.framew = framew * factor;
-	frame->request.frameh = frameh * factor;
-	frame->request.outerw = outerw * factor;
-	frame->request.outerh = outerh * factor;
+		QImage cacheForResize;
+		frame->original.setDevicePixelRatio(factor);
+		frame->prepared = QImage();
+		frame->prepared = PrepareFrame(
+			frame->request,
+			frame->original,
+			true,
+			cacheForResize);
+		frame->preparedColored = request.colored;
 
-	QImage cacheForResize;
-	frame->original.setDevicePixelRatio(factor);
-	frame->pix = QPixmap();
-	frame->pix = PrepareFrame(frame->request, frame->original, true, cacheForResize);
+		auto other = frameToWriteNext(true);
+		if (other) other->request = frame->request;
 
-	auto other = frameToWriteNext(true);
-	if (other) other->request = frame->request;
-
-	moveToNextShow();
-
-	if (managers.size() <= _threadIndex) error();
-	if (_state != State::Error) {
-		managers.at(_threadIndex)->update(this);
+		if (Workers.size() <= _threadIndex) {
+			error();
+		} else if (_state != State::Error) {
+			Workers[_threadIndex]->manager.update(this);
+		}
 	}
-
-	return frame->pix;
-}
-
-QPixmap Reader::current() {
-	Expects(_mode == Mode::Video);
-
-	auto frame = frameToShow();
-	Assert(frame != nullptr);
-
-	frame->displayed.storeRelease(1);
-	moveToNextShow();
-	return frame->pix;
+	return { frame->prepared, frame->index };
 }
 
 bool Reader::ready() const {
-	if (_width && _height) return true;
+	if (_width && _height) {
+		return true;
+	}
 
-	auto frame = frameToShow();
+	const auto frame = frameToShow();
 	if (frame) {
 		_width = frame->original.width();
 		_height = frame->original.height();
@@ -301,27 +420,15 @@ bool Reader::ready() const {
 	return false;
 }
 
-bool Reader::hasAudio() const {
-	return ready() ? _hasAudio : false;
-}
-
 crl::time Reader::getPositionMs() const {
-	if (auto frame = frameToShow()) {
+	if (const auto frame = frameToShow()) {
 		return frame->positionMs;
 	}
-	return _seekPositionMs;
+	return 0;
 }
 
 crl::time Reader::getDurationMs() const {
 	return ready() ? _durationMs : 0;
-}
-
-void Reader::pauseResumeVideo() {
-	if (managers.size() <= _threadIndex) error();
-	if (_state == State::Error) return;
-
-	_videoPauseRequest.storeRelease(1 - _videoPauseRequest.loadAcquire());
-	managers.at(_threadIndex)->start(this);
 }
 
 bool Reader::videoPaused() const {
@@ -341,11 +448,12 @@ State Reader::state() const {
 }
 
 void Reader::stop() {
-	if (managers.size() <= _threadIndex) error();
-	if (_state != State::Error) {
-		managers.at(_threadIndex)->stop(this);
-		_width = _height = 0;
+	if (Workers.size() <= _threadIndex) {
+		error();
+		return;
 	}
+	Workers[_threadIndex]->manager.stop(this);
+	_width = _height = 0;
 }
 
 void Reader::error() {
@@ -364,13 +472,11 @@ Reader::~Reader() {
 
 class ReaderPrivate {
 public:
-	ReaderPrivate(Reader *reader, const FileLocation &location, const QByteArray &data) : _interface(reader)
-	, _mode(reader->mode())
-	, _audioMsgId(reader->audioMsgId())
-	, _seekPositionMs(reader->seekPositionMs())
+	ReaderPrivate(Reader *reader, const Core::FileLocation &location, const QByteArray &data)
+	: _interface(reader)
 	, _data(data) {
 		if (_data.isEmpty()) {
-			_location = std::make_unique<FileLocation>(location);
+			_location = std::make_unique<Core::FileLocation>(location);
 			if (!_location->accessEnable()) {
 				error();
 				return;
@@ -390,11 +496,11 @@ public:
 				// get the frame size and return a black frame with that size.
 
 				auto firstFramePositionMs = crl::time(0);
-				auto reader = std::make_unique<internal::FFMpegReaderImplementation>(_location.get(), &_data, AudioMsgId());
-				if (reader->start(internal::ReaderImplementation::Mode::Normal, firstFramePositionMs)) {
+				auto reader = std::make_unique<internal::FFMpegReaderImplementation>(_location.get(), &_data);
+				if (reader->start(internal::ReaderImplementation::Mode::Silent, firstFramePositionMs)) {
 					auto firstFrameReadResult = reader->readFramesTill(-1, ms);
 					if (firstFrameReadResult == internal::ReaderImplementation::ReadResult::Success) {
-						if (reader->renderFrame(frame()->original, frame()->alpha, QSize())) {
+						if (reader->renderFrame(frame()->original, frame()->alpha, frame()->index, QSize())) {
 							frame()->original.fill(QColor(0, 0, 0));
 
 							frame()->positionMs = _seekPositionMs;
@@ -402,7 +508,6 @@ public:
 							_width = frame()->original.width();
 							_height = frame()->original.height();
 							_durationMs = _implementation->durationMs();
-							_hasAudio = _implementation->hasAudio();
 							return ProcessResult::Started;
 						}
 					}
@@ -412,15 +517,15 @@ public:
 			} else if (readResult != internal::ReaderImplementation::ReadResult::Success) { // Read the first frame.
 				return error();
 			}
-			if (!_implementation->renderFrame(frame()->original, frame()->alpha, QSize())) {
+			if (!_implementation->renderFrame(frame()->original, frame()->alpha, frame()->index, QSize())) {
 				return error();
 			}
 			frame()->positionMs = _implementation->frameRealTime();
+			frame()->when = ms;
 
 			_width = frame()->original.width();
 			_height = frame()->original.height();
 			_durationMs = _implementation->durationMs();
-			_hasAudio = _implementation->hasAudio();
 			return ProcessResult::Started;
 		}
 		return ProcessResult::Wait;
@@ -438,9 +543,6 @@ public:
 		}
 		if (!_started) {
 			_started = true;
-			if (!_videoPausedAtMs && _hasAudio) {
-				Player::mixer()->resume(_audioMsgId, true);
-			}
 		}
 
 		if (!_autoPausedGif && !_videoPausedAtMs && ms >= _nextFrameWhen) {
@@ -453,7 +555,7 @@ public:
 		auto frameMs = _seekPositionMs + ms - _animationStarted;
 		auto readResult = _implementation->readFramesTill(frameMs, ms);
 		if (readResult == internal::ReaderImplementation::ReadResult::EndOfFile) {
-			stop(Player::State::StoppedAtEnd);
+			stop();
 			_state = State::Finished;
 			return ProcessResult::Finished;
 		} else if (readResult == internal::ReaderImplementation::ReadResult::Error) {
@@ -476,19 +578,24 @@ public:
 	bool renderFrame() {
 		Expects(_request.valid());
 
-		if (!_implementation->renderFrame(frame()->original, frame()->alpha, QSize(_request.framew, _request.frameh))) {
+		if (!_implementation->renderFrame(frame()->original, frame()->alpha, frame()->index, _request.frame)) {
 			return false;
 		}
 		frame()->original.setDevicePixelRatio(_request.factor);
-		frame()->pix = QPixmap();
-		frame()->pix = PrepareFrame(_request, frame()->original, frame()->alpha, frame()->cache);
+		frame()->prepared = QImage();
+		frame()->prepared = PrepareFrame(
+			_request,
+			frame()->original,
+			frame()->alpha,
+			frame()->cache);
+		frame()->preparedColored = _request.colored;
 		frame()->when = _nextFrameWhen;
 		frame()->positionMs = _nextFramePositionMs;
 		return true;
 	}
 
 	bool init() {
-		if (_data.isEmpty() && QFileInfo(_location->name()).size() <= Storage::kMaxAnimationInMemory) {
+		if (_data.isEmpty() && QFileInfo(_location->name()).size() <= internal::kMaxInMemory) {
 			QFile f(_location->name());
 			if (f.open(QIODevice::ReadOnly)) {
 				_data = f.readAll();
@@ -498,16 +605,9 @@ public:
 			}
 		}
 
-		_implementation = std::make_unique<internal::FFMpegReaderImplementation>(_location.get(), &_data, _audioMsgId);
+		_implementation = std::make_unique<internal::FFMpegReaderImplementation>(_location.get(), &_data);
 
-		auto implementationMode = [this]() {
-			using ImplementationMode = internal::ReaderImplementation::Mode;
-			if (_mode == Reader::Mode::Gif) {
-				return ImplementationMode::Silent;
-			}
-			return ImplementationMode::Normal;
-		};
-		return _implementation->start(implementationMode(), _seekPositionMs);
+		return _implementation->start(internal::ReaderImplementation::Mode::Silent, _seekPositionMs);
 	}
 
 	void startedAt(crl::time ms) {
@@ -518,9 +618,6 @@ public:
 		if (_videoPausedAtMs) return; // Paused already.
 
 		_videoPausedAtMs = ms;
-		if (_hasAudio) {
-			Player::mixer()->pause(_audioMsgId, true);
-		}
 	}
 
 	void resumeVideo(crl::time ms) {
@@ -531,23 +628,16 @@ public:
 		_nextFrameWhen += delta;
 
 		_videoPausedAtMs = 0;
-		if (_hasAudio) {
-			Player::mixer()->resume(_audioMsgId, true);
-		}
 	}
 
 	ProcessResult error() {
-		stop(Player::State::StoppedAtError);
+		stop();
 		_state = State::Error;
 		return ProcessResult::Error;
 	}
 
-	void stop(Player::State audioState) {
+	void stop() {
 		_implementation = nullptr;
-		if (_hasAudio) {
-			Player::mixer()->stop(_audioMsgId, audioState);
-		}
-
 		if (_location) {
 			if (_accessed) {
 				_location->accessDisable();
@@ -558,19 +648,17 @@ public:
 	}
 
 	~ReaderPrivate() {
-		stop(Player::State::Stopped);
+		stop();
 		_data.clear();
 	}
 
 private:
 	Reader *_interface;
 	State _state = State::Reading;
-	Reader::Mode _mode;
-	AudioMsgId _audioMsgId;
 	crl::time _seekPositionMs = 0;
 
 	QByteArray _data;
-	std::unique_ptr<FileLocation> _location;
+	std::unique_ptr<Core::FileLocation> _location;
 	bool _accessed = false;
 
 	QBuffer _buffer;
@@ -578,8 +666,11 @@ private:
 
 	FrameRequest _request;
 	struct Frame {
-		QPixmap pix;
-		QImage original, cache;
+		QImage prepared;
+		QColor preparedColored = QColor(0, 0, 0, 0);
+		QImage original;
+		QImage cache;
+		int index = 0;
 		bool alpha = true;
 		crl::time when = 0;
 
@@ -595,7 +686,6 @@ private:
 	int _width = 0;
 	int _height = 0;
 
-	bool _hasAudio = false;
 	crl::time _durationMs = 0;
 	crl::time _animationStarted = 0;
 	crl::time _nextFrameWhen = 0;
@@ -603,32 +693,26 @@ private:
 
 	bool _autoPausedGif = false;
 	bool _started = false;
+	bool _promoted = false;
 	crl::time _videoPausedAtMs = 0;
 
 	friend class Manager;
 
 };
 
-Manager::Manager(QThread *thread) {
+Manager::Manager(not_null<QThread*> thread) {
 	moveToThread(thread);
-	connect(thread, SIGNAL(started()), this, SLOT(process()));
-	connect(thread, SIGNAL(finished()), this, SLOT(finish()));
-	connect(this, SIGNAL(processDelayed()), this, SLOT(process()), Qt::QueuedConnection);
+	connect(thread, &QThread::started, this, [=] { process(); });
+	connect(thread, &QThread::finished, this, [=] { finish(); });
 
 	_timer.setSingleShot(true);
 	_timer.moveToThread(thread);
-	connect(&_timer, SIGNAL(timeout()), this, SLOT(process()));
-
-	connect(
-		this,
-		&Manager::callback,
-		QCoreApplication::instance(),
-		&Reader::callback);
+	connect(&_timer, &QTimer::timeout, this, [=] { process(); });
 }
 
-void Manager::append(Reader *reader, const FileLocation &location, const QByteArray &data) {
+void Manager::append(Reader *reader, const Core::FileLocation &location, const QByteArray &data) {
 	reader->_private = new ReaderPrivate(reader, location, data);
-	_loadLevel.fetchAndAddRelaxed(AverageGifSize);
+	_loadLevel.fetchAndAddRelaxed(kAverageGifSize);
 	update(reader);
 }
 
@@ -644,15 +728,25 @@ void Manager::update(Reader *reader) {
 	} else {
 		i->storeRelease(1);
 	}
-	emit processDelayed();
+	InvokeQueued(this, [=] { process(); });
 }
 
 void Manager::stop(Reader *reader) {
-	if (!carries(reader)) return;
-
 	QMutexLocker lock(&_readerPointersMutex);
-	_readerPointers.remove(reader);
-	emit processDelayed();
+	if (!_readerPointers.remove(reader)) {
+		return;
+	}
+
+	// A private is inserted into _readers only by process()'s prologue,
+	// which sets _promoted in the same critical section this holds. So
+	// under this mutex, and with the _readerPointers entry already gone,
+	// !_promoted means no worker route can still reach the object: the
+	// prologue walks the map it was just removed from, and the worker's
+	// loops walk only _readers, which it never entered.
+	if (reader->_private && !reader->_private->_promoted) {
+		deletePrivate(base::take(reader->_private));
+	}
+	InvokeQueued(this, [=] { process(); });
 }
 
 bool Manager::carries(Reader *reader) const {
@@ -660,18 +754,30 @@ bool Manager::carries(Reader *reader) const {
 	return _readerPointers.contains(reader);
 }
 
-Manager::ReaderPointers::iterator Manager::unsafeFindReaderPointer(ReaderPrivate *reader) {
-	ReaderPointers::iterator it = _readerPointers.find(reader->_interface);
+auto Manager::unsafeFindReaderPointer(ReaderPrivate *reader)
+-> ReaderPointers::iterator {
+	const auto it = _readerPointers.find(reader->_interface);
 
 	// could be a new reader which was realloced in the same address
-	return (it == _readerPointers.cend() || it.key()->_private == reader) ? it : _readerPointers.end();
+	return (it == _readerPointers.cend() || it.key()->_private == reader)
+		? it
+		: _readerPointers.end();
 }
 
-Manager::ReaderPointers::const_iterator Manager::constUnsafeFindReaderPointer(ReaderPrivate *reader) const {
-	ReaderPointers::const_iterator it = _readerPointers.constFind(reader->_interface);
+auto Manager::constUnsafeFindReaderPointer(ReaderPrivate *reader) const
+-> ReaderPointers::const_iterator {
+	const auto it = _readerPointers.constFind(reader->_interface);
 
 	// could be a new reader which was realloced in the same address
-	return (it == _readerPointers.cend() || it.key()->_private == reader) ? it : _readerPointers.cend();
+	return (it == _readerPointers.cend() || it.key()->_private == reader)
+		? it
+		: _readerPointers.cend();
+}
+
+void Manager::callback(Reader *reader, Notification notification) {
+	crl::on_main([=, threadIndex = reader->threadIndex()] {
+		Reader::SafeCallback(reader, threadIndex, notification);
+	});
 }
 
 bool Manager::handleProcessResult(ReaderPrivate *reader, ProcessResult result, crl::time ms) {
@@ -680,33 +786,40 @@ bool Manager::handleProcessResult(ReaderPrivate *reader, ProcessResult result, c
 	if (result == ProcessResult::Error) {
 		if (it != _readerPointers.cend()) {
 			it.key()->error();
-			emit callback(it.key(), it.key()->threadIndex(), NotificationReinit);
-			_readerPointers.erase(it);
+			callback(it.key(), Notification::Reinit);
 		}
 		return false;
 	} else if (result == ProcessResult::Finished) {
 		if (it != _readerPointers.cend()) {
 			it.key()->finished();
-			emit callback(it.key(), it.key()->threadIndex(), NotificationReinit);
+			callback(it.key(), Notification::Reinit);
 		}
 		return false;
+	}
+	if (result == ProcessResult::Started) {
+		// Manager::deletePrivate() releases the real frame area for any
+		// private whose _width is set, and ReaderPrivate::start() sets it
+		// in the statement before it returns Started. So this upgrade of
+		// the Manager::append() placeholder has to happen even when the
+		// owning Reader is already gone - below the guard it would leave
+		// the worker's load level permanently short of what it released.
+		_loadLevel.fetchAndAddRelaxed(
+			reader->_width * reader->_height - kAverageGifSize);
 	}
 	if (it == _readerPointers.cend()) {
 		return false;
 	}
 
 	if (result == ProcessResult::Started) {
-		_loadLevel.fetchAndAddRelaxed(reader->_width * reader->_height - AverageGifSize);
 		it.key()->_durationMs = reader->_durationMs;
-		it.key()->_hasAudio = reader->_hasAudio;
 	}
 	// See if we need to pause GIF because it is not displayed right now.
-	if (!reader->_autoPausedGif && reader->_mode == Reader::Mode::Gif && result == ProcessResult::Repaint) {
+	if (!reader->_autoPausedGif && result == ProcessResult::Repaint) {
 		int32 ishowing, iprevious;
 		auto showing = it.key()->frameToShow(&ishowing), previous = it.key()->frameToWriteNext(false, &iprevious);
 		Assert(previous != nullptr && showing != nullptr && ishowing >= 0 && iprevious >= 0);
 		if (reader->_frames[ishowing].when > 0 && showing->displayed.loadAcquire() <= 0) { // current frame was not shown
-			if (reader->_frames[ishowing].when + WaitBeforeGifPause < ms || (reader->_frames[iprevious].when && previous->displayed.loadAcquire() <= 0)) {
+			if (reader->_frames[ishowing].when + kWaitBeforeGifPause < ms || (reader->_frames[iprevious].when && previous->displayed.loadAcquire() <= 0)) {
 				reader->_autoPausedGif = true;
 				it.key()->_autoPausedGif.storeRelease(1);
 				result = ProcessResult::Paused;
@@ -717,29 +830,30 @@ bool Manager::handleProcessResult(ReaderPrivate *reader, ProcessResult result, c
 		Assert(reader->_frame >= 0);
 		auto frame = it.key()->_frames + reader->_frame;
 		frame->clear();
-		frame->pix = reader->frame()->pix;
+		frame->prepared = reader->frame()->prepared;
+		frame->preparedColored = reader->frame()->preparedColored;
 		frame->original = reader->frame()->original;
+		frame->index = reader->frame()->index;
 		frame->displayed.storeRelease(0);
 		frame->positionMs = reader->frame()->positionMs;
 		if (result == ProcessResult::Started) {
 			reader->startedAt(ms);
 			it.key()->moveToNextWrite();
-			emit callback(it.key(), it.key()->threadIndex(), NotificationReinit);
+			callback(it.key(), Notification::Reinit);
 		}
 	} else if (result == ProcessResult::Paused) {
 		it.key()->moveToNextWrite();
-		emit callback(it.key(), it.key()->threadIndex(), NotificationReinit);
+		callback(it.key(), Notification::Reinit);
 	} else if (result == ProcessResult::Repaint) {
 		it.key()->moveToNextWrite();
-		emit callback(it.key(), it.key()->threadIndex(), NotificationRepaint);
+		callback(it.key(), Notification::Repaint);
 	}
 	return true;
 }
 
 Manager::ResultHandleState Manager::handleResult(ReaderPrivate *reader, ProcessResult result, crl::time ms) {
 	if (!handleProcessResult(reader, result, ms)) {
-		_loadLevel.fetchAndAddRelaxed(-1 * (reader->_width > 0 ? reader->_width * reader->_height : AverageGifSize));
-		delete reader;
+		deletePrivate(reader);
 		return ResultHandleRemove;
 	}
 
@@ -754,7 +868,6 @@ Manager::ResultHandleState Manager::handleResult(ReaderPrivate *reader, ProcessR
 			auto it = constUnsafeFindReaderPointer(reader);
 			if (it != _readerPointers.cend()) {
 				int32 index = 0;
-				Reader *r = it.key();
 				Reader::Frame *frame = it.key()->frameToWrite(&index);
 				if (frame) {
 					frame->clear();
@@ -783,10 +896,16 @@ void Manager::process() {
 	auto ms = crl::now(), minms = ms + 86400 * crl::time(1000);
 	{
 		QMutexLocker lock(&_readerPointersMutex);
+		auto livePrivates = 0;
 		for (auto it = _readerPointers.begin(), e = _readerPointers.end(); it != e; ++it) {
-			if (it->loadAcquire() && it.key()->_private != nullptr) {
+			if (it.key()->_private == nullptr) {
+				continue;
+			}
+			++livePrivates;
+			if (it->loadAcquire()) {
 				auto i = _readers.find(it.key()->_private);
 				if (i == _readers.cend()) {
+					it.key()->_private->_promoted = true;
 					_readers.insert(it.key()->_private, 0);
 				} else {
 					i.value() = ms;
@@ -804,7 +923,7 @@ void Manager::process() {
 				it->storeRelease(0);
 			}
 		}
-		checkAllReaders = (_readers.size() > _readerPointers.size());
+		checkAllReaders = (_readers.size() > livePrivates);
 	}
 
 	for (auto i = _readers.begin(), e = _readers.end(); i != e;) {
@@ -830,8 +949,7 @@ void Manager::process() {
 			QMutexLocker lock(&_readerPointersMutex);
 			auto it = constUnsafeFindReaderPointer(reader);
 			if (it == _readerPointers.cend()) {
-				_loadLevel.fetchAndAddRelaxed(-1 * (reader->_width > 0 ? reader->_width * reader->_height : AverageGifSize));
-				delete reader;
+				deletePrivate(reader);
 				i = _readers.erase(i);
 				continue;
 			}
@@ -862,32 +980,47 @@ void Manager::clear() {
 	{
 		QMutexLocker lock(&_readerPointersMutex);
 		for (auto it = _readerPointers.begin(), e = _readerPointers.end(); it != e; ++it) {
-			it.key()->_private = nullptr;
+			if (const auto data = base::take(it.key()->_private)) {
+				if (!data->_promoted) {
+					deletePrivate(data);
+				}
+			}
 		}
 		_readerPointers.clear();
 	}
 
-	for (Readers::iterator i = _readers.begin(), e = _readers.end(); i != e; ++i) {
-		delete i.key();
+	for (auto i = _readers.begin(), e = _readers.end(); i != e; ++i) {
+		deletePrivate(i.key());
 	}
 	_readers.clear();
+}
+
+void Manager::deletePrivate(ReaderPrivate *reader) {
+	_loadLevel.fetchAndAddRelaxed(-1 * (reader->_width > 0
+		? reader->_width * reader->_height
+		: kAverageGifSize));
+	delete reader;
 }
 
 Manager::~Manager() {
 	clear();
 }
 
-FileMediaInformation::Video PrepareForSending(const QString &fname, const QByteArray &data) {
-	auto result = FileMediaInformation::Video();
-	auto localLocation = FileLocation(fname);
+Ui::PreparedFileInformation PrepareForSending(
+		const QString &fname,
+		const QByteArray &data) {
+	auto result = Ui::PreparedFileInformation::Video();
+	auto localLocation = Core::FileLocation(fname);
 	auto localData = QByteArray(data);
 
 	auto seekPositionMs = crl::time(0);
-	auto reader = std::make_unique<internal::FFMpegReaderImplementation>(&localLocation, &localData, AudioMsgId());
+	auto reader = std::make_unique<internal::FFMpegReaderImplementation>(&localLocation, &localData);
 	if (reader->start(internal::ReaderImplementation::Mode::Inspecting, seekPositionMs)) {
-		auto durationMs = reader->durationMs();
+		const auto durationMs = reader->durationMs();
 		if (durationMs > 0) {
 			result.isGifv = reader->isGifv();
+			result.isWebmSticker = reader->isWebmSticker();
+			result.hasAudio = reader->hasAudio();
 			// Use first video frame as a thumbnail.
 			// All other apps and server do that way.
 			//if (!result.isGifv) {
@@ -896,19 +1029,15 @@ FileMediaInformation::Video PrepareForSending(const QString &fname, const QByteA
 			//		return result;
 			//	}
 			//}
+			auto index = 0;
 			auto hasAlpha = false;
 			auto readResult = reader->readFramesTill(-1, crl::now());
 			auto readFrame = (readResult == internal::ReaderImplementation::ReadResult::Success);
-			if (readFrame && reader->renderFrame(result.thumbnail, hasAlpha, QSize())) {
-				if (hasAlpha) {
-					auto cacheForResize = QImage();
-					auto request = FrameRequest();
-					request.framew = request.outerw = result.thumbnail.width();
-					request.frameh = request.outerh = result.thumbnail.height();
-					request.factor = 1;
-					result.thumbnail = PrepareFrameImage(request, result.thumbnail, hasAlpha, cacheForResize);
+			if (readFrame && reader->renderFrame(result.thumbnail, hasAlpha, index, QSize())) {
+				if (hasAlpha && !result.isWebmSticker) {
+					result.thumbnail = Images::Opaque(std::move(result.thumbnail));
 				}
-				result.duration = static_cast<int>(durationMs / 1000);
+				result.duration = durationMs;
 			}
 
 			result.supportsStreaming = CheckStreamingSupport(
@@ -916,24 +1045,14 @@ FileMediaInformation::Video PrepareForSending(const QString &fname, const QByteA
 				localData);
 		}
 	}
-	return result;
+	return { .media = result };
 }
 
 void Finish() {
-	if (!threads.isEmpty()) {
-		for (int32 i = 0, l = threads.size(); i < l; ++i) {
-			threads.at(i)->quit();
-			DEBUG_LOG(("Waiting for clipThread to finish: %1").arg(i));
-			threads.at(i)->wait();
-			delete managers.at(i);
-			delete threads.at(i);
-		}
-		threads.clear();
-		managers.clear();
-	}
+	Workers.clear();
 }
 
-Reader *const ReaderPointer::BadPointer = SharedMemoryLocation<Reader, 0>();
+Reader *const ReaderPointer::BadPointer = reinterpret_cast<Reader*>(1);
 
 ReaderPointer::~ReaderPointer() {
 	if (valid()) {

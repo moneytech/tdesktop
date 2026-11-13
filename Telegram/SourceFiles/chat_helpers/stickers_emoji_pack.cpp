@@ -7,105 +7,80 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "chat_helpers/stickers_emoji_pack.h"
 
+#include "chat_helpers/stickers_emoji_image_loader.h"
+#include "history/view/history_view_element.h"
 #include "history/history_item.h"
+#include "history/history.h"
 #include "lottie/lottie_common.h"
 #include "ui/emoji_config.h"
 #include "ui/text/text_isolated_emoji.h"
-#include "ui/image/image_source.h"
+#include "ui/image/image.h"
+#include "ui/rect.h"
 #include "main/main_session.h"
 #include "data/data_file_origin.h"
 #include "data/data_session.h"
 #include "data/data_document.h"
+#include "data/stickers/data_custom_emoji.h"
+#include "core/core_settings.h"
+#include "core/application.h"
 #include "base/call_delayed.h"
+#include "chat_helpers/stickers_lottie.h"
+#include "history/view/media/history_view_sticker.h"
+#include "lottie/lottie_single_player.h"
 #include "apiwrap.h"
-#include "app.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 #include <QtCore/QBuffer>
 
 namespace Stickers {
-namespace details {
-
-using UniversalImages = Ui::Emoji::UniversalImages;
-
-class EmojiImageLoader {
-public:
-	EmojiImageLoader(
-		crl::weak_on_queue<EmojiImageLoader> weak,
-		std::shared_ptr<UniversalImages> images,
-		bool largeEnabled);
-
-	[[nodiscard]] QImage prepare(EmojiPtr emoji);
-	void switchTo(std::shared_ptr<UniversalImages> images);
-	std::shared_ptr<UniversalImages> releaseImages();
-
-private:
-	crl::weak_on_queue<EmojiImageLoader> _weak;
-	std::shared_ptr<UniversalImages> _images;
-
-};
-
 namespace {
 
+constexpr auto kStandardEmojiSetName = "RestrictedEmoji";
+
 constexpr auto kRefreshTimeout = 7200 * crl::time(1000);
-constexpr auto kClearSourceTimeout = 10 * crl::time(1000);
+constexpr auto kEmojiCachesCount = 4;
+constexpr auto kPremiumCachesCount = 8;
+
+[[nodiscard]] std::optional<int> IndexFromEmoticon(const QString &emoticon) {
+	if (emoticon.size() < 2) {
+		return std::nullopt;
+	}
+	const auto first = emoticon[0].unicode();
+	return (first >= '1' && first <= '9')
+		? std::make_optional(first - '1')
+		: (first == 55357 && emoticon[1].unicode() == 56607)
+		? std::make_optional(9)
+		: std::nullopt;
+}
 
 [[nodiscard]] QSize SingleSize() {
 	const auto single = st::largeEmojiSize;
 	const auto outline = st::largeEmojiOutline;
-	return QSize(
-		2 * outline + single,
-		2 * outline + single
-	) * cIntRetinaFactor();
+	return Size(2 * outline + single) * style::DevicePixelRatio();
 }
 
 [[nodiscard]] const Lottie::ColorReplacements *ColorReplacements(int index) {
 	Expects(index >= 1 && index <= 5);
 
 	static const auto color1 = Lottie::ColorReplacements{
-		{
-			{ 0xf77e41U, 0xca907aU },
-			{ 0xffb139U, 0xedc5a5U },
-			{ 0xffd140U, 0xf7e3c3U },
-			{ 0xffdf79U, 0xfbefd6U },
-		},
-		1,
+		.modifier = Lottie::SkinModifier::Color1,
+		.tag = 1,
 	};
 	static const auto color2 = Lottie::ColorReplacements{
-		{
-			{ 0xf77e41U, 0xaa7c60U },
-			{ 0xffb139U, 0xc8a987U },
-			{ 0xffd140U, 0xddc89fU },
-			{ 0xffdf79U, 0xe6d6b2U },
-		},
-		2,
+		.modifier = Lottie::SkinModifier::Color2,
+		.tag = 2,
 	};
 	static const auto color3 = Lottie::ColorReplacements{
-		{
-			{ 0xf77e41U, 0x8c6148U },
-			{ 0xffb139U, 0xad8562U },
-			{ 0xffd140U, 0xc49e76U },
-			{ 0xffdf79U, 0xd4b188U },
-		},
-		3,
+		.modifier = Lottie::SkinModifier::Color3,
+		.tag = 3,
 	};
 	static const auto color4 = Lottie::ColorReplacements{
-		{
-			{ 0xf77e41U, 0x6e3c2cU },
-			{ 0xffb139U, 0x925a34U },
-			{ 0xffd140U, 0xa16e46U },
-			{ 0xffdf79U, 0xac7a52U },
-		},
-		4,
+		.modifier = Lottie::SkinModifier::Color4,
+		.tag = 4,
 	};
 	static const auto color5 = Lottie::ColorReplacements{
-		{
-			{ 0xf77e41U, 0x291c12U },
-			{ 0xffb139U, 0x472a22U },
-			{ 0xffd140U, 0x573b30U },
-			{ 0xffdf79U, 0x68493cU },
-		},
-		5,
+		.modifier = Lottie::SkinModifier::Color5,
+		.tag = 5,
 	};
 	static const auto list = std::array{
 		&color1,
@@ -117,371 +92,279 @@ constexpr auto kClearSourceTimeout = 10 * crl::time(1000);
 	return list[index - 1];
 }
 
-class ImageSource : public Images::Source {
-public:
-	explicit ImageSource(
-		EmojiPtr emoji,
-		not_null<crl::object_on_queue<EmojiImageLoader>*> loader);
-
-	void load(Data::FileOrigin origin) override;
-	void loadEvenCancelled(Data::FileOrigin origin) override;
-	QImage takeLoaded() override;
-	void unload() override;
-
-	void automaticLoad(
-		Data::FileOrigin origin,
-		const HistoryItem *item) override;
-	void automaticLoadSettingsChanged() override;
-
-	bool loading() override;
-	bool displayLoading() override;
-	void cancel() override;
-	float64 progress() override;
-	int loadOffset() override;
-
-	const StorageImageLocation &location() override;
-	void refreshFileReference(const QByteArray &data) override;
-	std::optional<Storage::Cache::Key> cacheKey() override;
-	void setDelayedStorageLocation(
-		const StorageImageLocation &location) override;
-	void performDelayedLoad(Data::FileOrigin origin) override;
-	bool isDelayedStorageImage() const override;
-	void setImageBytes(const QByteArray &bytes) override;
-
-	int width() override;
-	int height() override;
-	int bytesSize() override;
-	void setInformation(int size, int width, int height) override;
-
-	QByteArray bytesForCache() override;
-
-private:
-	// While HistoryView::Element-s are almost never destroyed
-	// we make loading of the image lazy.
-	not_null<crl::object_on_queue<EmojiImageLoader>*> _loader;
-	EmojiPtr _emoji = nullptr;
-	QImage _data;
-	QByteArray _format;
-	QByteArray _bytes;
-	QSize _size;
-	base::binary_guard _loading;
-
-};
-
-ImageSource::ImageSource(
-	EmojiPtr emoji,
-	not_null<crl::object_on_queue<EmojiImageLoader>*> loader)
-: _loader(loader)
-, _emoji(emoji)
-, _size(SingleSize()) {
-}
-
-void ImageSource::load(Data::FileOrigin origin) {
-	if (!_data.isNull()) {
-		return;
-	}
-	if (_bytes.isEmpty()) {
-		_loader->with([
-			this,
-			emoji = _emoji,
-			guard = _loading.make_guard()
-		](EmojiImageLoader &loader) mutable {
-			if (!guard) {
-				return;
-			}
-			crl::on_main(std::move(guard), [this, image = loader.prepare(emoji)]{
-				_data = image;
-				Auth().downloaderTaskFinished().notify();
-			});
-		});
-	} else {
-		_data = App::readImage(_bytes, &_format, false);
-	}
-}
-
-void ImageSource::loadEvenCancelled(Data::FileOrigin origin) {
-	load(origin);
-}
-
-QImage ImageSource::takeLoaded() {
-	load({});
-	return _data;
-}
-
-void ImageSource::unload() {
-	if (_bytes.isEmpty() && !_data.isNull()) {
-		if (_format != "JPG") {
-			_format = "PNG";
-		}
-		{
-			QBuffer buffer(&_bytes);
-			_data.save(&buffer, _format);
-		}
-		Assert(!_bytes.isEmpty());
-	}
-	_data = QImage();
-}
-
-void ImageSource::automaticLoad(
-	Data::FileOrigin origin,
-	const HistoryItem *item) {
-}
-
-void ImageSource::automaticLoadSettingsChanged() {
-}
-
-bool ImageSource::loading() {
-	return _data.isNull() && _bytes.isEmpty();
-}
-
-bool ImageSource::displayLoading() {
-	return false;
-}
-
-void ImageSource::cancel() {
-}
-
-float64 ImageSource::progress() {
-	return 1.;
-}
-
-int ImageSource::loadOffset() {
-	return 0;
-}
-
-const StorageImageLocation &ImageSource::location() {
-	return StorageImageLocation::Invalid();
-}
-
-void ImageSource::refreshFileReference(const QByteArray &data) {
-}
-
-std::optional<Storage::Cache::Key> ImageSource::cacheKey() {
-	return std::nullopt;
-}
-
-void ImageSource::setDelayedStorageLocation(
-	const StorageImageLocation &location) {
-}
-
-void ImageSource::performDelayedLoad(Data::FileOrigin origin) {
-}
-
-bool ImageSource::isDelayedStorageImage() const {
-	return false;
-}
-
-void ImageSource::setImageBytes(const QByteArray &bytes) {
-}
-
-int ImageSource::width() {
-	return _size.width();
-}
-
-int ImageSource::height() {
-	return _size.height();
-}
-
-int ImageSource::bytesSize() {
-	return _bytes.size();
-}
-
-void ImageSource::setInformation(int size, int width, int height) {
-	if (width && height) {
-		_size = QSize(width, height);
-	}
-}
-
-QByteArray ImageSource::bytesForCache() {
-	auto result = QByteArray();
-	{
-		QBuffer buffer(&result);
-		if (!_data.save(&buffer, _format)) {
-			if (_data.save(&buffer, "PNG")) {
-				_format = "PNG";
-			}
-		}
-	}
-	return result;
-}
-
 } // namespace
 
-EmojiImageLoader::EmojiImageLoader(
-	crl::weak_on_queue<EmojiImageLoader> weak,
-	std::shared_ptr<UniversalImages> images,
-	bool largeEnabled)
-: _weak(std::move(weak))
-, _images(std::move(images)) {
-	Expects(_images != nullptr);
-
-	if (largeEnabled) {
-		_images->ensureLoaded();
-	}
+QSize LargeEmojiImage::Size() {
+	return SingleSize();
 }
-
-QImage EmojiImageLoader::prepare(EmojiPtr emoji) {
-	const auto loaded = _images->ensureLoaded();
-	const auto factor = cIntRetinaFactor();
-	const auto side = st::largeEmojiSize + 2 * st::largeEmojiOutline;
-	auto tinted = QImage(
-		QSize(st::largeEmojiSize, st::largeEmojiSize) * factor,
-		QImage::Format_ARGB32_Premultiplied);
-	tinted.fill(Qt::white);
-	if (loaded) {
-		QPainter p(&tinted);
-		p.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-		_images->draw(
-			p,
-			emoji,
-			st::largeEmojiSize * factor,
-			0,
-			0);
-	}
-	auto result = QImage(
-		QSize(side, side) * factor,
-		QImage::Format_ARGB32_Premultiplied);
-	result.fill(Qt::transparent);
-	if (loaded) {
-		QPainter p(&result);
-		const auto delta = st::largeEmojiOutline * factor;
-		const auto planar = std::array<QPoint, 4>{ {
-			{ 0, -1 },
-			{ -1, 0 },
-			{ 1, 0 },
-			{ 0, 1 },
-		} };
-		for (const auto &shift : planar) {
-			for (auto i = 0; i != delta; ++i) {
-				p.drawImage(QPoint(delta, delta) + shift * (i + 1), tinted);
-			}
-		}
-		const auto diagonal = std::array<QPoint, 4>{ {
-			{ -1, -1 },
-			{ 1, -1 },
-			{ -1, 1 },
-			{ 1, 1 },
-		} };
-		const auto corrected = int(std::round(delta / sqrt(2.)));
-		for (const auto &shift : diagonal) {
-			for (auto i = 0; i != corrected; ++i) {
-				p.drawImage(QPoint(delta, delta) + shift * (i + 1), tinted);
-			}
-		}
-		_images->draw(
-			p,
-			emoji,
-			st::largeEmojiSize * factor,
-			delta,
-			delta);
-	}
-	return result;
-}
-
-void EmojiImageLoader::switchTo(std::shared_ptr<UniversalImages> images) {
-	_images = std::move(images);
-}
-
-std::shared_ptr<UniversalImages> EmojiImageLoader::releaseImages() {
-	return std::exchange(
-		_images,
-		std::make_shared<UniversalImages>(_images->id()));
-}
-
-} // namespace details
 
 EmojiPack::EmojiPack(not_null<Main::Session*> session)
-: _session(session)
-, _imageLoader(prepareSourceImages(), session->settings().largeEmoji())
-, _clearTimer([=] { clearSourceImages(); }) {
+: _session(session) {
 	refresh();
 
-	session->data().itemRemoved(
-	) | rpl::filter([](not_null<const HistoryItem*> item) {
-		return item->isIsolatedEmoji();
-	}) | rpl::start_with_next([=](not_null<const HistoryItem*> item) {
+	session->data().viewRemoved(
+	) | rpl::filter([](not_null<const ViewElement*> view) {
+		return view->isIsolatedEmoji() || view->isOnlyCustomEmoji();
+	}) | rpl::on_next([=](not_null<const ViewElement*> item) {
 		remove(item);
 	}, _lifetime);
 
-	_session->settings().largeEmojiChanges(
-	) | rpl::start_with_next([=](bool large) {
-		if (large) {
-			_clearTimer.cancel();
-		} else {
-			_clearTimer.callOnce(details::kClearSourceTimeout);
-		}
+	Core::App().settings().largeEmojiChanges(
+	) | rpl::on_next([=](bool large) {
 		refreshAll();
 	}, _lifetime);
 
 	Ui::Emoji::Updated(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		_images.clear();
-		_imageLoader.with([
-			source = prepareSourceImages()
-		](details::EmojiImageLoader &loader) mutable {
-			loader.switchTo(std::move(source));
-		});
 		refreshAll();
 	}, _lifetime);
 }
 
 EmojiPack::~EmojiPack() = default;
 
-bool EmojiPack::add(not_null<HistoryItem*> item) {
-	auto length = 0;
-	if (const auto emoji = item->isolatedEmoji()) {
-		_items[emoji].emplace(item);
+bool EmojiPack::add(not_null<ViewElement*> view) {
+	if (view->data()->textAppearing()
+		|| view->Get<HistoryView::FakeBotAboutTop>()) {
+		return false;
+	} else if (const auto custom = view->onlyCustomEmoji()) {
+		_onlyCustomItems.emplace(view);
+		return true;
+	} else if (const auto emoji = view->isolatedEmoji()) {
+		_items[emoji].emplace(view);
 		return true;
 	}
 	return false;
 }
 
-void EmojiPack::remove(not_null<const HistoryItem*> item) {
-	Expects(item->isIsolatedEmoji());
+void EmojiPack::remove(not_null<const ViewElement*> view) {
+	Expects(view->isIsolatedEmoji() || view->isOnlyCustomEmoji());
 
-	auto length = 0;
-	const auto emoji = item->isolatedEmoji();
-	const auto i = _items.find(emoji);
-	Assert(i != end(_items));
-	const auto j = i->second.find(item);
-	Assert(j != end(i->second));
-	i->second.erase(j);
-	if (i->second.empty()) {
-		_items.erase(i);
+	if (view->isOnlyCustomEmoji()) {
+		_onlyCustomItems.remove(view);
+	} else if (const auto emoji = view->isolatedEmoji()) {
+		const auto i = _items.find(emoji);
+		Assert(i != end(_items));
+		const auto j = i->second.find(view);
+		Assert(j != end(i->second));
+		i->second.erase(j);
+		if (i->second.empty()) {
+			_items.erase(i);
+		}
 	}
+}
+
+auto EmojiPack::stickerForEmoji(EmojiPtr emoji) -> Sticker {
+	Expects(emoji != nullptr);
+
+	const auto i = _map.find(emoji);
+	if (i != end(_map)) {
+		return { i->second.get(), nullptr };
+	}
+	if (!emoji->colored()) {
+		return {};
+	}
+	const auto j = _map.find(emoji->original());
+	if (j != end(_map)) {
+		const auto index = emoji->variantIndex(emoji);
+		return { j->second.get(), ColorReplacements(index) };
+	}
+	return {};
 }
 
 auto EmojiPack::stickerForEmoji(const IsolatedEmoji &emoji) -> Sticker {
 	Expects(!emoji.empty());
 
-	if (emoji.items[1] != nullptr) {
-		return Sticker();
+	if (!v::is_null(emoji.items[1])) {
+		return {};
+	} else if (const auto regular = std::get_if<EmojiPtr>(&emoji.items[0])) {
+		return stickerForEmoji(*regular);
 	}
-	const auto first = emoji.items[0];
-	const auto i = _map.find(first);
-	if (i != end(_map)) {
-		return { i->second.get(), nullptr };
-	}
-	if (!first->colored()) {
-		return Sticker();
-	}
-	const auto j = _map.find(first->original());
-	if (j != end(_map)) {
-		const auto index = first->variantIndex(first);
-		return { j->second.get(), details::ColorReplacements(index) };
-	}
-	return Sticker();
+	return {};
 }
 
-std::shared_ptr<Image> EmojiPack::image(EmojiPtr emoji) {
-	const auto i = _images.emplace(emoji, std::weak_ptr<Image>()).first;
+std::shared_ptr<LargeEmojiImage> EmojiPack::image(EmojiPtr emoji) {
+	const auto i = _images.emplace(
+		emoji,
+		std::weak_ptr<LargeEmojiImage>()).first;
 	if (const auto result = i->second.lock()) {
 		return result;
 	}
-	auto result = std::make_shared<Image>(
-		std::make_unique<details::ImageSource>(emoji, &_imageLoader));
+	auto result = std::make_shared<LargeEmojiImage>();
+	const auto raw = result.get();
+	const auto weak = base::make_weak(_session);
+	raw->load = [=] {
+		Core::App().emojiImageLoader().with([=](
+				const EmojiImageLoader &loader) {
+			crl::on_main(weak, [
+				=,
+				image = loader.prepare(emoji)
+			]() mutable {
+				const auto i = _images.find(emoji);
+				if (i != end(_images)) {
+					if (const auto strong = i->second.lock()) {
+						if (!strong->image) {
+							strong->load = nullptr;
+							strong->image.emplace(std::move(image));
+							_session->notifyDownloaderTaskFinished();
+						}
+					}
+				}
+			});
+		});
+		raw->load = nullptr;
+	};
 	i->second = result;
 	return result;
+}
+
+EmojiPtr EmojiPack::chooseInteractionEmoji(
+		not_null<HistoryItem*> item) const {
+	return chooseInteractionEmoji(item->originalText().text);
+}
+
+EmojiPtr EmojiPack::chooseInteractionEmoji(
+		const QString &emoticon) const {
+	const auto emoji = Ui::Emoji::Find(emoticon);
+	if (!emoji) {
+		return nullptr;
+	}
+	if (!animationsForEmoji(emoji).empty()) {
+		return emoji;
+	}
+	if (const auto original = emoji->original(); original != emoji) {
+		if (!animationsForEmoji(original).empty()) {
+			return original;
+		}
+	}
+	static const auto kHearts = {
+		QString::fromUtf8("\xf0\x9f\x92\x9b"),
+		QString::fromUtf8("\xf0\x9f\x92\x99"),
+		QString::fromUtf8("\xf0\x9f\x92\x9a"),
+		QString::fromUtf8("\xf0\x9f\x92\x9c"),
+		QString::fromUtf8("\xf0\x9f\xa7\xa1"),
+		QString::fromUtf8("\xf0\x9f\x96\xa4"),
+		QString::fromUtf8("\xf0\x9f\xa4\x8e"),
+		QString::fromUtf8("\xf0\x9f\xa4\x8d"),
+	};
+	return ranges::contains(kHearts, emoji->id())
+		? Ui::Emoji::Find(QString::fromUtf8("\xe2\x9d\xa4"))
+		: emoji;
+}
+
+auto EmojiPack::animationsForEmoji(EmojiPtr emoji) const
+-> const base::flat_map<int, not_null<DocumentData*>> & {
+	static const auto empty = base::flat_map<int, not_null<DocumentData*>>();
+	if (!emoji) {
+		return empty;
+	}
+	const auto i = _animations.find(emoji);
+	return (i != end(_animations)) ? i->second : empty;
+}
+
+bool EmojiPack::hasAnimationsFor(not_null<HistoryItem*> item) const {
+	return !animationsForEmoji(chooseInteractionEmoji(item)).empty();
+}
+
+bool EmojiPack::hasAnimationsFor(const QString &emoticon) const {
+	return !animationsForEmoji(chooseInteractionEmoji(emoticon)).empty();
+}
+
+std::unique_ptr<Lottie::SinglePlayer> EmojiPack::effectPlayer(
+		not_null<DocumentData*> document,
+		QByteArray data,
+		QString filepath,
+		EffectType type) {
+	// Shortened copy from stickers_lottie module.
+	const auto baseKey = document->bigFileBaseCacheKey();
+	const auto tag = uint8(type);
+	const auto keyShift = ((tag << 4) & 0xF0)
+		| (uint8(ChatHelpers::StickerLottieSize::EmojiInteraction) & 0x0F);
+	const auto key = Storage::Cache::Key{
+		baseKey.high,
+		baseKey.low + keyShift
+	};
+	const auto get = [=](int i, FnMut<void(QByteArray &&cached)> handler) {
+		document->owner().cacheBigFile().get(
+			{ key.high, key.low + i },
+			std::move(handler));
+	};
+	const auto weak = base::make_weak(&document->session());
+	const auto put = [=](int i, QByteArray &&cached) {
+		crl::on_main(weak, [=, data = std::move(cached)]() mutable {
+			weak->data().cacheBigFile().put(
+				{ key.high, key.low + i },
+				std::move(data));
+		});
+	};
+	const auto size = (type == EffectType::PremiumSticker)
+		? HistoryView::Sticker::PremiumEffectSize(document)
+		: (type == EffectType::EmojiInteraction)
+		? HistoryView::Sticker::EmojiEffectSize()
+		: HistoryView::Sticker::MessageEffectSize();
+	const auto request = Lottie::FrameRequest{
+		size * style::DevicePixelRatio(),
+	};
+	auto &weakProvider = _sharedProviders[{ document, type }];
+	auto shared = [&] {
+		if (const auto result = weakProvider.lock()) {
+			return result;
+		}
+		const auto count = (type == EffectType::PremiumSticker)
+			? kPremiumCachesCount
+			: kEmojiCachesCount;
+		const auto result = Lottie::SinglePlayer::SharedProvider(
+			count,
+			get,
+			put,
+			Lottie::ReadContent(data, filepath),
+			request,
+			Lottie::Quality::High);
+		weakProvider = result;
+		return result;
+	}();
+	return std::make_unique<Lottie::SinglePlayer>(std::move(shared), request);
+}
+
+DocumentId EmojiPack::standardEmojiDocument(EmojiPtr emoji) {
+	if (!_standardRequested) {
+		_standardRequested = true;
+		refreshStandard();
+	}
+	const auto i = _standard.find(emoji);
+	return (i != end(_standard)) ? i->second->id : DocumentId();
+}
+
+void EmojiPack::refreshStandard() {
+	if (_standardRequestId) {
+		return;
+	}
+	_standardRequestId = _session->api().request(MTPmessages_GetStickerSet(
+		MTP_inputStickerSetShortName(MTP_string(kStandardEmojiSetName)),
+		MTP_int(0) // hash
+	)).done([=](const MTPmessages_StickerSet &result) {
+		_standardRequestId = 0;
+		result.match([&](const MTPDmessages_stickerSet &data) {
+			applyStandardSet(data);
+		}, [](const MTPDmessages_stickerSetNotModified &) {
+			LOG(("API Error: Unexpected messages.stickerSetNotModified."));
+		});
+	}).fail([=] {
+		_standardRequestId = 0;
+	}).send();
+}
+
+void EmojiPack::applyStandardSet(const MTPDmessages_stickerSet &data) {
+	const auto stickers = collectStickers(data.vdocuments().v);
+	auto were = base::take(_standard);
+	for (const auto &pack : data.vpacks().v) {
+		pack.match([&](const MTPDstickerPack &data) {
+			applyPack(data, stickers, _standard);
+		});
+	}
+	if (_standard != were) {
+		_refreshed.fire({});
+	}
 }
 
 void EmojiPack::refresh() {
@@ -489,15 +372,39 @@ void EmojiPack::refresh() {
 		return;
 	}
 	_requestId = _session->api().request(MTPmessages_GetStickerSet(
-		MTP_inputStickerSetAnimatedEmoji()
+		MTP_inputStickerSetAnimatedEmoji(),
+		MTP_int(0) // hash
 	)).done([=](const MTPmessages_StickerSet &result) {
 		_requestId = 0;
-		refreshDelayed();
+		refreshAnimations();
 		result.match([&](const MTPDmessages_stickerSet &data) {
 			applySet(data);
+		}, [](const MTPDmessages_stickerSetNotModified &) {
+			LOG(("API Error: Unexpected messages.stickerSetNotModified."));
 		});
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_requestId = 0;
+		refreshDelayed();
+	}).send();
+}
+
+void EmojiPack::refreshAnimations() {
+	if (_animationsRequestId) {
+		return;
+	}
+	_animationsRequestId = _session->api().request(MTPmessages_GetStickerSet(
+		MTP_inputStickerSetAnimatedEmojiAnimations(),
+		MTP_int(0) // hash
+	)).done([=](const MTPmessages_StickerSet &result) {
+		_animationsRequestId = 0;
+		refreshDelayed();
+		result.match([&](const MTPDmessages_stickerSet &data) {
+			applyAnimationsSet(data);
+		}, [](const MTPDmessages_stickerSetNotModified &) {
+			LOG(("API Error: Unexpected messages.stickerSetNotModified."));
+		});
+	}).fail([=] {
+		_animationsRequestId = 0;
 		refreshDelayed();
 	}).send();
 }
@@ -508,7 +415,7 @@ void EmojiPack::applySet(const MTPDmessages_stickerSet &data) {
 
 	for (const auto &pack : data.vpacks().v) {
 		pack.match([&](const MTPDstickerPack &data) {
-			applyPack(data, stickers);
+			applyPack(data, stickers, _map);
 		});
 	}
 
@@ -523,18 +430,90 @@ void EmojiPack::applySet(const MTPDmessages_stickerSet &data) {
 			was.erase(i);
 		}
 	}
-	for (const auto &[emoji, Document] : was) {
+	for (const auto &[emoji, document] : was) {
 		refreshItems(emoji);
 	}
+	_refreshed.fire({});
+}
+
+void EmojiPack::applyAnimationsSet(const MTPDmessages_stickerSet &data) {
+	const auto stickers = collectStickers(data.vdocuments().v);
+	const auto &packs = data.vpacks().v;
+	const auto indices = collectAnimationsIndices(packs);
+
+	_animations.clear();
+	for (const auto &pack : packs) {
+		pack.match([&](const MTPDstickerPack &data) {
+			const auto emoticon = qs(data.vemoticon());
+			if (IndexFromEmoticon(emoticon).has_value()) {
+				return;
+			}
+			const auto emoji = Ui::Emoji::Find(emoticon);
+			if (!emoji) {
+				return;
+			}
+			for (const auto &id : data.vdocuments().v) {
+				const auto i = indices.find(id.v);
+				if (i == end(indices)) {
+					continue;
+				}
+				const auto j = stickers.find(id.v);
+				if (j == end(stickers)) {
+					continue;
+				}
+				for (const auto index : i->second) {
+					_animations[emoji].emplace(index, j->second);
+				}
+			}
+		});
+	}
+	++_animationsVersion;
+}
+
+auto EmojiPack::collectAnimationsIndices(
+	const QVector<MTPStickerPack> &packs
+) const -> base::flat_map<uint64, base::flat_set<int>> {
+	auto result = base::flat_map<uint64, base::flat_set<int>>();
+	for (const auto &pack : packs) {
+		pack.match([&](const MTPDstickerPack &data) {
+			if (const auto index = IndexFromEmoticon(qs(data.vemoticon()))) {
+				for (const auto &id : data.vdocuments().v) {
+					result[id.v].emplace(*index);
+				}
+			}
+		});
+	}
+	return result;
 }
 
 void EmojiPack::refreshAll() {
+	auto items = base::flat_set<not_null<HistoryItem*>>();
+	auto count = 0;
 	for (const auto &[emoji, list] : _items) {
-		refreshItems(list);
+		// refreshItems(list); // This call changes _items!
+		count += int(list.size());
 	}
+	items.reserve(count);
+	for (const auto &[emoji, list] : _items) {
+		// refreshItems(list); // This call changes _items!
+		for (const auto &view : list) {
+			items.emplace(view->data());
+		}
+	}
+	refreshItems(items);
+	refreshItems(_onlyCustomItems);
 }
 
 void EmojiPack::refreshItems(EmojiPtr emoji) {
+	if (!emoji->colored()) {
+		if (const auto count = emoji->variantsCount()) {
+			for (auto i = 0; i != count; ++i) {
+				refreshItems(emoji->variant(i + 1));
+			}
+		}
+	}
+	// Refreshing variants recreates views synchronously, which may erase
+	// keys from _items, so look up the entry only after that.
 	const auto i = _items.find(IsolatedEmoji{ { emoji } });
 	if (i == end(_items)) {
 		return;
@@ -543,33 +522,26 @@ void EmojiPack::refreshItems(EmojiPtr emoji) {
 }
 
 void EmojiPack::refreshItems(
-		const base::flat_set<not_null<HistoryItem*>> &list) {
-	for (const auto &item : list) {
+		const base::flat_set<not_null<ViewElement*>> &list) {
+	auto items = base::flat_set<not_null<HistoryItem*>>();
+	items.reserve(list.size());
+	for (const auto &view : list) {
+		items.emplace(view->data());
+	}
+	refreshItems(items);
+}
+
+void EmojiPack::refreshItems(
+		const base::flat_set<not_null<HistoryItem*>> &items) {
+	for (const auto &item : items) {
 		_session->data().requestItemViewRefresh(item);
 	}
 }
 
-auto EmojiPack::prepareSourceImages()
--> std::shared_ptr<Ui::Emoji::UniversalImages> {
-	const auto &images = Ui::Emoji::SourceImages();
-	if (_session->settings().largeEmoji()) {
-		return images;
-	}
-	Ui::Emoji::ClearSourceImages(images);
-	return std::make_shared<Ui::Emoji::UniversalImages>(images->id());
-}
-
-void EmojiPack::clearSourceImages() {
-	_imageLoader.with([](details::EmojiImageLoader &loader) {
-		crl::on_main([images = loader.releaseImages()]{
-			Ui::Emoji::ClearSourceImages(images);
-		});
-	});
-}
-
 void EmojiPack::applyPack(
 		const MTPDstickerPack &data,
-		const base::flat_map<uint64, not_null<DocumentData*>> &map) {
+		const base::flat_map<uint64, not_null<DocumentData*>> &map,
+		base::flat_map<EmojiPtr, not_null<DocumentData*>> &to) {
 	const auto emoji = [&] {
 		return Ui::Emoji::Find(qs(data.vemoticon()));
 	}();
@@ -583,7 +555,7 @@ void EmojiPack::applyPack(
 		return nullptr;
 	}();
 	if (emoji && document) {
-		_map.emplace_or_assign(emoji, document);
+		to.emplace_or_assign(emoji, document);
 	}
 }
 
@@ -601,7 +573,7 @@ base::flat_map<uint64, not_null<DocumentData*>> EmojiPack::collectStickers(
 }
 
 void EmojiPack::refreshDelayed() {
-	base::call_delayed(details::kRefreshTimeout, _session, [=] {
+	base::call_delayed(kRefreshTimeout, _session, [=] {
 		refresh();
 	});
 }

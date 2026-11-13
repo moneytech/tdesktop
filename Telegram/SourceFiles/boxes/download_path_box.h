@@ -7,8 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "boxes/abstract_box.h"
-#include "base/observer.h"
+#include "ui/layers/box_content.h"
 
 namespace Ui {
 template <typename Enum>
@@ -18,9 +17,15 @@ class Radioenum;
 class LinkButton;
 } // namespace Ui
 
+namespace Window {
+class SessionController;
+} // namespace Window
+
 class DownloadPathBox : public Ui::BoxContent {
 public:
-	DownloadPathBox(QWidget *parent);
+	DownloadPathBox(
+		QWidget *parent,
+		not_null<Window::SessionController*> controller);
 
 protected:
 	void prepare() override;
@@ -34,20 +39,14 @@ private:
 		Custom,
 	};
 	void radioChanged(Directory value);
-	Directory typeFromPath(const QString &path) {
-		if (path.isEmpty()) {
-			return Directory::Downloads;
-		} else if (path == qsl("tmp")) {
-			return Directory::Temp;
-		}
-		return Directory::Custom;
-	}
+	Directory typeFromPath(const QString &path);
 
 	void save();
 	void updateControlsVisibility();
 	void setPathText(const QString &text);
 	void editPath();
 
+	const not_null<Window::SessionController*> _controller;
 	QString _path;
 	QByteArray _pathBookmark;
 

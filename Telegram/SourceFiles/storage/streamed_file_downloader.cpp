@@ -16,28 +16,32 @@ namespace {
 using namespace Media::Streaming;
 
 constexpr auto kPartSize = Loader::kPartSize;
-constexpr auto kRequestPartsCount = 8;
+constexpr auto kRequestPartsCount = 32;
 
 } // namespace
 
 StreamedFileDownloader::StreamedFileDownloader(
+	not_null<Main::Session*> session,
+
 	uint64 objectId,
 	MTP::DcId dcId,
 	Data::FileOrigin origin,
 	Cache::Key cacheKey,
-	MediaKey fileLocationKey,
+	std::optional<MediaKey> fileLocationKey,
 	std::shared_ptr<Reader> reader,
 
 	// For FileLoader
 	const QString &toFile,
-	int32 size,
+	int64 size,
 	LocationType locationType,
 	LoadToCacheSetting toCache,
 	LoadFromCloudSetting fromCloud,
 	bool autoLoading,
 	uint8 cacheTag)
 : FileLoader(
+	session,
 	toFile,
+	size,
 	size,
 	locationType,
 	toCache,
@@ -53,9 +57,9 @@ StreamedFileDownloader::StreamedFileDownloader(
 	_partIsSaved.resize(_partsCount, false);
 
 	_reader->partsForDownloader(
-	) | rpl::start_with_next([=](const LoadedPart &part) {
+	) | rpl::on_next([=](const LoadedPart &part) {
 		if (part.offset == LoadedPart::kFailedOffset) {
-			cancel(true);
+			cancel(FailureReason::OtherFailure);
 		} else {
 			savePart(std::move(part));
 		}
@@ -63,7 +67,11 @@ StreamedFileDownloader::StreamedFileDownloader(
 }
 
 StreamedFileDownloader::~StreamedFileDownloader() {
-	cancelHook();
+	if (!_finished) {
+		cancel();
+	} else {
+		_reader->cancelForDownloader(this);
+	}
 }
 
 uint64 StreamedFileDownloader::objId() const {
@@ -80,6 +88,7 @@ void StreamedFileDownloader::requestParts() {
 		&& _partsRequested < kRequestPartsCount) {
 		requestPart();
 	}
+	_reader->continueDownloaderFromMainThread();
 }
 
 void StreamedFileDownloader::requestPart() {
@@ -99,8 +108,8 @@ void StreamedFileDownloader::requestPart() {
 	++_partsRequested;
 }
 
-QByteArray StreamedFileDownloader::readLoadedPart(int offset) {
-	Expects(offset >= 0 && offset < _size);
+QByteArray StreamedFileDownloader::readLoadedPart(int64 offset) {
+	Expects(offset >= 0 && offset < _fullSize);
 	Expects(!(offset % kPartSize));
 
 	const auto index = (offset / kPartSize);
@@ -151,14 +160,13 @@ void StreamedFileDownloader::savePart(const LoadedPart &part) {
 	if (!writeResultPart(offset, bytes::make_span(part.bytes))) {
 		return;
 	}
-	if (_partsSaved == _partsCount) {
-		if (!finalizeResult()) {
-			return;
-		}
-	}
 	_reader->doneForDownloader(offset);
-	requestParts();
-	notifyAboutProgress();
+	if (_partsSaved == _partsCount) {
+		finalizeResult();
+	} else {
+		requestParts();
+		notifyAboutProgress();
+	}
 }
 
 } // namespace Storage

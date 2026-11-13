@@ -27,21 +27,24 @@ public:
 		return _receiptMsgId;
 	}
 	QString getTitle() const {
-		return _title.toString();
+		return _title.toString({ 0, _titleTextLength });
 	}
 
+	bool aboveTextByDefault() const override {
+		return false;
+	}
 	bool hideMessageText() const override {
 		return false;
 	}
 
-	void draw(Painter &p, const QRect &r, TextSelection selection, crl::time ms) const override;
+	void draw(Painter &p, const PaintContext &context) const override;
 	TextState textState(QPoint point, StateRequest request) const override;
 
 	[[nodiscard]] TextSelection adjustSelection(
 		TextSelection selection,
 		TextSelectType type) const override;
 	uint16 fullSelectionLength() const override {
-		return _title.length() + _description.length();
+		return _titleTextLength + _descriptionTextLength;
 	}
 	bool hasTextForCopy() const override {
 		return false; // we do not add _title and _description in FullSelection text copy.
@@ -70,11 +73,15 @@ public:
 		return _attach.get();
 	}
 
+	bool hasHeavyPart() const override;
+	void unloadHeavyPart() override;
+
 private:
 	QSize countOptimalSize() override;
 	QSize countCurrentSize(int newWidth) override;
 
 	void fillFromData(not_null<Data::Invoice*> invoice);
+	void assignBottomInfoSkipBlock();
 
 	TextSelection toDescriptionSelection(TextSelection selection) const;
 	TextSelection fromDescriptionSelection(TextSelection selection) const;
@@ -85,6 +92,9 @@ private:
 
 	int _titleHeight = 0;
 	int _descriptionHeight = 0;
+	uint16 _titleTextLength = 0;
+	uint16 _descriptionTextLength = 0;
+	bool _statusVisible = true;
 	Ui::Text::String _title;
 	Ui::Text::String _description;
 	Ui::Text::String _status;
@@ -92,7 +102,5 @@ private:
 	MsgId _receiptMsgId = 0;
 
 };
-
-QString FillAmountAndCurrency(uint64 amount, const QString &currency);
 
 } // namespace HistoryView

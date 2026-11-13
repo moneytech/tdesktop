@@ -7,17 +7,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "intro/intro_signup.h"
 
+#include "boxes/abstract_box.h"
 #include "intro/intro_widget.h"
 #include "core/file_utilities.h"
-#include "boxes/photo_crop_box.h"
-#include "boxes/confirm_box.h"
+#include "ui/boxes/confirm_box.h"
 #include "lang/lang_keys.h"
+#include "ui/controls/userpic_button.h"
 #include "ui/widgets/buttons.h"
-#include "ui/widgets/input_fields.h"
+#include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
-#include "ui/special_buttons.h"
 #include "styles/style_intro.h"
-#include "styles/style_boxes.h"
+#include "styles/style_userpic_button.h"
 
 namespace Intro {
 namespace details {
@@ -29,13 +29,25 @@ SignupWidget::SignupWidget(
 : Step(parent, account, data)
 , _photo(
 	this,
-	tr::lng_settings_crop_profile(tr::now),
-	Ui::UserpicButton::Role::ChangePhoto,
+	data->controller,
+	Ui::UserpicButton::Role::ChoosePhoto,
 	st::defaultUserpicButton)
 , _first(this, st::introName, tr::lng_signup_firstname())
 , _last(this, st::introName, tr::lng_signup_lastname())
 , _invertOrder(langFirstNameGoesSecond()) {
-	subscribe(Lang::Current().updated(), [this] { refreshLang(); });
+	_photo->showCustomOnChosen();
+
+	Lang::Updated(
+	) | rpl::on_next([=] {
+		refreshLang();
+	}, lifetime());
+
+	const auto submitted = [=] { submit(); };
+	_first->submits(
+	) | rpl::on_next(submitted, _first->lifetime());
+	_last->submits(
+	) | rpl::on_next(submitted, _last->lifetime());
+
 	if (_invertOrder) {
 		setTabOrder(_last, _first);
 	} else {
@@ -101,62 +113,49 @@ void SignupWidget::activate() {
 }
 
 void SignupWidget::cancelled() {
-	MTP::cancel(base::take(_sentRequest));
+	api().request(base::take(_sentRequest)).cancel();
 }
 
 void SignupWidget::nameSubmitDone(const MTPauth_Authorization &result) {
-	auto &d = result.c_auth_authorization();
-	if (d.vuser().type() != mtpc_user || !d.vuser().c_user().is_self()) { // wtf?
-		showError(rpl::single(Lang::Hard::ServerError()));
-		return;
-	}
-	finish(d.vuser(), _photo->takeResultImage());
+	finish(result);
 }
 
-bool SignupWidget::nameSubmitFail(const RPCError &error) {
-	if (MTP::isFloodError(error)) {
+void SignupWidget::nameSubmitFail(const MTP::Error &error) {
+	_sentRequest = 0;
+	if (MTP::IsFloodError(error)) {
 		showError(tr::lng_flood_error());
 		if (_invertOrder) {
 			_first->setFocus();
 		} else {
 			_last->setFocus();
 		}
-		return true;
+		return;
 	}
-	if (MTP::isDefaultHandledError(error)) return false;
 
-	auto &err = error.type();
-	if (err == qstr("PHONE_NUMBER_FLOOD")) {
-		Ui::show(Box<InformBox>(tr::lng_error_phone_flood(tr::now)));
-		return true;
-	} else if (err == qstr("PHONE_NUMBER_INVALID")
-		|| err == qstr("PHONE_NUMBER_BANNED")
-		|| err == qstr("PHONE_CODE_EXPIRED")
-		|| err == qstr("PHONE_CODE_EMPTY")
-		|| err == qstr("PHONE_CODE_INVALID")
-		|| err == qstr("PHONE_NUMBER_OCCUPIED")) {
+	const auto &err = error.type();
+	if (err == u"PHONE_NUMBER_FLOOD"_q) {
+		Ui::show(Ui::MakeInformBox(tr::lng_error_phone_flood()));
+	} else if (err == u"PHONE_NUMBER_INVALID"_q
+		|| err == u"PHONE_NUMBER_BANNED"_q
+		|| err == u"PHONE_CODE_EXPIRED"_q
+		|| err == u"PHONE_CODE_EMPTY"_q
+		|| err == u"PHONE_CODE_INVALID"_q
+		|| err == u"PHONE_NUMBER_OCCUPIED"_q) {
 		goBack();
-		return true;
 	} else if (err == "FIRSTNAME_INVALID") {
 		showError(tr::lng_bad_name());
 		_first->setFocus();
-		return true;
 	} else if (err == "LASTNAME_INVALID") {
 		showError(tr::lng_bad_name());
 		_last->setFocus();
-		return true;
+	} else if (!MTP::IgnoreError(error)) {
+		showError(rpl::single(err));
+		if (_invertOrder) {
+			_last->setFocus();
+		} else {
+			_first->setFocus();
+		}
 	}
-	if (Logs::DebugEnabled()) { // internal server error
-		showError(rpl::single(err + ": " + error.description()));
-	} else {
-		showError(rpl::single(Lang::Hard::ServerError()));
-	}
-	if (_invertOrder) {
-		_last->setFocus();
-	} else {
-		_first->setFocus();
-	}
-	return false;
 }
 
 void SignupWidget::submit() {
@@ -186,14 +185,17 @@ void SignupWidget::submit() {
 
 		_firstName = _first->getLastText().trimmed();
 		_lastName = _last->getLastText().trimmed();
-		_sentRequest = MTP::send(
-			MTPauth_SignUp(
-				MTP_string(getData()->phone),
-				MTP_bytes(getData()->phoneHash),
-				MTP_string(_firstName),
-				MTP_string(_lastName)),
-			rpcDone(&SignupWidget::nameSubmitDone),
-			rpcFail(&SignupWidget::nameSubmitFail));
+		_sentRequest = api().request(MTPauth_SignUp(
+			MTP_flags(0),
+			MTP_string(getData()->phone),
+			MTP_bytes(getData()->phoneHash),
+			MTP_string(_firstName),
+			MTP_string(_lastName)
+		)).done([=](const MTPauth_Authorization &result) {
+			nameSubmitDone(result);
+		}).fail([=](const MTP::Error &error) {
+			nameSubmitFail(error);
+		}).handleFloodErrors().send();
 	};
 	if (_termsAccepted
 		|| getData()->termsLock.text.text.isEmpty()

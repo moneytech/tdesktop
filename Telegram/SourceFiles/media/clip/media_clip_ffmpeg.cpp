@@ -7,9 +7,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "media/clip/media_clip_ffmpeg.h"
 
-#include "media/audio/media_audio.h"
-#include "media/audio/media_child_ffmpeg_loader.h"
-#include "storage/file_download.h"
+#include "core/file_location.h"
+#include "media/media_common.h"
+#include "logs.h"
 
 namespace Media {
 namespace Clip {
@@ -20,51 +20,27 @@ constexpr auto kSkipInvalidDataPackets = 10;
 constexpr auto kMaxInlineArea = 1280 * 720;
 constexpr auto kMaxSendingArea = 3840 * 2160; // usual 4K
 
-// See https://github.com/telegramdesktop/tdesktop/issues/7225
-constexpr auto kAlignImageBy = 64;
-
-void alignedImageBufferCleanupHandler(void *data) {
-	auto buffer = static_cast<uchar*>(data);
-	delete[] buffer;
-}
-
-// Create a QImage of desired size where all the data is aligned to 16 bytes.
-QImage createAlignedImage(QSize size) {
-	auto width = size.width();
-	auto height = size.height();
-	auto widthalign = kAlignImageBy / 4;
-	auto neededwidth = width + ((width % widthalign) ? (widthalign - (width % widthalign)) : 0);
-	auto bytesperline = neededwidth * 4;
-	auto buffer = new uchar[bytesperline * height + kAlignImageBy];
-	auto cleanupdata = static_cast<void*>(buffer);
-	auto bufferval = reinterpret_cast<uintptr_t>(buffer);
-	auto alignedbuffer = buffer + ((bufferval % kAlignImageBy) ? (kAlignImageBy - (bufferval % kAlignImageBy)) : 0);
-	return QImage(alignedbuffer, width, height, bytesperline, QImage::Format_ARGB32_Premultiplied, alignedImageBufferCleanupHandler, cleanupdata);
-}
-
-bool isAlignedImage(const QImage &image) {
-	return !(reinterpret_cast<uintptr_t>(image.constBits()) % kAlignImageBy) && !(image.bytesPerLine() % kAlignImageBy);
+[[nodiscard]] auto MaxAreaForMode(ReaderImplementation::Mode mode) {
+	return (mode == ReaderImplementation::Mode::Inspecting)
+		? kMaxSendingArea
+		: kMaxInlineArea;
 }
 
 } // namespace
 
 FFMpegReaderImplementation::FFMpegReaderImplementation(
-	FileLocation *location,
-	QByteArray *data,
-	const AudioMsgId &audio)
+	Core::FileLocation *location,
+	QByteArray *data)
 : ReaderImplementation(location, data)
-, _frame(FFmpeg::MakeFramePointer())
-, _audioMsgId(audio) {
+, _frame(FFmpeg::MakeFramePointer()) {
 }
 
 ReaderImplementation::ReadResult FFMpegReaderImplementation::readNextFrame() {
 	do {
 		int res = avcodec_receive_frame(_codecContext, _frame.get());
 		if (res >= 0) {
-			const auto limit = (_mode == Mode::Inspecting)
-				? kMaxSendingArea
-				: kMaxInlineArea;
-			if (_frame->width * _frame->height > limit) {
+			const auto limit = MaxAreaForMode(_mode);
+			if (!::Media::ValidFrameSize(_frame->width, _frame->height, limit)) {
 				return ReadResult::Error;
 			}
 			processReadFrame();
@@ -73,9 +49,6 @@ ReaderImplementation::ReadResult FFMpegReaderImplementation::readNextFrame() {
 
 		if (res == AVERROR_EOF) {
 			_packetQueue.clear();
-			if (_mode == Mode::Normal) {
-				return ReadResult::EndOfFile;
-			}
 			if (!_hadFrame) {
 				LOG(("Gif Error: Got EOF before a single frame was read!"));
 				return ReadResult::Error;
@@ -97,6 +70,7 @@ ReaderImplementation::ReadResult FFMpegReaderImplementation::readNextFrame() {
 			_frameMs = 0;
 			_lastReadVideoMs = _lastReadAudioMs = 0;
 			_skippedInvalidDataPackets = 0;
+			_frameIndex = -1;
 
 			continue;
 		} else if (res != AVERROR(EAGAIN)) {
@@ -149,7 +123,7 @@ ReaderImplementation::ReadResult FFMpegReaderImplementation::readNextFrame() {
 }
 
 void FFMpegReaderImplementation::processReadFrame() {
-	int64 duration = _frame->pkt_duration;
+	int64 duration = _frame->duration;
 	int64 framePts = _frame->pts;
 	crl::time frameMs = (framePts * 1000LL * _fmtContext->streams[_streamId]->time_base.num) / _fmtContext->streams[_streamId]->time_base.den;
 	_currentFrameDelay = _nextFrameDelay;
@@ -168,47 +142,22 @@ void FFMpegReaderImplementation::processReadFrame() {
 
 	_hadFrame = _frameRead = true;
 	_frameTime += _currentFrameDelay;
+	++_frameIndex;
 }
 
 ReaderImplementation::ReadResult FFMpegReaderImplementation::readFramesTill(crl::time frameMs, crl::time systemMs) {
-	if (_audioStreamId < 0) { // just keep up
-		if (_frameRead && _frameTime > frameMs) {
-			return ReadResult::Success;
-		}
-		auto readResult = readNextFrame();
-		if (readResult != ReadResult::Success || _frameTime > frameMs) {
-			return readResult;
-		}
-		readResult = readNextFrame();
-		if (_frameTime <= frameMs) {
-			_frameTime = frameMs + 5; // keep up
-		}
+	if (_frameRead && _frameTime > frameMs) {
+		return ReadResult::Success;
+	}
+	auto readResult = readNextFrame();
+	if (readResult != ReadResult::Success || _frameTime > frameMs) {
 		return readResult;
 	}
-
-	// sync by audio stream
-	auto correctMs = (frameMs >= 0)
-		? Player::mixer()->getExternalCorrectedTime(
-			_audioMsgId,
-			frameMs,
-			systemMs)
-		: frameMs;
-	if (!_frameRead) {
-		auto readResult = readNextFrame();
-		if (readResult != ReadResult::Success) {
-			return readResult;
-		}
+	readResult = readNextFrame();
+	if (_frameTime <= frameMs) {
+		_frameTime = frameMs + 5; // keep up
 	}
-	while (_frameTime <= correctMs) {
-		auto readResult = readNextFrame();
-		if (readResult != ReadResult::Success) {
-			return readResult;
-		}
-	}
-	if (frameMs >= 0) {
-		_frameTimeCorrection = frameMs - correctMs;
-	}
-	return ReadResult::Success;
+	return readResult;
 }
 
 crl::time FFMpegReaderImplementation::frameRealTime() const {
@@ -216,18 +165,31 @@ crl::time FFMpegReaderImplementation::frameRealTime() const {
 }
 
 crl::time FFMpegReaderImplementation::framePresentationTime() const {
-	return qMax(_frameTime + _frameTimeCorrection, crl::time(0));
+	return std::max(_frameTime + _frameTimeCorrection, crl::time(0));
 }
 
 crl::time FFMpegReaderImplementation::durationMs() const {
-	if (_fmtContext->streams[_streamId]->duration == AV_NOPTS_VALUE) return 0;
-	return (_fmtContext->streams[_streamId]->duration * 1000LL * _fmtContext->streams[_streamId]->time_base.num) / _fmtContext->streams[_streamId]->time_base.den;
+	const auto rebase = [](int64_t duration, const AVRational &base) {
+		return (duration * 1000LL * base.num) / base.den;
+	};
+	const auto stream = _fmtContext->streams[_streamId];
+	if (stream->duration != AV_NOPTS_VALUE) {
+		return rebase(stream->duration, stream->time_base);
+	} else if (_fmtContext->duration != AV_NOPTS_VALUE) {
+		return rebase(_fmtContext->duration, AVRational{ 1, AV_TIME_BASE });
+	}
+	return 0;
 }
 
-bool FFMpegReaderImplementation::renderFrame(QImage &to, bool &hasAlpha, const QSize &size) {
+bool FFMpegReaderImplementation::renderFrame(
+		QImage &to,
+		bool &hasAlpha,
+		int &index,
+		const QSize &size) {
 	Expects(_frameRead);
-	_frameRead = false;
 
+	_frameRead = false;
+	index = _frameIndex;
 	if (!_width || !_height) {
 		_width = _frame->width;
 		_height = _frame->height;
@@ -240,29 +202,47 @@ bool FFMpegReaderImplementation::renderFrame(QImage &to, bool &hasAlpha, const Q
 	if (!size.isEmpty() && rotationSwapWidthHeight()) {
 		toSize.transpose();
 	}
-	if (to.isNull() || to.size() != toSize || !to.isDetached() || !isAlignedImage(to)) {
-		to = createAlignedImage(toSize);
+	if (!FFmpeg::GoodStorageForFrame(to, toSize)) {
+		to = FFmpeg::CreateFrameStorage(toSize);
+		if (to.isNull()) {
+			LOG(("Gif Error: Bad storage size %1").arg(logData()));
+			return false;
+		}
 	}
-	hasAlpha = (_frame->format == AV_PIX_FMT_BGRA || (_frame->format == -1 && _codecContext->pix_fmt == AV_PIX_FMT_BGRA));
-	if (_frame->width == toSize.width() && _frame->height == toSize.height() && hasAlpha) {
-		int32 sbpl = _frame->linesize[0], dbpl = to.bytesPerLine(), bpl = qMin(sbpl, dbpl);
+	const auto format = (_frame->format == AV_PIX_FMT_NONE)
+		? _codecContext->pix_fmt
+		: _frame->format;
+	const auto bgra = (format == AV_PIX_FMT_BGRA);
+	hasAlpha = bgra || (format == AV_PIX_FMT_YUVA420P);
+	if (bgra
+		&& _frame->width == toSize.width()
+		&& _frame->height == toSize.height()
+		&& _frame->linesize[0] > 0) {
+		int32 sbpl
+			= _frame->linesize[0], dbpl
+			= to.bytesPerLine(), bpl
+			= std::min(
+			sbpl,
+			dbpl);
 		uchar *s = _frame->data[0], *d = to.bits();
 		for (int32 i = 0, l = _frame->height; i < l; ++i) {
 			memcpy(d + i * dbpl, s + i * sbpl, bpl);
 		}
 	} else {
-		if ((_swsSize != toSize) || (_frame->format != -1 && _frame->format != _codecContext->pix_fmt) || !_swsContext) {
-			_swsSize = toSize;
-			_swsContext = sws_getCachedContext(_swsContext, _frame->width, _frame->height, AVPixelFormat(_frame->format), toSize.width(), toSize.height(), AV_PIX_FMT_BGRA, 0, nullptr, nullptr, nullptr);
+		_swsContext = FFmpeg::MakeSwscalePointer(
+			QSize(_frame->width, _frame->height),
+			format,
+			toSize,
+			AV_PIX_FMT_BGRA,
+			&_swsContext);
+		if (!_swsContext) {
+			LOG(("Gif Error: Unable to create sws context %1").arg(logData()));
+			return false;
 		}
 		// AV_NUM_DATA_POINTERS defined in AVFrame struct
 		uint8_t *toData[AV_NUM_DATA_POINTERS] = { to.bits(), nullptr };
-		int toLinesize[AV_NUM_DATA_POINTERS] = { to.bytesPerLine(), 0 };
-		int res;
-		if ((res = sws_scale(_swsContext, _frame->data, _frame->linesize, 0, _frame->height, toData, toLinesize)) != _swsSize.height()) {
-			LOG(("Gif Error: Unable to sws_scale to good size %1, height %2, should be %3").arg(logData()).arg(res).arg(_swsSize.height()));
-			return false;
-		}
+		int toLinesize[AV_NUM_DATA_POINTERS] = { int(to.bytesPerLine()), 0 };
+		sws_scale(_swsContext.get(), _frame->data, _frame->linesize, 0, _frame->height, toData, toLinesize);
 	}
 	if (hasAlpha) {
 		FFmpeg::PremultiplyInplace(to);
@@ -275,17 +255,6 @@ bool FFMpegReaderImplementation::renderFrame(QImage &to, bool &hasAlpha, const Q
 		case Rotation::Degrees270: rotationTransform.rotate(270); break;
 		}
 		to = to.transformed(rotationTransform);
-	}
-
-	// Read some future packets for audio stream.
-	if (_audioStreamId >= 0) {
-		while (_frameMs + 5000 > _lastReadAudioMs
-			&& _frameMs + 15000 > _lastReadVideoMs) {
-			auto packetResult = readAndProcessPacket();
-			if (packetResult != PacketResult::Ok) {
-				break;
-			}
-		}
 	}
 
 	FFmpeg::ClearFrameMemory(_frame.get());
@@ -310,14 +279,15 @@ bool FFMpegReaderImplementation::start(Mode mode, crl::time &positionMs) {
 		LOG(("Gif Error: Unable to open device %1").arg(logData()));
 		return false;
 	}
-	_ioBuffer = (uchar*)av_malloc(AVBlockSize);
-	_ioContext = avio_alloc_context(_ioBuffer, AVBlockSize, 0, static_cast<void*>(this), &FFMpegReaderImplementation::_read, nullptr, &FFMpegReaderImplementation::_seek);
+	_ioBuffer = (uchar*)av_malloc(FFmpeg::kAVBlockSize);
+	_ioContext = avio_alloc_context(_ioBuffer, FFmpeg::kAVBlockSize, 0, static_cast<void*>(this), &FFMpegReaderImplementation::Read, nullptr, &FFMpegReaderImplementation::Seek);
 	_fmtContext = avformat_alloc_context();
 	if (!_fmtContext) {
 		LOG(("Gif Error: Unable to avformat_alloc_context %1").arg(logData()));
 		return false;
 	}
 	_fmtContext->pb = _ioContext;
+	FFmpeg::RestrictToCustomIO(_fmtContext);
 
 	int res = 0;
 	char err[AV_ERROR_MAX_STRING_SIZE] = { 0 };
@@ -340,15 +310,8 @@ bool FFMpegReaderImplementation::start(Mode mode, crl::time &positionMs) {
 		return false;
 	}
 
-	auto rotateTag = av_dict_get(_fmtContext->streams[_streamId]->metadata, "rotate", nullptr, 0);
-	if (rotateTag && *rotateTag->value) {
-		auto stringRotateTag = QString::fromUtf8(rotateTag->value);
-		auto toIntSucceeded = false;
-		auto rotateDegrees = stringRotateTag.toInt(&toIntSucceeded);
-		if (toIntSucceeded) {
-			_rotation = rotationFromDegrees(rotateDegrees);
-		}
-	}
+	_rotation = rotationFromDegrees(FFmpeg::ReadRotationFromMetadata(
+		_fmtContext->streams[_streamId]));
 
 	_codecContext = avcodec_alloc_context3(nullptr);
 	if (!_codecContext) {
@@ -359,54 +322,26 @@ bool FFMpegReaderImplementation::start(Mode mode, crl::time &positionMs) {
 		LOG(("Gif Error: Unable to avcodec_parameters_to_context %1, error %2, %3").arg(logData()).arg(res).arg(av_make_error_string(err, sizeof(err), res)));
 		return false;
 	}
-	av_codec_set_pkt_timebase(_codecContext, _fmtContext->streams[_streamId]->time_base);
+	_codecContext->pkt_timebase = _fmtContext->streams[_streamId]->time_base;
 	av_opt_set_int(_codecContext, "refcounted_frames", 1, 0);
 
-	const auto codec = avcodec_find_decoder(_codecContext->codec_id);
-
-	_audioStreamId = av_find_best_stream(_fmtContext, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-	if (_mode == Mode::Inspecting) {
-		_hasAudioStream = (_audioStreamId >= 0);
-		_audioStreamId = -1;
-	} else if (_mode == Mode::Silent || !_audioMsgId.externalPlayId()) {
-		_audioStreamId = -1;
+	const auto codec = FFmpeg::FindDecoder(_codecContext);
+	if (!codec) {
+		LOG(("Gif Error: Unable to avcodec_find_decoder %1").arg(logData()));
+		return false;
 	}
+	if (_mode == Mode::Inspecting) {
+		const auto audioStreamId = av_find_best_stream(_fmtContext, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+		_hasAudioStream = (audioStreamId >= 0);
+	}
+	_codecContext->max_pixels = FFmpeg::MaxPixelsForAreaLimit(
+		MaxAreaForMode(_mode));
 
 	if ((res = avcodec_open2(_codecContext, codec, nullptr)) < 0) {
 		LOG(("Gif Error: Unable to avcodec_open2 %1, error %2, %3").arg(logData()).arg(res).arg(av_make_error_string(err, sizeof(err), res)));
 		return false;
 	}
 
-	std::unique_ptr<ExternalSoundData> soundData;
-	if (_audioStreamId >= 0) {
-		auto audioContext = avcodec_alloc_context3(nullptr);
-		if (!audioContext) {
-			LOG(("Audio Error: Unable to avcodec_alloc_context3 %1").arg(logData()));
-			return false;
-		}
-		if ((res = avcodec_parameters_to_context(audioContext, _fmtContext->streams[_audioStreamId]->codecpar)) < 0) {
-			LOG(("Audio Error: Unable to avcodec_parameters_to_context %1, error %2, %3").arg(logData()).arg(res).arg(av_make_error_string(err, sizeof(err), res)));
-			return false;
-		}
-		av_codec_set_pkt_timebase(audioContext, _fmtContext->streams[_audioStreamId]->time_base);
-		av_opt_set_int(audioContext, "refcounted_frames", 1, 0);
-
-		const auto audioCodec = avcodec_find_decoder(audioContext->codec_id);
-		if ((res = avcodec_open2(audioContext, audioCodec, 0)) < 0) {
-			avcodec_free_context(&audioContext);
-			LOG(("Gif Error: Unable to avcodec_open2 %1, error %2, %3").arg(logData()).arg(res).arg(av_make_error_string(err, sizeof(err), res)));
-			_audioStreamId = -1;
-		} else {
-			soundData = std::make_unique<ExternalSoundData>();
-			soundData->codec = FFmpeg::CodecPointer(audioContext);
-			soundData->frequency = _fmtContext->streams[_audioStreamId]->codecpar->sample_rate;
-			if (_fmtContext->streams[_audioStreamId]->duration == AV_NOPTS_VALUE) {
-				soundData->length = (_fmtContext->duration * soundData->frequency) / AV_TIME_BASE;
-			} else {
-				soundData->length = (_fmtContext->streams[_audioStreamId]->duration * soundData->frequency * _fmtContext->streams[_audioStreamId]->time_base.num) / _fmtContext->streams[_audioStreamId]->time_base.den;
-			}
-		}
-	}
 	if (positionMs > 0) {
 		const auto timeBase = _fmtContext->streams[_streamId]->time_base;
 		const auto timeStamp = (positionMs * timeBase.den)
@@ -422,10 +357,6 @@ bool FFMpegReaderImplementation::start(Mode mode, crl::time &positionMs) {
 	auto readResult = readPacket(packet);
 	if (readResult == PacketResult::Ok && positionMs > 0) {
 		positionMs = countPacketMs(packet);
-	}
-
-	if (hasAudio()) {
-		Player::mixer()->play(_audioMsgId, std::move(soundData), positionMs);
 	}
 
 	if (readResult == PacketResult::Ok) {
@@ -462,11 +393,15 @@ bool FFMpegReaderImplementation::inspectAt(crl::time &positionMs) {
 	return true;
 }
 
+bool FFMpegReaderImplementation::hasAudio() const {
+	return _hasAudioStream;
+}
+
 bool FFMpegReaderImplementation::isGifv() const {
 	if (_hasAudioStream) {
 		return false;
 	}
-	if (dataSize() > Storage::kMaxAnimationInMemory) {
+	if (dataSize() > kMaxInMemory) {
 		return false;
 	}
 	if (_codecContext->codec_id != AV_CODEC_ID_H264) {
@@ -475,13 +410,25 @@ bool FFMpegReaderImplementation::isGifv() const {
 	return true;
 }
 
+bool FFMpegReaderImplementation::isWebmSticker() const {
+	if (_hasAudioStream) {
+		return false;
+	}
+	if (dataSize() > kMaxInMemory) {
+		return false;
+	}
+	if (_codecContext->codec_id != AV_CODEC_ID_VP9) {
+		return false;
+	}
+	return true;
+}
+
 QString FFMpegReaderImplementation::logData() const {
-	return qsl("for file '%1', data size '%2'").arg(_location ? _location->name() : QString()).arg(_data->size());
+	return u"for file '%1', data size '%2'"_q.arg(_location ? _location->name() : QString()).arg(_data->size());
 }
 
 FFMpegReaderImplementation::~FFMpegReaderImplementation() {
 	if (_codecContext) avcodec_free_context(&_codecContext);
-	if (_swsContext) sws_freeContext(_swsContext);
 	if (_opened) {
 		avformat_close_input(&_fmtContext);
 	}
@@ -498,14 +445,6 @@ FFMpegReaderImplementation::PacketResult FFMpegReaderImplementation::readPacket(
 	int res = 0;
 	if ((res = av_read_frame(_fmtContext, &packet.fields())) < 0) {
 		if (res == AVERROR_EOF) {
-			if (_audioStreamId >= 0) {
-				// queue terminating packet to audio player
-				auto empty = FFmpeg::Packet();
-				Player::mixer()->feedFromExternal({
-					_audioMsgId,
-					gsl::make_span(&empty, 1)
-				});
-			}
 			return PacketResult::EndOfFile;
 		}
 		char err[AV_ERROR_MAX_STRING_SIZE] = { 0 };
@@ -518,21 +457,9 @@ FFMpegReaderImplementation::PacketResult FFMpegReaderImplementation::readPacket(
 void FFMpegReaderImplementation::processPacket(FFmpeg::Packet &&packet) {
 	const auto &native = packet.fields();
 	auto videoPacket = (native.stream_index == _streamId);
-	auto audioPacket = (_audioStreamId >= 0 && native.stream_index == _audioStreamId);
-	if (audioPacket || videoPacket) {
-		if (videoPacket) {
-			_lastReadVideoMs = countPacketMs(packet);
-
-			_packetQueue.push_back(std::move(packet));
-		} else if (audioPacket) {
-			_lastReadAudioMs = countPacketMs(packet);
-
-			// queue packet to audio player
-			Player::mixer()->feedFromExternal({
-				_audioMsgId,
-				gsl::make_span(&packet, 1)
-			});
-		}
+	if (videoPacket) {
+		_lastReadVideoMs = countPacketMs(packet);
+		_packetQueue.push_back(std::move(packet));
 	}
 }
 
@@ -553,12 +480,17 @@ FFMpegReaderImplementation::PacketResult FFMpegReaderImplementation::readAndProc
 	return result;
 }
 
-int FFMpegReaderImplementation::_read(void *opaque, uint8_t *buf, int buf_size) {
+int FFMpegReaderImplementation::Read(void *opaque, uint8_t *buf, int buf_size) {
 	FFMpegReaderImplementation *l = reinterpret_cast<FFMpegReaderImplementation*>(opaque);
-	return int(l->_device->read((char*)(buf), buf_size));
+	int ret = l->_device->read((char*)(buf), buf_size);
+	switch (ret) {
+	case -1: return AVERROR_EXTERNAL;
+	case 0: return AVERROR_EOF;
+	default: return ret;
+	}
 }
 
-int64_t FFMpegReaderImplementation::_seek(void *opaque, int64_t offset, int whence) {
+int64_t FFMpegReaderImplementation::Seek(void *opaque, int64_t offset, int whence) {
 	FFMpegReaderImplementation *l = reinterpret_cast<FFMpegReaderImplementation*>(opaque);
 
 	switch (whence) {

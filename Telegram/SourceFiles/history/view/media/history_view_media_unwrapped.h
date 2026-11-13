@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/media/history_view_media.h"
 #include "base/weak_ptr.h"
 #include "base/timer.h"
+#include "ui/text/text.h"
 
 struct HistoryMessageVia;
 struct HistoryMessageReply;
@@ -17,13 +18,20 @@ struct HistoryMessageForwarded;
 
 namespace HistoryView {
 
+class Reply;
+struct TopicButton;
+
 class UnwrappedMedia final : public Media {
 public:
 	class Content {
 	public:
-		[[nodiscard]] virtual QSize size() = 0;
+		[[nodiscard]] virtual QSize countOptimalSize() = 0;
+		[[nodiscard]] virtual QSize countCurrentSize(int newWidth);
 
-		virtual void draw(Painter &p, const QRect &r, bool selected) = 0;
+		virtual void draw(
+			Painter &p,
+			const PaintContext &context,
+			const QRect &r) = 0;
 
 		[[nodiscard]] virtual ClickHandlerPtr link() {
 			return nullptr;
@@ -32,38 +40,45 @@ public:
 		[[nodiscard]] virtual DocumentData *document() {
 			return nullptr;
 		}
-		virtual void clearStickerLoopPlayed() {
+		virtual void stickerClearLoopPlayed() {
+		}
+		virtual std::unique_ptr<StickerPlayer> stickerTakePlayer(
+			not_null<DocumentData*> data,
+			const Lottie::ColorReplacements *replacements);
+
+		virtual bool hasHeavyPart() const {
+			return false;
 		}
 		virtual void unloadHeavyPart() {
 		}
 		virtual void refreshLink() {
 		}
-		[[nodiscard]] virtual bool hidesForwardedInfo() {
-			return true;
-		}
 		[[nodiscard]] virtual bool alwaysShowOutTimestamp() {
 			return false;
 		}
-		virtual ~Content() = 0;
+		virtual bool hasTextForCopy() const {
+			return false;
+		}
+		virtual bool updateItemData() {
+			return false;
+		}
+		virtual ~Content() = default;
 	};
 
 	UnwrappedMedia(
 		not_null<Element*> parent,
 		std::unique_ptr<Content> content);
 
-	void draw(Painter &p, const QRect &r, TextSelection selection, crl::time ms) const override;
+	void draw(Painter &p, const PaintContext &context) const override;
 	PointState pointState(QPoint point) const override;
 	TextState textState(QPoint point, StateRequest request) const override;
+
+	bool hasTextForCopy() const override;
 
 	bool toggleSelectionByHandlerClick(const ClickHandlerPtr &p) const override {
 		return true;
 	}
-	bool dragItem() const override {
-		return true;
-	}
-	bool dragItemByHandler(const ClickHandlerPtr &p) const override {
-		return true;
-	}
+	bool dragItemByHandler(const ClickHandlerPtr &p) const override;
 
 	DocumentData *getDocument() const override {
 		return _content->document();
@@ -72,23 +87,43 @@ public:
 	bool needsBubble() const override {
 		return false;
 	}
+	bool unwrapped() const override {
+		return true;
+	}
+	bool drawsOwnEphemeralBadge() const override {
+		return true;
+	}
 	bool customInfoLayout() const override {
 		return true;
 	}
-	bool hidesForwardedInfo() const override {
-		return _content->hidesForwardedInfo();
-	}
-	void clearStickerLoopPlayed() override {
-		_content->clearStickerLoopPlayed();
+	QRect contentRectForReactions() const override;
+	std::optional<int> reactionButtonCenterOverride() const override;
+	QPoint resolveCustomInfoRightBottom() const override;
+
+	bool updateItemData() override {
+		return _content->updateItemData();
 	}
 
+	void stickerClearLoopPlayed() override {
+		_content->stickerClearLoopPlayed();
+	}
+	std::unique_ptr<StickerPlayer> stickerTakePlayer(
+		not_null<DocumentData*> data,
+		const Lottie::ColorReplacements *replacements) override;
+
+	bool hasHeavyPart() const override {
+		return _content->hasHeavyPart();
+	}
 	void unloadHeavyPart() override {
 		_content->unloadHeavyPart();
 	}
 
 private:
 	struct SurroundingInfo {
+		QSize topicSize;
+		QSize ephemeralSize;
 		int height = 0;
+		int panelHeight = 0;
 		int forwardedHeight = 0;
 		bool forwardedBreakEverywhere = false;
 
@@ -96,38 +131,52 @@ private:
 			return (height > 0);
 		}
 	};
+	void refreshEphemeralText();
 	[[nodiscard]] SurroundingInfo surroundingInfo(
+		const TopicButton *topic,
+		const Reply *reply,
 		const HistoryMessageVia *via,
-		const HistoryMessageReply *reply,
 		const HistoryMessageForwarded *forwarded,
 		int outerw) const;
 	void drawSurrounding(
 		Painter &p,
 		const QRect &inner,
-		bool selected,
+		const PaintContext &context,
+		const TopicButton *topic,
+		const Reply *reply,
 		const HistoryMessageVia *via,
-		const HistoryMessageReply *reply,
 		const HistoryMessageForwarded *forwarded) const;
 
 	QSize countOptimalSize() override;
 	QSize countCurrentSize(int newWidth) override;
 
 	bool needInfoDisplay() const;
+	int bottomInfoWidth() const;
+	int bottomInfoHeight() const;
 	int additionalWidth(
+		const TopicButton *topic,
+		const Reply *reply,
 		const HistoryMessageVia *via,
-		const HistoryMessageReply *reply,
 		const HistoryMessageForwarded *forwarded) const;
 
-	inline int calculateFullRight(const QRect &inner) const;
-	inline QPoint calculateFastActionPosition(
-		int fullBottom,
+	int calculateFullRight(const QRect &inner) const;
+	QPoint calculateFastActionPosition(
+		QRect inner,
+		bool rightAligned,
+		int replyLeft,
 		int replyRight,
-		int fullRight) const;
+		int replyHeight,
+		int fullBottom,
+		int fullRight,
+		QSize size) const;
 
 	const HistoryMessageForwarded *getDisplayedForwardedInfo() const;
 
 	std::unique_ptr<Content> _content;
+	Ui::Text::String _ephemeralText = { 1 };
 	QSize _contentSize;
+	int _topAdded = 0;
+	bool _additionalOnTop = false;
 
 };
 

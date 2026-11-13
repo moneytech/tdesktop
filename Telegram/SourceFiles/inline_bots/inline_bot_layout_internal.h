@@ -18,15 +18,21 @@ namespace Lottie {
 class SinglePlayer;
 } // namespace Lottie
 
+namespace Data {
+class PhotoMedia;
+class DocumentMedia;
+} // namespace Data
+
 namespace InlineBots {
 namespace Layout {
 namespace internal {
 
 class FileBase : public ItemBase {
 public:
-	FileBase(not_null<Context*> context, not_null<Result*> result);
-	// for saved gif layouts
-	FileBase(not_null<Context*> context, DocumentData *doc);
+	FileBase(not_null<Context*> context, std::shared_ptr<Result> result);
+
+	// For saved gif layouts.
+	FileBase(not_null<Context*> context, not_null<DocumentData*> document);
 
 protected:
 	DocumentData *getShownDocument() const;
@@ -34,26 +40,29 @@ protected:
 	int content_width() const;
 	int content_height() const;
 	int content_duration() const;
-	Image *content_thumb() const;
+
 };
 
 class DeleteSavedGifClickHandler : public LeftButtonClickHandler {
 public:
-	DeleteSavedGifClickHandler(DocumentData *data) : _data(data) {
+	DeleteSavedGifClickHandler(not_null<DocumentData*> data) : _data(data) {
 	}
 
 protected:
 	void onClickImpl() const override;
 
 private:
-	DocumentData  *_data;
+	const not_null<DocumentData*> _data;
 
 };
 
-class Gif : public FileBase {
+class Gif final : public FileBase {
 public:
-	Gif(not_null<Context*> context, Result *result);
-	Gif(not_null<Context*> context, DocumentData *doc, bool hasDeleteButton);
+	Gif(not_null<Context*> context, std::shared_ptr<Result> result);
+	Gif(
+		not_null<Context*> context,
+		not_null<DocumentData*> document,
+		bool hasDeleteButton);
 
 	void setPosition(int32 position) override;
 	void initDimensions() override;
@@ -75,23 +84,31 @@ public:
 
 	int resizeGetHeight(int width) override;
 
-	void unloadAnimation() override;
+	void unloadHeavyPart() override;
+
+	QRect innerContentRect() const override;
 
 private:
-	QSize countFrameSize() const;
-
 	enum class StateFlag {
-		Over       = (1 << 0),
+		Over = (1 << 0),
 		DeleteOver = (1 << 1),
 	};
 	using StateFlags = base::flags<StateFlag>;
 	friend inline constexpr auto is_flag_type(StateFlag) { return true; };
-	StateFlags _state;
 
-	Media::Clip::ReaderPointer _gif;
-	ClickHandlerPtr _delete;
-	mutable QPixmap _thumb;
-	mutable bool _thumbGood = false;
+	struct AnimationData {
+		template <typename Callback>
+		AnimationData(Callback &&callback)
+			: radial(std::forward<Callback>(callback)) {
+		}
+		bool over = false;
+		Ui::Animations::Simple _a_over;
+		Ui::RadialAnimation radial;
+	};
+
+	void ensureDataMediaCreated(not_null<DocumentData*> document) const;
+	QSize countFrameSize() const;
+
 	void validateThumbnail(
 		Image *image,
 		QSize size,
@@ -105,15 +122,16 @@ private:
 
 	void clipCallback(Media::Clip::Notification notification);
 
-	struct AnimationData {
-		template <typename Callback>
-		AnimationData(Callback &&callback)
-		: radial(std::forward<Callback>(callback)) {
-		}
-		bool over = false;
-		Ui::Animations::Simple _a_over;
-		Ui::RadialAnimation radial;
-	};
+	StateFlags _state;
+
+	Media::Clip::ReaderPointer _gif;
+	ClickHandlerPtr _delete;
+	mutable QImage _thumb;
+	mutable bool _thumbGood = false;
+	bool _inlineOverCap = false;
+
+	mutable std::shared_ptr<Data::DocumentMedia> _dataMedia;
+
 	mutable std::unique_ptr<AnimationData> _animation;
 	mutable Ui::Animations::Simple _a_deleteOver;
 
@@ -121,9 +139,9 @@ private:
 
 class Photo : public ItemBase {
 public:
-	Photo(not_null<Context*> context, Result *result);
+	Photo(not_null<Context*> context, std::shared_ptr<Result> result);
 	// Not used anywhere currently.
-	//Photo(not_null<Context*> context, PhotoData *photo);
+	//Photo(not_null<Context*> context, not_null<PhotoData*> photo);
 
 	void initDimensions() override;
 
@@ -139,6 +157,8 @@ public:
 		QPoint point,
 		StateRequest request) const override;
 
+	void unloadHeavyPart() override;
+
 private:
 	PhotoData *getShownPhoto() const;
 
@@ -153,14 +173,16 @@ private:
 		QSize frame,
 		bool good) const;
 
+	mutable std::shared_ptr<Data::PhotoMedia> _photoMedia;
+
 };
 
 class Sticker : public FileBase {
 public:
-	Sticker(not_null<Context*> context, Result *result);
+	Sticker(not_null<Context*> context, std::shared_ptr<Result> result);
 	~Sticker();
 	// Not used anywhere currently.
-	//Sticker(not_null<Context*> context, DocumentData *document);
+	//Sticker(not_null<Context*> context, not_null<DocumentData*> document);
 
 	void initDimensions() override;
 
@@ -180,10 +202,18 @@ public:
 	// ClickHandlerHost interface
 	void clickHandlerActiveChanged(const ClickHandlerPtr &p, bool active) override;
 
+	void unloadHeavyPart() override;
+
+	QRect innerContentRect() const override;
+
 private:
-	void setupLottie(not_null<DocumentData*> document) const;
+	void ensureDataMediaCreated(not_null<DocumentData*> document) const;
+	void setupLottie() const;
+	void setupWebm() const;
 	QSize getThumbSize() const;
+	QSize boundingBox() const;
 	void prepareThumbnail() const;
+	void clipCallback(Media::Clip::Notification notification);
 
 	mutable Ui::Animations::Simple _a_over;
 	mutable bool _active = false;
@@ -192,13 +222,15 @@ private:
 	mutable bool _thumbLoaded = false;
 
 	mutable std::unique_ptr<Lottie::SinglePlayer> _lottie;
+	Media::Clip::ReaderPointer _webm;
+	mutable std::shared_ptr<Data::DocumentMedia> _dataMedia;
 	mutable rpl::lifetime _lifetime;
 
 };
 
 class Video : public FileBase {
 public:
-	Video(not_null<Context*> context, Result *result);
+	Video(not_null<Context*> context, std::shared_ptr<Result> result);
 
 	void initDimensions() override;
 
@@ -207,28 +239,19 @@ public:
 		QPoint point,
 		StateRequest request) const override;
 
+	void unloadHeavyPart() override;
+
 private:
 	ClickHandlerPtr _link;
 
 	mutable QPixmap _thumb;
+	mutable std::shared_ptr<Data::DocumentMedia> _documentMedia;
 	Ui::Text::String _title, _description;
 	QString _duration;
 	int _durationWidth = 0;
 
+	[[nodiscard]] bool withThumbnail() const;
 	void prepareThumbnail(QSize size) const;
-
-};
-
-class OpenFileClickHandler : public LeftButtonClickHandler {
-public:
-	OpenFileClickHandler(not_null<Result*> result) : _result(result) {
-	}
-
-protected:
-	void onClickImpl() const override;
-
-private:
-	not_null<Result*> _result;
 
 };
 
@@ -247,7 +270,8 @@ private:
 
 class File : public FileBase {
 public:
-	File(not_null<Context*> context, not_null<Result*> result);
+	File(not_null<Context*> context, std::shared_ptr<Result> result);
+	~File();
 
 	void initDimensions() override;
 
@@ -259,13 +283,14 @@ public:
 	// ClickHandlerHost interface
 	void clickHandlerActiveChanged(const ClickHandlerPtr &p, bool active) override;
 
-	~File();
+	void unloadHeavyPart() override;
 
 private:
 	void thumbAnimationCallback();
 	void radialAnimationCallback(crl::time now) const;
 
 	void ensureAnimation() const;
+	void ensureDataMediaCreated() const;
 	void checkAnimationFinished() const;
 	bool updateStatusText() const;
 
@@ -299,26 +324,31 @@ private:
 	mutable std::unique_ptr<AnimationData> _animation;
 
 	Ui::Text::String _title, _description;
-	ClickHandlerPtr _open, _cancel;
+	ClickHandlerPtr _cancel;
 
 	// >= 0 will contain download / upload string, _statusSize = loaded bytes
 	// < 0 will contain played string, _statusSize = -(seconds + 1) played
-	// 0x7FFFFFF0 will contain status for not yet downloaded file
-	// 0x7FFFFFF1 will contain status for already downloaded file
-	// 0x7FFFFFF2 will contain status for failed to download / upload file
-	mutable int32 _statusSize;
+	// 0xFFFFFFF0LL will contain status for not yet downloaded file
+	// 0xFFFFFFF1LL will contain status for already downloaded file
+	// 0xFFFFFFF2LL will contain status for failed to download / upload file
+	mutable int64 _statusSize = 0;
 	mutable QString _statusText;
 
 	// duration = -1 - no duration, duration = -2 - "GIF" duration
-	void setStatusSize(int32 newSize, int32 fullSize, int32 duration, qint64 realDuration) const;
+	void setStatusSize(
+		int64 newSize,
+		int64 fullSize,
+		TimeId duration,
+		TimeId realDuration) const;
 
 	not_null<DocumentData*> _document;
+	mutable std::shared_ptr<Data::DocumentMedia> _documentMedia;
 
 };
 
 class Contact : public ItemBase {
 public:
-	Contact(not_null<Context*> context, Result *result);
+	Contact(not_null<Context*> context, std::shared_ptr<Result> result);
 
 	void initDimensions() override;
 
@@ -335,9 +365,51 @@ private:
 
 };
 
+class Thumbnail : public ItemBase {
+public:
+	Thumbnail(not_null<Context*> context, std::shared_ptr<Result> result);
+
+	void initDimensions() override;
+
+	bool isFullLine() const override {
+		return false;
+	}
+	bool hasRightSkip() const override {
+		return true;
+	}
+
+	void paint(
+		Painter &p,
+		const QRect &clip,
+		const PaintContext *context) const override;
+	TextState getState(
+		QPoint point,
+		StateRequest request) const override;
+
+	void unloadHeavyPart() override;
+
+private:
+	QSize countFrameSize() const;
+	void prepareThumbnail(QSize size, QSize frame) const;
+	void validateThumbnail(
+		Image *image,
+		QSize size,
+		QSize frame,
+		bool good) const;
+
+	mutable QPixmap _thumb;
+	mutable bool _thumbGood = false;
+	mutable std::shared_ptr<Data::PhotoMedia> _photoMedia;
+	mutable std::shared_ptr<Data::DocumentMedia> _documentMedia;
+
+};
+
 class Article : public ItemBase {
 public:
-	Article(not_null<Context*> context, Result *result, bool withThumb);
+	Article(
+		not_null<Context*> context,
+		std::shared_ptr<Result> result,
+		bool withThumb);
 
 	void initDimensions() override;
 	int resizeGetHeight(int width) override;
@@ -347,6 +419,8 @@ public:
 		QPoint point,
 		StateRequest request) const override;
 
+	void unloadHeavyPart() override;
+
 private:
 	ClickHandlerPtr _url, _link;
 
@@ -354,28 +428,38 @@ private:
 	mutable QPixmap _thumb;
 	Ui::Text::String _title, _description;
 	QString _thumbLetter, _urlText;
-	int32 _urlWidth;
+	int32 _urlWidth = 0;
 
+	[[nodiscard]] int textLeft() const;
+	[[nodiscard]] int countHeight(int textWidth) const;
 	void prepareThumbnail(int width, int height) const;
+	void prepareMediaThumbnail(int width, int height) const;
+
+	mutable std::shared_ptr<Data::PhotoMedia> _photoMedia;
+	mutable std::shared_ptr<Data::DocumentMedia> _documentMedia;
 
 };
 
 class Game : public ItemBase {
 public:
-	Game(not_null<Context*> context, Result *result);
+	Game(not_null<Context*> context, std::shared_ptr<Result> result);
 
 	void setPosition(int32 position) override;
 	void initDimensions() override;
+	int resizeGetHeight(int width) override;
 
 	void paint(Painter &p, const QRect &clip, const PaintContext *context) const override;
 	TextState getState(
 		QPoint point,
 		StateRequest request) const override;
 
-	void unloadAnimation() override;
+	void unloadHeavyPart() override;
 
 private:
+	void ensureDataMediaCreated(not_null<PhotoData*> photo) const;
+	void ensureDataMediaCreated(not_null<DocumentData*> document) const;
 	void countFrameSize();
+	[[nodiscard]] int countHeight(int textWidth) const;
 
 	void prepareThumbnail(QSize size) const;
 	void validateThumbnail(Image *image, QSize size, bool good) const;
@@ -386,8 +470,11 @@ private:
 	void clipCallback(Media::Clip::Notification notification);
 
 	Media::Clip::ReaderPointer _gif;
-	mutable QPixmap _thumb;
+	mutable std::shared_ptr<Data::PhotoMedia> _photoMedia;
+	mutable std::shared_ptr<Data::DocumentMedia> _documentMedia;
+	mutable QImage _thumb;
 	mutable bool _thumbGood = false;
+	bool _inlineOverCap = false;
 	mutable std::unique_ptr<Ui::RadialAnimation> _radial;
 	Ui::Text::String _title, _description;
 

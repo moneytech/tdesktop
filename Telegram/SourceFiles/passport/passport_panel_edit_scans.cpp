@@ -8,23 +8,24 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "passport/passport_panel_edit_scans.h"
 
 #include "passport/passport_panel_controller.h"
-#include "passport/passport_panel_details_row.h"
+#include "passport/ui/passport_details_row.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/box_content_divider.h"
 #include "ui/wrap/fade_wrap.h"
 #include "ui/wrap/slide_wrap.h"
 #include "ui/wrap/vertical_layout.h"
-#include "ui/text/text_utilities.h" // Ui::Text::ToUpper
-#include "ui/text_options.h"
+#include "ui/chat/attach/attach_prepare.h"
+#include "ui/text/text_options.h"
+#include "ui/image/image_prepare.h"
+#include "ui/painter.h"
 #include "core/file_utilities.h"
 #include "lang/lang_keys.h"
 #include "boxes/abstract_box.h"
 #include "storage/storage_media_prepare.h"
 #include "storage/file_upload.h" // For Storage::kUseBigFilesFrom.
-#include "app.h"
-#include "styles/style_layers.h"
 #include "styles/style_passport.h"
+#include "styles/style_widgets.h"
 
 #include <QtCore/QBuffer>
 
@@ -37,11 +38,16 @@ constexpr auto kJpegQuality = 89;
 
 static_assert(kMaxSize <= Storage::kUseBigFilesFrom);
 
-base::variant<ReadScanError, QByteArray> ProcessImage(QByteArray &&bytes) {
-	auto image = App::readImage(base::take(bytes));
+std::variant<ReadScanError, QByteArray> ProcessImage(QByteArray &&bytes) {
+	auto read = Images::Read({
+		.content = base::take(bytes),
+		.forceOpaque = true,
+	});
+
+	auto &image = read.image;
 	if (image.isNull()) {
 		return ReadScanError::CantReadImage;
-	} else if (!Storage::ValidateThumbDimensions(image.width(), image.height())) {
+	} else if (!Ui::ValidateThumbDimensions(image.width(), image.height())) {
 		return ReadScanError::BadImageSize;
 	}
 	if (std::max(image.width(), image.height()) > kMaxDimensions) {
@@ -54,7 +60,7 @@ base::variant<ReadScanError, QByteArray> ProcessImage(QByteArray &&bytes) {
 	auto result = QByteArray();
 	{
 		QBuffer buffer(&result);
-		if (!image.save(&buffer, QByteArray("JPG"), kJpegQuality)) {
+		if (!image.save(&buffer, "JPG", kJpegQuality)) {
 			return ReadScanError::Unknown;
 		}
 		base::take(image);
@@ -85,12 +91,10 @@ public:
 	void setError(bool error);
 
 	rpl::producer<> deleteClicks() const {
-		return _delete->entity()->clicks(
-		) | rpl::map([] { return rpl::empty_value(); });
+		return _delete->entity()->clicks() | rpl::to_empty;
 	}
 	rpl::producer<> restoreClicks() const {
-		return _restore->entity()->clicks(
-		) | rpl::map([] { return rpl::empty_value(); });
+		return _restore->entity()->clicks() | rpl::to_empty;
 	}
 
 protected:
@@ -163,6 +167,12 @@ EditScans::List::List(
 }
 
 EditScans::List::List(
+	not_null<PanelController*> controller)
+: List(controller, std::nullopt)
+{
+}
+
+EditScans::List::List(
 	not_null<PanelController*> controller,
 	std::optional<ScanListData> &&data)
 : controller(controller)
@@ -186,16 +196,15 @@ bool EditScans::List::uploadMoreRequired() const {
 	if (!upload) {
 		return false;
 	}
-	const auto exists = ranges::find_if(
+	const auto exists = ranges::any_of(
 		files,
-		[](const ScanInfo &file) { return !file.deleted; }) != end(files);
+		[](const ScanInfo &file) { return !file.deleted; });
 	if (!exists) {
 		return true;
 	}
-	const auto errorExists = ranges::find_if(
+	const auto errorExists = ranges::any_of(
 		files,
-		[](const ScanInfo &file) { return !file.error.isEmpty(); }
-	) != end(files);
+		[](const ScanInfo &file) { return !file.error.isEmpty(); });
 	return (errorExists || uploadMoreError) && !uploadedSomeMore();
 }
 
@@ -215,7 +224,7 @@ Ui::SlideWrap<ScanButton> *EditScans::List::nonDeletedErrorRow() const {
 rpl::producer<QString> EditScans::List::uploadButtonText() const {
 	return (files.empty()
 		? tr::lng_passport_upload_scans
-		: tr::lng_passport_upload_more)() | Ui::Text::ToUpper();
+		: tr::lng_passport_upload_more)(tr::upper);
 }
 
 void EditScans::List::hideError() {
@@ -281,12 +290,12 @@ void EditScans::List::pushScan(const ScanInfo &info) {
 	const auto scan = rows.back()->entity();
 
 	scan->deleteClicks(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		controller->deleteScan(type, index);
 	}, scan->lifetime());
 
 	scan->restoreClicks(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		controller->restoreScan(type, index);
 	}, scan->lifetime());
 
@@ -318,6 +327,7 @@ ScanButton::ScanButton(
 		this,
 		tr::lng_passport_delete_scan_undo(),
 		_st.restore)) {
+	_restore->entity()->setTextTransform(Ui::RoundButtonTextTransform::ToUpper);
 	_delete->toggle(!deleted, anim::type::instant);
 	_restore->toggle(deleted, anim::type::instant);
 }
@@ -601,19 +611,6 @@ void EditScans::setupSpecialScans(
 		std::map<FileType, ScanInfo> &&files) {
 	const auto requiresBothSides = files.find(FileType::ReverseSide)
 		!= end(files);
-	const auto title = [&](FileType type) {
-		switch (type) {
-		case FileType::FrontSide:
-			return requiresBothSides
-				? tr::lng_passport_front_side_title(tr::now)
-				: tr::lng_passport_main_page_title(tr::now);
-		case FileType::ReverseSide:
-			return tr::lng_passport_reverse_side_title(tr::now);
-		case FileType::Selfie:
-			return tr::lng_passport_selfie_title(tr::now);
-		}
-		Unexpected("Type in special row title.");
-	};
 	const auto uploadText = [=](FileType type, bool hasScan) {
 		switch (type) {
 		case FileType::FrontSide:
@@ -687,9 +684,8 @@ void EditScans::setupSpecialScans(
 		}
 		auto label = scan.rowCreated.value(
 		) | rpl::map([=, type = type](bool created) {
-			return uploadText(type, created)();
-		}) | rpl::flatten_latest(
-		) | Ui::Text::ToUpper();
+			return uploadText(type, created)(tr::upper);
+		}) | rpl::flatten_latest();
 		scan.upload = inner->add(
 			object_ptr<Ui::SettingsButton>(
 				inner,
@@ -716,17 +712,17 @@ void EditScans::setupSpecialScans(
 
 void EditScans::init() {
 	_controller->scanUpdated(
-	) | rpl::start_with_next([=](ScanInfo &&info) {
+	) | rpl::on_next([=](ScanInfo &&info) {
 		updateScan(std::move(info));
 	}, lifetime());
 
 	widthValue(
-	) | rpl::start_with_next([=](int width) {
+	) | rpl::on_next([=](int width) {
 		_content->resizeToWidth(width);
 	}, _content->lifetime());
 
 	_content->heightValue(
-	) | rpl::start_with_next([=](int height) {
+	) | rpl::on_next([=](int height) {
 		resize(width(), height);
 	}, _content->lifetime());
 }
@@ -749,7 +745,7 @@ void EditScans::scanFieldsChanged(bool changed) {
 
 void EditScans::updateErrorLabels() {
 	const auto updateList = [&](FileType type) {
-		auto &list = this->list(type);
+		const auto &list = this->list(type);
 		if (list.uploadMoreError) {
 			list.uploadMoreError->toggle(
 				!list.uploadedSomeMore(),
@@ -825,12 +821,12 @@ void EditScans::createSpecialScanRow(
 	const auto row = scan.row->entity();
 
 	row->deleteClicks(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		_controller->deleteScan(type, std::nullopt);
 	}, row->lifetime());
 
 	row->restoreClicks(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		_controller->restoreScan(type, std::nullopt);
 	}, row->lifetime());
 
@@ -856,63 +852,24 @@ void EditScans::ChooseScan(
 		Fn<void(ReadScanError)> errorCallback) {
 	Expects(parent != nullptr);
 
-	const auto processFiles = std::make_shared<Fn<void(QStringList&&)>>();
-	const auto filter = FileDialog::AllFilesFilter()
-		+ qsl(";;Image files (*")
-		+ cImgExtensions().join(qsl(" *"))
-		+ qsl(")");
+	const auto filter = FileDialog::AllOrImagesFilter();
 	const auto guardedCallback = crl::guard(parent, doneCallback);
 	const auto guardedError = crl::guard(parent, errorCallback);
-	const auto onMainCallback = [=](
-			QByteArray &&content,
-			QStringList &&remainingFiles) {
-		crl::on_main([
-			=,
-			bytes = std::move(content),
-			remainingFiles = std::move(remainingFiles)
-		]() mutable {
-			guardedCallback(std::move(bytes));
-			(*processFiles)(std::move(remainingFiles));
-		});
-	};
 	const auto onMainError = [=](ReadScanError error) {
 		crl::on_main([=] {
 			guardedError(error);
 		});
 	};
-	const auto processImage = [=](
-			QByteArray &&content,
-			QStringList &&remainingFiles) {
-		crl::async([
-			=,
-			bytes = std::move(content),
-			remainingFiles = std::move(remainingFiles)
-		]() mutable {
-			auto result = ProcessImage(std::move(bytes));
-			if (const auto error = base::get_if<ReadScanError>(&result)) {
-				onMainError(*error);
-			} else {
-				auto content = base::get_if<QByteArray>(&result);
-				Assert(content != nullptr);
-				onMainCallback(std::move(*content), std::move(remainingFiles));
-			}
-		});
-	};
-	const auto processOpened = [=](FileDialog::OpenResult &&result) {
-		if (result.paths.size() > 0) {
-			(*processFiles)(std::move(result.paths));
-		} else if (!result.remoteContent.isEmpty()) {
-			processImage(std::move(result.remoteContent), {});
-		}
-	};
-	*processFiles = [=](QStringList &&files) {
+	const auto processFiles = [=](
+			QStringList &&files,
+			const auto &handleImage) -> void {
 		while (!files.isEmpty()) {
 			auto file = files.front();
 			files.removeAt(0);
 
 			auto content = [&] {
 				QFile f(file);
-				if (f.size() > App::kImageSizeLimit) {
+				if (f.size() > Images::kReadBytesLimit) {
 					guardedError(ReadScanError::FileTooLarge);
 					return QByteArray();
 				} else if (!f.open(QIODevice::ReadOnly)) {
@@ -922,9 +879,47 @@ void EditScans::ChooseScan(
 				return f.readAll();
 			}();
 			if (!content.isEmpty()) {
-				processImage(std::move(content), std::move(files));
+				handleImage(
+					std::move(content),
+					std::move(files),
+					handleImage);
 				return;
 			}
+		}
+	};
+	const auto processImage = [=](
+			QByteArray &&content,
+			QStringList &&remainingFiles,
+			const auto &repeatProcessImage) -> void {
+		crl::async([
+			=,
+			bytes = std::move(content),
+			remainingFiles = std::move(remainingFiles)
+		]() mutable {
+			auto result = ProcessImage(std::move(bytes));
+			if (const auto error = std::get_if<ReadScanError>(&result)) {
+				onMainError(*error);
+			} else {
+				auto content = std::get_if<QByteArray>(&result);
+				Assert(content != nullptr);
+				crl::on_main([
+					=,
+					bytes = std::move(*content),
+					remainingFiles = std::move(remainingFiles)
+				]() mutable {
+					guardedCallback(std::move(bytes));
+					processFiles(
+						std::move(remainingFiles),
+						repeatProcessImage);
+				});
+			}
+		});
+	};
+	const auto processOpened = [=](FileDialog::OpenResult &&result) {
+		if (result.paths.size() > 0) {
+			processFiles(std::move(result.paths), processImage);
+		} else if (!result.remoteContent.isEmpty()) {
+			processImage(std::move(result.remoteContent), {}, processImage);
 		}
 	};
 	const auto allowMany = (type == FileType::Scan)
@@ -968,7 +963,7 @@ void EditScans::toggleSpecialScanError(FileType type, bool shown) {
 }
 
 void EditScans::specialScanErrorAnimationCallback(FileType type) {
-	auto &scan = findSpecialScan(type);
+	const auto &scan = findSpecialScan(type);
 	const auto error = scan.errorAnimation.value(
 		scan.errorShown ? 1. : 0.);
 	if (error == 0.) {

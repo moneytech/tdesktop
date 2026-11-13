@@ -9,9 +9,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "core/crash_reports.h"
 #include "core/update_checker.h"
-#include "base/platform/base_platform_info.h"
+#include "base/base_file_utilities.h"
+#include "base/platform/base_platform_file_utilities.h"
 #include "base/platform/mac/base_utilities_mac.h"
-#include "platform/platform_specific.h"
 
 #include <Cocoa/Cocoa.h>
 #include <CoreFoundation/CFURL.h>
@@ -20,14 +20,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 namespace Platform {
 
 Launcher::Launcher(int argc, char *argv[])
-: Core::Launcher(argc, argv, DeviceModelPretty(), SystemVersionPretty()) {
+: Core::Launcher(argc, argv) {
 }
 
 void Launcher::initHook() {
-#ifndef OS_MAC_OLD
-	// macOS Retina display support is working fine, others are not.
-	QCoreApplication::setAttribute(Qt::AA_DisableHighDpiScaling, false);
-#endif // OS_MAC_OLD
+	base::RegisterBundledResources(u"Telegram.rcc"_q);
 }
 
 bool Launcher::launchUpdater(UpdaterLaunch action) {
@@ -54,7 +51,7 @@ bool Launcher::launchUpdater(UpdaterLaunch action) {
 			return false;
 		}
 		path = [path stringByAppendingString:@"/Contents/Frameworks/Updater"];
-		RemoveQuarantine(QFile::decodeName([path fileSystemRepresentation]));
+		base::Platform::RemoveQuarantine(QFile::decodeName([path fileSystemRepresentation]));
 
 		NSMutableArray *args = [[NSMutableArray alloc] initWithObjects:@"-workpath", Q2NSString(cWorkingDir()), @"-procid", nil];
 		[args addObject:[NSString stringWithFormat:@"%d", [[NSProcessInfo processInfo] processIdentifier]]];
@@ -63,11 +60,7 @@ bool Launcher::launchUpdater(UpdaterLaunch action) {
 		if (cLaunchMode() == LaunchModeAutoStart) [args addObject:@"-autostart"];
 		if (Logs::DebugEnabled()) [args addObject:@"-debug"];
 		if (cStartInTray()) [args addObject:@"-startintray"];
-		if (cTestMode()) [args addObject:@"-testmode"];
-#ifndef TDESKTOP_DISABLE_AUTOUPDATE
-		if (Core::UpdaterDisabled()) [args addObject:@"-externalupdater"];
-#endif // !TDESKTOP_DISABLE_AUTOUPDATE
-		if (cDataFile() != qsl("data")) {
+		if (cDataFile() != u"data"_q) {
 			[args addObject:@"-key"];
 			[args addObject:Q2NSString(cDataFile())];
 		}

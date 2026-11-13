@@ -7,7 +7,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "base/observer.h"
+#include <QtCore/QUrl>
+
+namespace Main {
+class Session;
+} // namespace Main
 
 // legacy
 bool filedialogGetSaveFile(
@@ -29,14 +33,21 @@ QString filedialogNextFilename(
 
 namespace File {
 
+[[nodiscard]] bool IsUrlSchemeAllowed(const QString &scheme);
+void ShowUnsupportedUrl();
+
 // Those functions are async wrappers to Platform::File::Unsafe* calls.
 void OpenUrl(const QString &url);
+// Only for a url that has just got our own auto-login token.
+void OpenUrlWithOwnAutoLogin(const QString &url);
 void OpenEmailLink(const QString &email);
-void OpenWith(const QString &filepath, QPoint menuPosition);
+void OpenWith(const QString &filepath, Fn<void()> fallback);
 void Launch(const QString &filepath);
 void ShowInFolder(const QString &filepath);
 
-[[nodiscard]] QString DefaultDownloadPath();
+[[nodiscard]] QString DefaultDownloadPathFolder(
+	not_null<Main::Session*> session);
+[[nodiscard]] QString DefaultDownloadPath(not_null<Main::Session*> session);
 
 namespace internal {
 
@@ -83,8 +94,15 @@ void GetFolder(
 	Fn<void(QString &&result)> callback,
 	Fn<void()> failed = Fn<void()>());
 
-QString AllFilesFilter();
-QString AlbumFilesFilter();
+[[nodiscard]] QString AllFilesFilter();
+[[nodiscard]] QString ImagesFilter();
+[[nodiscard]] QString AllOrImagesFilter();
+[[nodiscard]] QString ImagesOrAllFilter();
+[[nodiscard]] QString PhotoVideoFilesFilter();
+[[nodiscard]] QString PhotoVideoAudioFilesFilter();
+[[nodiscard]] QString AudioFilesFilter();
+[[nodiscard]] QString MusicFilesFilter();
+[[nodiscard]] const QString &Tmp();
 
 namespace internal {
 

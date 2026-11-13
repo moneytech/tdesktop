@@ -8,14 +8,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "ui/abstract_button.h"
+#include "ui/text/text.h"
+
+class QGraphicsOpacityEffect;
 
 namespace Profile {
 
-class BackButton final : public Ui::AbstractButton, private base::Subscriber {
+class BackButton final : public Ui::AbstractButton {
 public:
-	BackButton(QWidget *parent, const QString &text);
+	BackButton(QWidget *parent);
 
 	void setText(const QString &text);
+	void setSubtext(const QString &subtext);
+	void setWidget(not_null<Ui::RpWidget*> widget);
+	void setOpacity(float64 opacity);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -24,10 +30,18 @@ protected:
 	void onStateChanged(State was, StateChangeSource source) override;
 
 private:
-	void updateAdaptiveLayout();
+	void updateCache();
 
-	int _unreadCounterSubscription = 0;
-	QString _text;
+	rpl::lifetime _unreadBadgeLifetime;
+	Ui::Text::String _text;
+	Ui::Text::String _subtext;
+	Ui::RpWidget *_widget = nullptr;
+
+	int _cachedWidth = -1;
+	int _elisionWidth = 0;
+
+	float64 _opacity = 1.0;
+	QGraphicsOpacityEffect *_opacityEffect = nullptr;
 
 };
 

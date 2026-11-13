@@ -8,9 +8,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/dedicated_file_loader.h"
 
 #include "mtproto/facade.h"
-#include "main/main_session.h"
 #include "main/main_account.h" // Account::sessionChanges.
+#include "main/main_session.h" // Session::account.
 #include "core/application.h"
+#include "base/base_file_utilities.h"
 #include "base/call_delayed.h"
 
 namespace MTP {
@@ -35,8 +36,9 @@ std::optional<MTPInputChannel> ExtractChannel(
 }
 
 std::optional<DedicatedLoader::File> ParseFile(
-		const MTPmessages_Messages &result) {
-	const auto message = GetMessagesElement(result);
+		const MTPmessages_Messages &result,
+		int postId) {
+	const auto message = GetMessagesElement(result, postId);
 	if (!message || message->type() != mtpc_message) {
 		LOG(("Update Error: MTP file message not found."));
 		return std::nullopt;
@@ -67,9 +69,9 @@ std::optional<DedicatedLoader::File> ParseFile(
 		LOG(("Update Error: MTP file name not found."));
 		return std::nullopt;
 	}
-	const auto size = fields.vsize().v;
-	if (size <= 0) {
-		LOG(("Update Error: MTP file size is invalid."));
+	const auto size = int64(fields.vsize().v);
+	if (size <= 0 || size > AbstractDedicatedLoader::kMaxFileSize) {
+		LOG(("Update Error: MTP file size is invalid: %1.").arg(size));
 		return std::nullopt;
 	}
 	const auto location = MTP_inputDocumentFileLocation(
@@ -82,39 +84,44 @@ std::optional<DedicatedLoader::File> ParseFile(
 
 } // namespace
 
-WeakInstance::WeakInstance(QPointer<MTP::Instance> instance)
-: _instance(instance) {
+WeakInstance::WeakInstance(base::weak_ptr<Main::Session> session)
+: _session(session)
+, _instance(_session ? &_session->account().mtp() : nullptr) {
 	if (!valid()) {
 		return;
 	}
 
 	connect(_instance, &QObject::destroyed, this, [=] {
 		_instance = nullptr;
+		_session = nullptr;
 		die();
 	});
-	Core::App().activeAccount().sessionChanges(
+	_session->account().sessionChanges(
 	) | rpl::filter([](Main::Session *session) {
 		return !session;
-	}) | rpl::start_with_next([=] {
+	}) | rpl::on_next([=] {
 		die();
 	}, _lifetime);
 }
 
-bool WeakInstance::valid() const {
-	return (_instance != nullptr) && Main::Session::Exists();
+base::weak_ptr<Main::Session> WeakInstance::session() const {
+	return _session;
 }
 
-QPointer<MTP::Instance> WeakInstance::instance() const {
+bool WeakInstance::valid() const {
+	return (_session != nullptr);
+}
+
+Instance *WeakInstance::instance() const {
 	return _instance;
 }
 
 void WeakInstance::die() {
-	const auto instance = _instance.data();
 	for (const auto &[requestId, fail] : base::take(_requests)) {
-		if (instance) {
-			instance->cancel(requestId);
+		if (_instance) {
+			_instance->cancel(requestId);
 		}
-		fail(RPCError::Local(
+		fail(Error::Local(
 			"UNAVAILABLE",
 			"MTP instance is not available."));
 	}
@@ -129,18 +136,18 @@ bool WeakInstance::removeRequest(mtpRequestId requestId) {
 }
 
 void WeakInstance::reportUnavailable(
-		Fn<void(const RPCError &error)> callback) {
+		Fn<void(const Error &error)> callback) {
 	InvokeQueued(this, [=] {
-		callback(RPCError::Local(
+		callback(Error::Local(
 			"UNAVAILABLE",
 			"MTP instance is not available."));
 	});
 }
 
 WeakInstance::~WeakInstance() {
-	if (const auto instance = _instance.data()) {
+	if (_instance) {
 		for (const auto &[requestId, fail] : base::take(_requests)) {
-			instance->cancel(requestId);
+			_instance->cancel(requestId);
 		}
 	}
 }
@@ -150,14 +157,22 @@ AbstractDedicatedLoader::AbstractDedicatedLoader(
 	int chunkSize)
 : _filepath(filepath)
 , _chunkSize(chunkSize) {
+	progress() | rpl::on_next([=](Progress progress) {
+		QMutexLocker lock(&_sizesMutex);
+		_alreadySize = progress.already;
+		_totalSize = progress.size;
+		_preferPercent = progress.percent;
+	}, lifetime());
 }
 
 void AbstractDedicatedLoader::start() {
-	if (!validateOutput()
-		|| (!_output.isOpen() && !_output.open(QIODevice::Append))) {
-		QFile(_filepath).remove();
-		threadSafeFailed();
-		return;
+	if (!_filepath.isEmpty()) {
+		if (!validateOutput()
+			|| (!_output.isOpen() && !_output.open(QIODevice::Append))) {
+			QFile(_filepath).remove();
+			threadSafeFailed();
+			return;
+		}
 	}
 
 	LOG(("Update Info: Starting loading '%1' from %2 offset."
@@ -166,14 +181,18 @@ void AbstractDedicatedLoader::start() {
 	startLoading();
 }
 
-int AbstractDedicatedLoader::alreadySize() const {
+int64 AbstractDedicatedLoader::alreadySize() const {
 	QMutexLocker lock(&_sizesMutex);
 	return _alreadySize;
 }
 
-int AbstractDedicatedLoader::totalSize() const {
+int64 AbstractDedicatedLoader::totalSize() const {
 	QMutexLocker lock(&_sizesMutex);
 	return _totalSize;
+}
+
+bool AbstractDedicatedLoader::preferPercent() const {
+	return _preferPercent;
 }
 
 rpl::producer<QString> AbstractDedicatedLoader::ready() const {
@@ -189,6 +208,9 @@ rpl::producer<> AbstractDedicatedLoader::failed() const {
 }
 
 void AbstractDedicatedLoader::wipeFolder() {
+	if (_filepath.isEmpty()) {
+		return;
+	}
 	QFileInfo info(_filepath);
 	const auto dir = info.dir();
 	const auto all = dir.entryInfoList(QDir::Files);
@@ -218,7 +240,7 @@ bool AbstractDedicatedLoader::validateOutput() {
 	if (fullSize < _chunkSize || fullSize > kMaxFileSize) {
 		return _output.remove();
 	}
-	const auto goodSize = int((fullSize % _chunkSize)
+	const auto goodSize = int64((fullSize % _chunkSize)
 		? (fullSize - (fullSize % _chunkSize))
 		: fullSize);
 	if (_output.resize(goodSize)) {
@@ -246,8 +268,15 @@ void AbstractDedicatedLoader::threadSafeFailed() {
 	});
 }
 
-void AbstractDedicatedLoader::writeChunk(bytes::const_span data, int totalSize) {
-	const auto size = data.size();
+void AbstractDedicatedLoader::writeChunk(bytes::const_span data, int64 totalSize) {
+	const auto size = int64(data.size());
+	if (totalSize > kMaxFileSize || alreadySize() + size > kMaxFileSize) {
+		LOG(("Update Error: Download exceeds the size limit: %1 / %2."
+			).arg(alreadySize() + size
+			).arg(totalSize));
+		threadSafeFailed();
+		return;
+	}
 	if (size > 0) {
 		const auto written = _output.write(QByteArray::fromRawData(
 			reinterpret_cast<const char*>(data.data()),
@@ -280,14 +309,16 @@ rpl::lifetime &AbstractDedicatedLoader::lifetime() {
 }
 
 DedicatedLoader::DedicatedLoader(
-	QPointer<MTP::Instance> instance,
+	base::weak_ptr<Main::Session> session,
 	const QString &folder,
 	const File &file)
-: AbstractDedicatedLoader(folder + '/' + file.name, kChunkSize)
+: AbstractDedicatedLoader(
+	folder + '/' + base::FileNameFromUserString(file.name),
+	kChunkSize)
 , _size(file.size)
 , _dcId(file.dcId)
 , _location(file.location)
-, _mtp(instance) {
+, _mtp(session) {
 	Expects(_size > 0);
 }
 
@@ -314,7 +345,7 @@ void DedicatedLoader::sendRequest() {
 		MTPupload_GetFile(
 			MTP_flags(0),
 			_location,
-			MTP_int(offset),
+			MTP_long(offset),
 			MTP_int(kChunkSize)),
 		[=](const MTPupload_File &result) { gotPart(offset, result); },
 		failHandler(),
@@ -355,8 +386,8 @@ void DedicatedLoader::gotPart(int offset, const MTPupload_File &result) {
 	sendRequest();
 }
 
-Fn<void(const RPCError &)> DedicatedLoader::failHandler() {
-	return [=](const RPCError &error) {
+Fn<void(const Error &)> DedicatedLoader::failHandler() {
+	return [=](const Error &error) {
 		LOG(("Update Error: MTP load failed with '%1'"
 			).arg(QString::number(error.code()) + ':' + error.type()));
 		threadSafeFailed();
@@ -368,25 +399,26 @@ void ResolveChannel(
 		const QString &username,
 		Fn<void(const MTPInputChannel &channel)> done,
 		Fn<void()> fail) {
-	const auto failed = [&] {
+	const auto failed = [=] {
 		LOG(("Dedicated MTP Error: Channel '%1' resolve failed."
 			).arg(username));
 		fail();
 	};
-	if (!Main::Session::Exists()) {
+	const auto session = mtp->session();
+	if (!mtp->valid()) {
 		failed();
 		return;
 	}
 
 	struct ResolveResult {
-		base::weak_ptr<Main::Session> auth;
+		base::weak_ptr<Main::Session> session;
 		MTPInputChannel channel;
 	};
 	static std::map<QString, ResolveResult> ResolveCache;
 
 	const auto i = ResolveCache.find(username);
 	if (i != end(ResolveCache)) {
-		if (i->second.auth.get() == &Auth()) {
+		if (i->second.session.get() == session.get()) {
 			done(i->second.channel);
 			return;
 		}
@@ -399,31 +431,39 @@ void ResolveChannel(
 		if (const auto channel = ExtractChannel(result)) {
 			ResolveCache.emplace(
 				username,
-				ResolveResult { base::make_weak(&Auth()), *channel });
+				ResolveResult { session, *channel });
 			done(*channel);
 		} else {
 			failed();
 		}
 	};
-	const auto failHandler = [=](const RPCError &error) {
+	const auto failHandler = [=](const Error &error) {
 		LOG(("Dedicated MTP Error: Resolve failed with '%1'"
 			).arg(QString::number(error.code()) + ':' + error.type()));
 		fail();
 	};
-	mtp->send(
-		MTPcontacts_ResolveUsername(MTP_string(username)),
-		doneHandler,
-		failHandler);
+	mtp->send(MTPcontacts_ResolveUsername(
+		MTP_flags(0),
+		MTP_string(username),
+		MTP_string()
+	), doneHandler, failHandler);
 }
 
 std::optional<MTPMessage> GetMessagesElement(
-		const MTPmessages_Messages &list) {
+		const MTPmessages_Messages &list,
+		int messageId) {
 	return list.match([&](const MTPDmessages_messagesNotModified &) {
 		return std::optional<MTPMessage>(std::nullopt);
-	}, [&](const auto &data) {
-		return data.vmessages().v.isEmpty()
-			? std::nullopt
-			: std::make_optional(data.vmessages().v[0]);
+	}, [&](const auto &data) -> std::optional<MTPMessage> {
+		for (const auto &message : data.vmessages().v) {
+			const auto id = message.match([](const auto &data) {
+				return data.vid().v;
+			});
+			if (!messageId || id == messageId) {
+				return message;
+			}
+		}
+		return std::nullopt;
 	});
 }
 
@@ -432,24 +472,23 @@ void StartDedicatedLoader(
 		const DedicatedLoader::Location &location,
 		const QString &folder,
 		Fn<void(std::unique_ptr<DedicatedLoader>)> ready) {
+	const auto postId = location.postId;
 	const auto doneHandler = [=](const MTPmessages_Messages &result) {
-		const auto file = ParseFile(result);
+		const auto file = ParseFile(result, postId);
 		ready(file
 			? std::make_unique<MTP::DedicatedLoader>(
-				mtp->instance(),
+				mtp->session(),
 				folder,
 				*file)
 			: nullptr);
 	};
-	const auto failHandler = [=](const RPCError &error) {
+	const auto failHandler = [=](const Error &error) {
 		LOG(("Update Error: MTP check failed with '%1'"
 			).arg(QString::number(error.code()) + ':' + error.type()));
 		ready(nullptr);
 	};
 
-	const auto [username, postId] = location;
-	ResolveChannel(mtp, username, [=, postId = postId](
-			const MTPInputChannel &channel) {
+	const auto request = [=](const MTPInputChannel &channel) {
 		mtp->send(
 			MTPchannels_GetMessages(
 				channel,
@@ -458,7 +497,16 @@ void StartDedicatedLoader(
 					MTP_inputMessageID(MTP_int(postId)))),
 			doneHandler,
 			failHandler);
-	}, [=] { ready(nullptr); });
+	};
+	if (location.channelId) {
+		request(MTP_inputChannel(
+			MTP_long(location.channelId),
+			MTP_long(location.accessHash)));
+	} else {
+		ResolveChannel(mtp, location.username, request, [=] {
+			ready(nullptr);
+		});
+	}
 }
 
 } // namespace MTP

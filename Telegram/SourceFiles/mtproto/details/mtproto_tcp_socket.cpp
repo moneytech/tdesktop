@@ -9,12 +9,25 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/invoke_queued.h"
 
+#include <QtCore/QtEndian>
+
 namespace MTP::details {
 
-TcpSocket::TcpSocket(not_null<QThread*> thread, const QNetworkProxy &proxy)
+TcpSocket::TcpSocket(
+	not_null<QThread*> thread,
+	const QNetworkProxy &proxy,
+	bool protocolForFiles)
 : AbstractSocket(thread) {
 	_socket.moveToThread(thread);
 	_socket.setProxy(proxy);
+	if (protocolForFiles) {
+		_socket.setSocketOption(
+			QAbstractSocket::SendBufferSizeSocketOption,
+			kFilesSendBufferSize);
+		_socket.setSocketOption(
+			QAbstractSocket::ReceiveBufferSizeSocketOption,
+			kFilesReceiveBufferSize);
+	}
 	const auto wrap = [&](auto handler) {
 		return [=](auto &&...args) {
 			InvokeQueued(this, [=] { handler(args...); });
@@ -33,12 +46,9 @@ TcpSocket::TcpSocket(not_null<QThread*> thread, const QNetworkProxy &proxy)
 		&_socket,
 		&QTcpSocket::readyRead,
 		wrap([=] { _readyRead.fire({}); }));
-
-	using ErrorSignal = void(QTcpSocket::*)(QAbstractSocket::SocketError);
-	const auto QTcpSocket_error = ErrorSignal(&QAbstractSocket::error);
 	connect(
 		&_socket,
-		QTcpSocket_error,
+		&QAbstractSocket::errorOccurred,
 		wrap([=](Error e) { handleError(e); }));
 }
 
@@ -50,9 +60,9 @@ bool TcpSocket::isGoodStartNonce(bytes::const_span nonce) {
 	Expects(nonce.size() >= 2 * sizeof(uint32));
 
 	const auto bytes = nonce.data();
-	const auto zero = *reinterpret_cast<const uchar*>(bytes);
-	const auto first = *reinterpret_cast<const uint32*>(bytes);
-	const auto second = *(reinterpret_cast<const uint32*>(bytes) + 1);
+	const auto zero = gsl::to_integer<uchar>(nonce.front());
+	const auto first = qFromUnaligned<uint32>(bytes);
+	const auto second = qFromUnaligned<uint32>(bytes + sizeof(uint32));
 	const auto reserved01 = 0x000000EFU;
 	const auto reserved11 = 0x44414548U;
 	const auto reserved12 = 0x54534F50U;
@@ -105,50 +115,12 @@ int32 TcpSocket::debugState() {
 	return _socket.state();
 }
 
-void TcpSocket::LogError(int errorCode, const QString &errorText) {
-	switch (errorCode) {
-	case QAbstractSocket::ConnectionRefusedError:
-		LOG(("TCP Error: socket connection refused - %1").arg(errorText));
-		break;
-
-	case QAbstractSocket::RemoteHostClosedError:
-		TCP_LOG(("TCP Info: remote host closed socket connection - %1"
-			).arg(errorText));
-		break;
-
-	case QAbstractSocket::HostNotFoundError:
-		LOG(("TCP Error: host not found - %1").arg(errorText));
-		break;
-
-	case QAbstractSocket::SocketTimeoutError:
-		LOG(("TCP Error: socket timeout - %1").arg(errorText));
-		break;
-
-	case QAbstractSocket::NetworkError:
-		LOG(("TCP Error: network - %1").arg(errorText));
-		break;
-
-	case QAbstractSocket::ProxyAuthenticationRequiredError:
-	case QAbstractSocket::ProxyConnectionRefusedError:
-	case QAbstractSocket::ProxyConnectionClosedError:
-	case QAbstractSocket::ProxyConnectionTimeoutError:
-	case QAbstractSocket::ProxyNotFoundError:
-	case QAbstractSocket::ProxyProtocolError:
-		LOG(("TCP Error: proxy (%1) - %2").arg(errorCode).arg(errorText));
-		break;
-
-	default:
-		LOG(("TCP Error: other (%1) - %2").arg(errorCode).arg(errorText));
-		break;
-	}
-
-	TCP_LOG(("TCP Error %1, restarting! - %2"
-		).arg(errorCode
-		).arg(errorText));
+QString TcpSocket::debugPostfix() const {
+	return QString();
 }
 
 void TcpSocket::handleError(int errorCode) {
-	LogError(errorCode, _socket.errorString());
+	logError(errorCode, _socket.errorString());
 	_error.fire({});
 }
 

@@ -1,5 +1,4 @@
 /*
-/*
 This file is part of Telegram Desktop,
 the official desktop application for the Telegram messaging service.
 
@@ -9,6 +8,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 class DocumentData;
+
+namespace Data {
+struct DiceGameOptions;
+} // namespace Data
 
 namespace Main {
 class Session;
@@ -21,7 +24,7 @@ public:
 	DicePack(not_null<Main::Session*> session, const QString &emoji);
 	~DicePack();
 
-	DocumentData *lookup(int value);
+	[[nodiscard]] DocumentData *lookup(int value);
 
 private:
 	void load();
@@ -39,12 +42,29 @@ class DicePacks final {
 public:
 	explicit DicePacks(not_null<Main::Session*> session);
 
-	DocumentData *lookup(const QString &emoji, int value);
+	static const QString kDiceString;
+	static const QString kDartString;
+	static const QString kSlotString;
+	static const QString kFballString;
+	static const QString kBballString;
+	static const QString kPartyPopper;
+
+	[[nodiscard]] static bool IsSlot(const QString &emoji) {
+		return (emoji == kSlotString);
+	}
+
+	[[nodiscard]] DocumentData *lookup(const QString &emoji, int value);
+
+	void resolveGameOptions(Fn<void(const Data::DiceGameOptions &)> done);
+	void apply(const MTPDupdateEmojiGameInfo &update);
 
 private:
 	const not_null<Main::Session*> _session;
 
 	base::flat_map<QString, std::unique_ptr<DicePack>> _packs;
+
+	mtpRequestId _resolveGameOptionsRequestId = 0;
+	Fn<void(const Data::DiceGameOptions &)> _resolveGameOptionsCallback;
 
 };
 

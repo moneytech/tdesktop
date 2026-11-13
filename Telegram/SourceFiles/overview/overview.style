@@ -6,9 +6,8 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 using "ui/basic.style";
-using "history/history.style";
+using "ui/chat/chat.style";
 using "ui/widgets/widgets.style";
-using "media/view/media_view.style";
 using "boxes/boxes.style";
 
 OverviewFileLayout {
@@ -28,15 +27,21 @@ OverviewFileLayout {
 	songDownload: icon;
 	songDownloadSelected: icon;
 
+	voicePause: icon;
+	voicePauseSelected: icon;
+	voicePlay: icon;
+	voicePlaySelected: icon;
+	voiceCancel: icon;
+	voiceCancelSelected: icon;
+	voiceDownload: icon;
+	voiceDownloadSelected: icon;
+
 	filePadding: margins;
 	fileThumbSize: pixels;
 	fileNameTop: pixels;
 	fileStatusTop: pixels;
 	fileDateTop: pixels;
 }
-
-overviewLeftMin: 28px;
-overviewLeftMax: 42px;
 
 overviewCheckPressedSize: 0.8;
 overviewCheck: RoundCheckbox(defaultRoundCheckbox) {
@@ -47,7 +52,7 @@ overviewCheck: RoundCheckbox(defaultRoundCheckbox) {
 	sizeSmall: 0.3;
 	check: icon {{ "overview_photo_check", overviewCheckFgActive, point(4px, 8px) }};
 }
-overviewSmallCheck: RoundCheckbox(contactsPhotoCheck) {
+overviewSmallCheck: RoundCheckbox(defaultPeerListCheck) {
 	border: overviewCheckBorder;
 }
 overviewCheckSkip: 5px;
@@ -57,21 +62,28 @@ overviewPhotoMinSize: 90px;
 overviewVideoBg: imageBg;
 
 overviewFileThumbBg: imageBg;
-overviewFileChecked: overviewCheckBgActive;
-overviewFileCheck: overviewCheckBg;
 overviewFileExtPadding: 5px;
 overviewFileExtTop: 24px;
 overviewFileExtFg: windowFgActive;
 overviewFileExtFont: font(18px semibold);
 
-overviewSongPause: icon {{ "playlist_pause", historyFileInIconFg }};
-overviewSongPauseSelected: icon {{ "playlist_pause", historyFileInIconFgSelected }};
-overviewSongPlay: icon {{ "playlist_play", historyFileInIconFg }};
-overviewSongPlaySelected: icon {{ "playlist_play", historyFileInIconFgSelected }};
-overviewSongCancel: icon {{ "playlist_cancel", historyFileInIconFg }};
-overviewSongCancelSelected: icon {{ "playlist_cancel", historyFileInIconFgSelected }};
-overviewSongDownload: icon {{ "playlist_download", historyFileInIconFg }};
-overviewSongDownloadSelected: icon {{ "playlist_download", historyFileInIconFgSelected }};
+overviewVoicePause: icon {{ "player/playlist_pause", historyFileInIconFg }};
+overviewVoicePauseSelected: icon {{ "player/playlist_pause", historyFileInIconFgSelected }};
+overviewVoicePlay: icon {{ "player/playlist_play", historyFileInIconFg }};
+overviewVoicePlaySelected: icon {{ "player/playlist_play", historyFileInIconFgSelected }};
+overviewVoiceCancel: icon {{ "player/playlist_cancel", historyFileInIconFg }};
+overviewVoiceCancelSelected: icon {{ "player/playlist_cancel", historyFileInIconFgSelected }};
+overviewVoiceDownload: icon {{ "player/playlist_download", historyFileInIconFg }};
+overviewVoiceDownloadSelected: icon {{ "player/playlist_download", historyFileInIconFgSelected }};
+
+overviewSongPause: icon {{ "player/playlist_pause", historyFileThumbIconFg }};
+overviewSongPauseSelected: icon {{ "player/playlist_pause", historyFileThumbIconFgSelected }};
+overviewSongPlay: icon {{ "player/playlist_play", historyFileThumbIconFg }};
+overviewSongPlaySelected: icon {{ "player/playlist_play", historyFileThumbIconFgSelected }};
+overviewSongCancel: icon {{ "player/playlist_cancel", historyFileThumbIconFg }};
+overviewSongCancelSelected: icon {{ "player/playlist_cancel", historyFileThumbIconFgSelected }};
+overviewSongDownload: icon {{ "player/playlist_download", historyFileThumbIconFg }};
+overviewSongDownloadSelected: icon {{ "player/playlist_download", historyFileThumbIconFgSelected }};
 overviewSmallCancel: icon {{ "history_audio_cancel", historyFileInIconFg }};
 overviewSmallCancelSelected: icon {{ "history_audio_cancel", historyFileInIconFgSelected }};
 overviewSmallDownload: icon {{ "history_audio_download", historyFileInIconFg }};
@@ -93,6 +105,15 @@ overviewFileLayout: OverviewFileLayout {
 	songDownload: overviewSongDownload;
 	songDownloadSelected: overviewSongDownloadSelected;
 
+	voicePause: overviewVoicePause;
+	voicePauseSelected: overviewVoicePauseSelected;
+	voicePlay: overviewVoicePlay;
+	voicePlaySelected: overviewVoicePlaySelected;
+	voiceCancel: overviewVoiceCancel;
+	voiceCancelSelected: overviewVoiceCancelSelected;
+	voiceDownload: overviewVoiceDownload;
+	voiceDownloadSelected: overviewVoiceDownloadSelected;
+
 	filePadding: margins(0px, 3px, 16px, 3px);
 	fileThumbSize: 70px;
 	fileNameTop: 7px;
@@ -100,14 +121,6 @@ overviewFileLayout: OverviewFileLayout {
 	fileDateTop: 49px;
 }
 
-overviewLoader: size(34px, 14px);
-overviewLoaderPoint: size(4px, 4px);
-overviewLoaderSkip: 4px;
-
-playlistHoverBg: windowBgOver;
-playlistPadding: 10px;
-
-linksSearchTop: 30px;
 linksMaxWidth: 520px;
 linksLetterFg: windowFgActive;
 linksLetterFont: font(24px);
@@ -116,18 +129,12 @@ linksTextFg: windowFg;
 linksTextTop: 6px;
 linksBorder: 1px;
 linksBorderFg: shadowFg;
-linksDateColor: windowSubTextFg;
-linksDateMargin: margins(0px, 15px, 0px, 2px);
 linksPhotoSize: 46px;
 linksPhotoPadding: 12px;
 
-overviewFilter: FlatInput(defaultFlatInput) {
-	font: font(fsize);
-	icon: fieldSearchIcon;
-
-	width: 240px;
-	height: 32px;
-	textMrg: margins(32px, 3px, 32px, 3px);
+overviewLinkIvIcon: IconEmoji {
+	icon: icon {{ "info/info_iv_mini-12x12", windowActiveTextFg }};
+	padding: margins(0px, 5px, 2px, 0px);
 }
 
 overviewVideoStatusMargin: 3px;
@@ -138,3 +145,12 @@ overviewVideoPlaySelected: icon {{ "overview_video_play", historyFileThumbIconFg
 overviewVideoDownload: icon {{ "overview_video_download", historyFileThumbIconFg }};
 overviewVideoDownloadSelected: icon {{ "overview_video_download", historyFileThumbIconFgSelected }};
 overviewVideoRadialSize: 36px;
+
+storyPinnedIcon: icon{
+	{ "dialogs/dialogs_pinned_shadow", windowShadowFg },
+	{ "dialogs/dialogs_pinned", historyFileThumbIconFg }
+};
+storyPinnedIconSelected: icon{
+	{ "dialogs/dialogs_pinned_shadow", windowShadowFg },
+	{ "dialogs/dialogs_pinned", historyFileThumbIconFgSelected }
+};

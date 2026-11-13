@@ -16,6 +16,7 @@ namespace details {
 [[nodiscard]] bool paused();
 void pause();
 void unpause();
+[[nodiscard]] rpl::producer<> unpaused();
 
 } // namespace details
 
@@ -34,7 +35,10 @@ constexpr ShiftedDcId updaterDcId(DcId dcId) {
 	return ShiftDcId(dcId, kUpdaterDcShift);
 }
 
-constexpr auto kUploadSessionsCount = 2;
+// send(MTPupload_GetFile(), MTP::groupCallStreamDcId(dc)) - for group call stream
+constexpr ShiftedDcId groupCallStreamDcId(DcId dcId) {
+	return ShiftDcId(dcId, kGroupCallStreamDcShift);
+}
 
 namespace details {
 
@@ -56,29 +60,36 @@ inline constexpr bool isDownloadDcId(ShiftedDcId shiftedDcId) {
 		&& (shiftedDcId < details::downloadDcId(0, kMaxMediaDcCount - 1) + kDcShift);
 }
 
+inline constexpr bool isMediaClusterDcId(ShiftedDcId shiftedDcId) {
+	const auto shift = GetDcIdShift(shiftedDcId);
+	return isDownloadDcId(shiftedDcId)
+		|| (shift == kGroupCallStreamDcShift)
+		|| (shift == kExportMediaDcShift)
+		|| (shift == kUpdaterDcShift);
+}
+
 inline bool isCdnDc(MTPDdcOption::Flags flags) {
 	return (flags & MTPDdcOption::Flag::f_cdn);
 }
 
 inline bool isTemporaryDcId(ShiftedDcId shiftedDcId) {
 	auto dcId = BareDcId(shiftedDcId);
-	return (dcId >= Instance::Config::kTemporaryMainDc);
+	return (dcId >= Instance::Fields::kTemporaryMainDc);
 }
 
 inline DcId getRealIdFromTemporaryDcId(ShiftedDcId shiftedDcId) {
 	auto dcId = BareDcId(shiftedDcId);
-	return (dcId >= Instance::Config::kTemporaryMainDc) ? (dcId - Instance::Config::kTemporaryMainDc) : 0;
+	return (dcId >= Instance::Fields::kTemporaryMainDc) ? (dcId - Instance::Fields::kTemporaryMainDc) : 0;
 }
 
 inline DcId getTemporaryIdFromRealDcId(ShiftedDcId shiftedDcId) {
 	auto dcId = BareDcId(shiftedDcId);
-	return (dcId < Instance::Config::kTemporaryMainDc) ? (dcId + Instance::Config::kTemporaryMainDc) : 0;
+	return (dcId < Instance::Fields::kTemporaryMainDc) ? (dcId + Instance::Fields::kTemporaryMainDc) : 0;
 }
 
 namespace details {
 
 constexpr ShiftedDcId uploadDcId(DcId dcId, int index) {
-	static_assert(kUploadSessionsCount < kMaxMediaDcCount, "Too large MTPUploadSessionsCount!");
 	return ShiftDcId(dcId, kBaseUploadDcShift + index);
 };
 
@@ -87,14 +98,14 @@ constexpr ShiftedDcId uploadDcId(DcId dcId, int index) {
 // send(req, callbacks, MTP::uploadDcId(index)) - for upload shifted dc id
 // uploading always to the main dc so BareDcId(result) == 0
 inline ShiftedDcId uploadDcId(int index) {
-	Expects(index >= 0 && index < kUploadSessionsCount);
+	Expects(index >= 0 && index < kMaxMediaDcCount);
 
 	return details::uploadDcId(0, index);
 };
 
 constexpr bool isUploadDcId(ShiftedDcId shiftedDcId) {
 	return (shiftedDcId >= details::uploadDcId(0, 0))
-		&& (shiftedDcId < details::uploadDcId(0, kUploadSessionsCount - 1) + kDcShift);
+		&& (shiftedDcId < details::uploadDcId(0, kMaxMediaDcCount - 1) + kDcShift);
 }
 
 inline ShiftedDcId destroyKeyNextDcId(ShiftedDcId shiftedDcId) {
@@ -113,88 +124,5 @@ enum {
 	RequestConnecting = 1,
 	RequestSending = 2
 };
-
-Instance *MainInstance();
-
-inline void restart() {
-	return MainInstance()->restart();
-}
-
-inline void restart(ShiftedDcId shiftedDcId) {
-	return MainInstance()->restart(shiftedDcId);
-}
-
-inline DcId maindc() {
-	return MainInstance()->mainDcId();
-}
-
-inline int32 dcstate(ShiftedDcId shiftedDcId = 0) {
-	if (const auto instance = MainInstance()) {
-		return instance->dcstate(shiftedDcId);
-	}
-	return DisconnectedState;
-}
-
-inline QString dctransport(ShiftedDcId shiftedDcId = 0) {
-	if (auto instance = MainInstance()) {
-		return instance->dctransport(shiftedDcId);
-	}
-	return QString();
-}
-
-template <typename TRequest>
-inline mtpRequestId send(
-		const TRequest &request,
-		RPCResponseHandler &&callbacks = {},
-		ShiftedDcId dcId = 0,
-		crl::time msCanWait = 0,
-		mtpRequestId after = 0) {
-	return MainInstance()->send(request, std::move(callbacks), dcId, msCanWait, after);
-}
-
-template <typename TRequest>
-inline mtpRequestId send(
-		const TRequest &request,
-		RPCDoneHandlerPtr &&onDone,
-		RPCFailHandlerPtr &&onFail = nullptr,
-		ShiftedDcId dcId = 0,
-		crl::time msCanWait = 0,
-		mtpRequestId after = 0) {
-	return MainInstance()->send(request, std::move(onDone), std::move(onFail), dcId, msCanWait, after);
-}
-
-inline void sendAnything(ShiftedDcId shiftedDcId = 0, crl::time msCanWait = 0) {
-	if (const auto instance = MainInstance()) {
-		instance->sendAnything(shiftedDcId, msCanWait);
-	}
-}
-
-inline void cancel(mtpRequestId requestId) {
-	if (const auto instance = MainInstance()) {
-		instance->cancel(requestId);
-	}
-}
-
-inline void ping() {
-	if (const auto instance = MainInstance()) {
-		instance->ping();
-	}
-}
-
-inline void killSession(ShiftedDcId shiftedDcId) {
-	if (const auto instance = MainInstance()) {
-		instance->killSession(shiftedDcId);
-	}
-}
-
-inline void stopSession(ShiftedDcId shiftedDcId) {
-	if (const auto instance = MainInstance()) {
-		instance->stopSession(shiftedDcId);
-	}
-}
-
-inline int32 state(mtpRequestId requestId) { // < 0 means waiting for such count of ms
-	return MainInstance()->state(requestId);
-}
 
 } // namespace MTP

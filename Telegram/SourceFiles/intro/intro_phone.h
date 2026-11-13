@@ -28,6 +28,8 @@ public:
 		not_null<Main::Account*> account,
 		not_null<Data*> data);
 
+	QString accessibilityName() override;
+
 	void selectCountry(const QString &country);
 
 	void setInnerFocus() override;
@@ -50,7 +52,7 @@ private:
 	void countryChanged();
 
 	void phoneSubmitDone(const MTPauth_SentCode &result);
-	bool phoneSubmitFail(const RPCError &error);
+	void phoneSubmitFail(const MTP::Error &error);
 
 	QString fullNumber() const;
 	void stopCheck();

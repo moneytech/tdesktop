@@ -73,15 +73,14 @@ bool InlineDetails(
 	if (count != 1) {
 		return false;
 	}
-	const auto has = ranges::find_if(
+	return ranges::any_of(
 		request,
 		[&](const std::vector<Value::Type> &types) {
 			Expects(!types.empty());
 
 			return (types[0] == details);
 		}
-	) != end(request);
-	return has;
+	);
 }
 
 bool InlineDetails(const Form::Request &request, Value::Type details) {
@@ -102,11 +101,6 @@ bool CanRequireSelfie(Value::Type type) {
 	const auto scope = ScopeTypeForValueType(type);
 	return (scope == Scope::Type::Address)
 		|| (scope == Scope::Type::Identity);
-}
-
-bool CanRequireScans(Value::Type type) {
-	const auto scope = ScopeTypeForValueType(type);
-	return (scope == Scope::Type::Address);
 }
 
 bool CanRequireTranslation(Value::Type type) {
@@ -378,7 +372,8 @@ QString ComputeScopeRowReadyString(const Scope &scope) {
 		const auto scheme = GetDocumentScheme(
 			scope.type,
 			document ? base::make_optional(document->type) : std::nullopt,
-			scope.details ? scope.details->nativeNames : false);
+			scope.details ? scope.details->nativeNames : false,
+			nullptr);
 		using ValueClass = EditDocumentScheme::ValueClass;
 		const auto skipAdditional = [&] {
 			if (!fields) {

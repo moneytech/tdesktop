@@ -7,19 +7,27 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "boxes/abstract_box.h"
+#include "ui/layers/box_content.h"
+
+namespace Main {
+class Session;
+} // namespace Main
 
 namespace Ui {
 namespace Emoji {
 
-class ManageSetsBox : public Ui::BoxContent {
+class ManageSetsBox final : public Ui::BoxContent {
 public:
-	explicit ManageSetsBox(QWidget*);
+	ManageSetsBox(QWidget*, not_null<Main::Session*> session);
 
-protected:
+private:
 	void prepare() override;
 
+	const not_null<Main::Session*> _session;
+
 };
+
+void LoadAndSwitchTo(not_null<Main::Session*> session, int id);
 
 } // namespace Emoji
 } // namespace Ui

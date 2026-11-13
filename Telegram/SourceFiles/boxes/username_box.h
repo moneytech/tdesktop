@@ -7,56 +7,31 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "boxes/abstract_box.h"
-#include "mtproto/mtproto_rpc_sender.h"
-
 namespace Ui {
-class UsernameInput;
-class LinkButton;
+class GenericBox;
+class VerticalLayout;
 } // namespace Ui
 
-namespace Main {
-class Session;
-} // namespace Main
+class PeerData;
 
-class UsernameBox : public Ui::BoxContent, public RPCSender {
-public:
-	UsernameBox(QWidget*, not_null<Main::Session*> session);
+void UsernamesBox(
+	not_null<Ui::GenericBox*> box,
+	not_null<PeerData*> peer);
 
-protected:
-	void prepare() override;
-	void setInnerFocus() override;
+struct UsernameCheckInfo final {
+	[[nodiscard]] static UsernameCheckInfo PurchaseAvailable(
+		const QString &username,
+		not_null<PeerData*> peer);
 
-	void paintEvent(QPaintEvent *e) override;
-	void resizeEvent(QResizeEvent *e) override;
-
-private:
-	void onUpdateDone(const MTPUser &result);
-	bool onUpdateFail(const RPCError &error);
-
-	void onCheckDone(const MTPBool &result);
-	bool onCheckFail(const RPCError &error);
-
-	void save();
-
-	void check();
-	void changed();
-
-	void linkClick();
-
-	QString getName() const;
-	void updateLinkText();
-
-	const not_null<Main::Session*> _session;
-
-	object_ptr<Ui::UsernameInput> _username;
-	object_ptr<Ui::LinkButton> _link;
-
-	mtpRequestId _saveRequestId = 0;
-	mtpRequestId _checkRequestId = 0;
-	QString _sentUsername, _checkUsername, _errorText, _goodText;
-
-	Ui::Text::String _about;
-	object_ptr<QTimer> _checkTimer;
-
+	enum class Type {
+		Good,
+		Error,
+		Default,
+	};
+	Type type;
+	TextWithEntities text;
 };
+
+void AddUsernameCheckLabel(
+	not_null<Ui::VerticalLayout*> container,
+	rpl::producer<UsernameCheckInfo> checkInfo);

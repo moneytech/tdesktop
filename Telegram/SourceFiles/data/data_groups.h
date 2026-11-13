@@ -15,21 +15,23 @@ class Session;
 
 struct Group {
 	HistoryItemsList items;
-
 };
 
 class Groups {
 public:
 	Groups(not_null<Session*> data);
 
-	bool isGrouped(not_null<HistoryItem*> item) const;
+	[[nodiscard]] bool isGrouped(not_null<const HistoryItem*> item) const;
+	[[nodiscard]] bool isGroupOfOne(not_null<const HistoryItem*> item) const;
 	void registerMessage(not_null<HistoryItem*> item);
 	void unregisterMessage(not_null<const HistoryItem*> item);
 	void refreshMessage(
 		not_null<HistoryItem*> item,
 		bool justRefreshViews = false);
 
-	const Group *find(not_null<HistoryItem*> item) const;
+	[[nodiscard]] const Group *find(not_null<const HistoryItem*> item) const;
+
+	not_null<HistoryItem*> findItemToEdit(not_null<HistoryItem*> item) const;
 
 private:
 	HistoryItemsList::const_iterator findPositionForItem(
@@ -39,7 +41,6 @@ private:
 
 	not_null<Session*> _data;
 	std::map<MessageGroupId, Group> _groups;
-	std::map<MessageGroupId, MessageGroupId> _alias;
 
 };
 

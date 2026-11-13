@@ -7,11 +7,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include <rpl/producer.h>
 #include "lang_auto.h"
+#include "base/const_string.h"
 #include "base/weak_ptr.h"
 
 namespace Lang {
+
+inline constexpr auto kChoosingStickerReplacement = "oo"_cs;
 
 struct Language {
 	QString id;
@@ -29,14 +31,12 @@ inline bool operator!=(const Language &a, const Language &b) {
 	return !(a == b);
 }
 
-QString DefaultLanguageId();
-QString LanguageIdOrDefault(const QString &id);
 QString CloudLangPackName();
 QString CustomLanguageId();
 Language DefaultLanguage();
 
 class Instance;
-Instance &Current();
+Instance &GetInstance();
 
 enum class Pack {
 	None,
@@ -74,13 +74,17 @@ public:
 	QByteArray serialize() const;
 	void fillFromSerialized(const QByteArray &data, int dataAppVersion);
 
+	bool supportChoosingStickerReplacement() const;
+	int rightIndexChoosingStickerReplacement(bool named) const;
+
 	void applyDifference(
 		Pack pack,
 		const MTPDlangPackDifference &difference);
 	static std::map<ushort, QString> ParseStrings(
 		const MTPVector<MTPLangPackString> &strings);
-	base::Observable<void> &updated() {
-		return _updated;
+
+	[[nodiscard]] rpl::producer<> updated() const {
+		return _updated.events();
 	}
 
 	QString getValue(ushort key) const {
@@ -119,6 +123,7 @@ private:
 		const QString &relativePath,
 		const QByteArray &content);
 	void updatePluralRules();
+	void updateChoosingStickerReplacement();
 
 	Instance *_derived = nullptr;
 
@@ -129,7 +134,13 @@ private:
 	QString _customFilePathRelative;
 	QByteArray _customFileContent;
 	int _version = 0;
-	base::Observable<void> _updated;
+	rpl::event_stream<> _updated;
+
+	struct {
+		bool support = false;
+		int rightIndex = 0;
+		int rightIndexNamed = 0;
+	} _choosingStickerReplacement;
 
 	mutable QString _systemLanguage;
 
@@ -144,7 +155,7 @@ private:
 namespace details {
 
 QString Current(ushort key);
-rpl::producer<QString> Viewer(ushort key);
+rpl::producer<QString> Value(ushort key);
 
 } // namespace details
 } // namespace Lang

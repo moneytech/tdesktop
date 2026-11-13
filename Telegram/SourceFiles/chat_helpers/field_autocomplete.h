@@ -7,223 +7,218 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "base/object_ptr.h"
+#include "base/timer.h"
+#include "base/unique_qptr.h"
 #include "ui/effects/animations.h"
 #include "ui/rp_widget.h"
-#include "base/timer.h"
-#include "base/object_ptr.h"
-#include "chat_helpers/stickers.h"
+
+namespace style {
+struct EmojiPan;
+} // namespace style
 
 namespace Ui {
 class ScrollArea;
+class InputField;
+class ImportantTooltip;
 } // namespace Ui
-
-namespace Lottie {
-class SinglePlayer;
-class FrameRenderer;
-} // namespace Lottie;
 
 namespace Main {
 class Session;
 } // namespace Main
 
-namespace internal {
+namespace SendMenu {
+struct Details;
+} // namespace SendMenu
 
-struct StickerSuggestion {
-	not_null<DocumentData*> document;
-	std::unique_ptr<Lottie::SinglePlayer> animated;
+namespace ChatHelpers {
+
+struct ComposeFeatures;
+struct FileChosen;
+class Show;
+
+enum class FieldAutocompleteChooseMethod {
+	ByEnter,
+	ByTab,
+	ByClick,
 };
 
-using MentionRows = QList<UserData*>;
-using HashtagRows = QList<QString>;
-using BotCommandRows = QList<QPair<UserData*, const BotCommand*>>;
-using StickerRows = std::vector<StickerSuggestion>;
-
-class FieldAutocompleteInner;
-
-} // namespace internal
-
 class FieldAutocomplete final : public Ui::RpWidget {
-	Q_OBJECT
-
 public:
-	FieldAutocomplete(QWidget *parent, not_null<Main::Session*> session);
+	FieldAutocomplete(
+		QWidget *parent,
+		std::shared_ptr<Show> show,
+		const style::EmojiPan *stOverride = nullptr);
 	~FieldAutocomplete();
+
+	[[nodiscard]] std::shared_ptr<Show> uiShow() const;
 
 	bool clearFilteredBotCommands();
 	void showFiltered(
 		not_null<PeerData*> peer,
 		QString query,
 		bool addInlineBots);
+
 	void showStickers(EmojiPtr emoji);
+	[[nodiscard]] EmojiPtr stickersEmoji() const;
+
 	void setBoundings(QRect boundings);
 
-	const QString &filter() const;
-	ChatData *chat() const;
-	ChannelData *channel() const;
-	UserData *user() const;
+	[[nodiscard]] const QString &filter() const;
+	[[nodiscard]] ChatData *chat() const;
+	[[nodiscard]] ChannelData *channel() const;
+	[[nodiscard]] UserData *user() const;
 
-	int32 innerTop();
-	int32 innerBottom();
+	[[nodiscard]] int innerTop() const;
+	[[nodiscard]] int innerBottom() const;
 
 	bool eventFilter(QObject *obj, QEvent *e) override;
 
-	enum class ChooseMethod {
-		ByEnter,
-		ByTab,
-		ByClick,
+	using ChooseMethod = FieldAutocompleteChooseMethod;
+	struct MentionChosen {
+		not_null<UserData*> user;
+		QString mention;
+		ChooseMethod method = ChooseMethod::ByEnter;
 	};
-	bool chooseSelected(ChooseMethod method) const;
-
-	bool stickersShown() const {
-		return !_srows.empty();
-	}
-
-	bool overlaps(const QRect &globalRect) {
-		if (isHidden() || !testAttribute(Qt::WA_OpaquePaintEvent)) return false;
-
-		return rect().contains(QRect(mapFromGlobal(globalRect.topLeft()), globalRect.size()));
-	}
-
-	void hideFast();
-
-signals:
-	void mentionChosen(UserData *user, FieldAutocomplete::ChooseMethod method) const;
-	void hashtagChosen(QString hashtag, FieldAutocomplete::ChooseMethod method) const;
-	void botCommandChosen(QString command, FieldAutocomplete::ChooseMethod method) const;
-	void stickerChosen(not_null<DocumentData*> sticker, FieldAutocomplete::ChooseMethod method) const;
-
-	void moderateKeyActivate(int key, bool *outHandled) const;
-
-public slots:
-	void showAnimated();
-	void hideAnimated();
-
-protected:
-	void paintEvent(QPaintEvent *e) override;
-
-private:
-	void animationCallback();
-	void hideFinish();
-
-	void updateFiltered(bool resetScroll = false);
-	void recount(bool resetScroll = false);
-	internal::StickerRows getStickerSuggestions();
-
-	const not_null<Main::Session*> _session;
-	QPixmap _cache;
-	internal::MentionRows _mrows;
-	internal::HashtagRows _hrows;
-	internal::BotCommandRows _brows;
-	internal::StickerRows _srows;
-
-	void rowsUpdated(
-		internal::MentionRows &&mrows,
-		internal::HashtagRows &&hrows,
-		internal::BotCommandRows &&brows,
-		internal::StickerRows &&srows,
-		bool resetScroll);
-
-	object_ptr<Ui::ScrollArea> _scroll;
-	QPointer<internal::FieldAutocompleteInner> _inner;
-
-	ChatData *_chat = nullptr;
-	UserData *_user = nullptr;
-	ChannelData *_channel = nullptr;
-	EmojiPtr _emoji;
-	uint64 _stickersSeed = 0;
+	struct HashtagChosen {
+		QString hashtag;
+		ChooseMethod method = ChooseMethod::ByEnter;
+	};
+	struct BotCommandChosen {
+		not_null<UserData*> user;
+		QString command;
+		ChooseMethod method = ChooseMethod::ByEnter;
+	};
+	using StickerChosen = FileChosen;
 	enum class Type {
 		Mentions,
 		Hashtags,
 		BotCommands,
 		Stickers,
 	};
+
+	bool chooseSelected(ChooseMethod method) const;
+
+	void startPressDragSelect();
+
+	[[nodiscard]] bool stickersShown() const {
+		return !_srows.empty();
+	}
+
+	[[nodiscard]] bool overlaps(const QRect &globalRect) {
+		if (isHidden() || !testAttribute(Qt::WA_OpaquePaintEvent)) {
+			return false;
+		}
+		const auto local = mapFromGlobal(globalRect.topLeft());
+		return rect().contains(QRect(local, globalRect.size()));
+	}
+
+	void setModerateKeyActivateCallback(Fn<bool(int)> callback) {
+		_moderateKeyActivateCallback = std::move(callback);
+	}
+	void setSendMenuDetails(Fn<SendMenu::Details()> &&callback);
+
+	void hideFast();
+	void showAnimated();
+	void hideAnimated();
+
+	void requestRefresh();
+	[[nodiscard]] rpl::producer<> refreshRequests() const;
+	void requestStickersUpdate();
+	[[nodiscard]] rpl::producer<> stickersUpdateRequests() const;
+
+	[[nodiscard]] rpl::producer<MentionChosen> mentionChosen() const;
+	[[nodiscard]] rpl::producer<HashtagChosen> hashtagChosen() const;
+	[[nodiscard]] rpl::producer<BotCommandChosen> botCommandChosen() const;
+	[[nodiscard]] rpl::producer<StickerChosen> stickerChosen() const;
+	[[nodiscard]] rpl::producer<Type> choosingProcesses() const;
+
+protected:
+	void paintEvent(QPaintEvent *e) override;
+
+private:
+	class Inner;
+	friend class Inner;
+	struct StickerSuggestion;
+	struct MentionRow;
+	struct BotCommandRow;
+
+	using HashtagRows = std::vector<QString>;
+	using BotCommandRows = std::vector<BotCommandRow>;
+	using StickerRows = std::vector<StickerSuggestion>;
+	using MentionRows = std::vector<MentionRow>;
+
+	void animationCallback();
+	void hideFinish();
+
+	void updateFiltered(bool resetScroll = false);
+	void recount(bool resetScroll = false);
+	[[nodiscard]] StickerRows getStickerSuggestions();
+	void createEphemeralHint(QRect rect);
+	void ephemeralIconHovered(QRect iconRect);
+	void showPendingEphemeralHint();
+	void hideEphemeralHint();
+
+	const std::shared_ptr<Show> _show;
+	const not_null<Main::Session*> _session;
+	const style::EmojiPan &_st;
+	QPixmap _cache;
+	MentionRows _mrows;
+	HashtagRows _hrows;
+	BotCommandRows _brows;
+	StickerRows _srows;
+
+	void rowsUpdated(
+		MentionRows &&mrows,
+		HashtagRows &&hrows,
+		BotCommandRows &&brows,
+		StickerRows &&srows,
+		bool resetScroll);
+
+	object_ptr<Ui::ScrollArea> _scroll;
+	QPointer<Inner> _inner;
+
+	ChatData *_chat = nullptr;
+	UserData *_user = nullptr;
+	ChannelData *_channel = nullptr;
+	EmojiPtr _emoji;
+	uint64 _stickersSeed = 0;
 	Type _type = Type::Mentions;
 	QString _filter;
 	QRect _boundings;
-	bool _addInlineBots;
+	bool _addInlineBots = false;
 
-	int32 _width, _height;
 	bool _hiding = false;
 
-	Ui::Animations::Simple _a_opacity;
+	base::unique_qptr<Ui::ImportantTooltip> _ephemeralHint;
+	base::Timer _ephemeralHintTimer;
+	QRect _ephemeralHintRect;
 
-	friend class internal::FieldAutocompleteInner;
+	Ui::Animations::Simple _opacityAnimation;
+	rpl::event_stream<> _refreshRequests;
+	rpl::event_stream<> _stickersUpdateRequests;
 
-};
-
-namespace internal {
-
-class FieldAutocompleteInner final
-	: public Ui::RpWidget
-	, private base::Subscriber {
-	Q_OBJECT
-
-public:
-	FieldAutocompleteInner(
-		not_null<FieldAutocomplete*> parent,
-		not_null<MentionRows*> mrows,
-		not_null<HashtagRows*> hrows,
-		not_null<BotCommandRows*> brows,
-		not_null<StickerRows*> srows);
-
-	void clearSel(bool hidden = false);
-	bool moveSel(int key);
-	bool chooseSelected(FieldAutocomplete::ChooseMethod method) const;
-
-	void setRecentInlineBotsInRows(int32 bots);
-	void rowsUpdated();
-
-signals:
-	void mentionChosen(UserData *user, FieldAutocomplete::ChooseMethod method) const;
-	void hashtagChosen(QString hashtag, FieldAutocomplete::ChooseMethod method) const;
-	void botCommandChosen(QString command, FieldAutocomplete::ChooseMethod method) const;
-	void stickerChosen(not_null<DocumentData*> sticker, FieldAutocomplete::ChooseMethod method) const;
-	void mustScrollTo(int scrollToTop, int scrollToBottom);
-
-public slots:
-	void onParentGeometryChanged();
-
-private:
-	void paintEvent(QPaintEvent *e) override;
-	void resizeEvent(QResizeEvent *e) override;
-
-	void enterEventHook(QEvent *e) override;
-	void leaveEventHook(QEvent *e) override;
-
-	void mousePressEvent(QMouseEvent *e) override;
-	void mouseMoveEvent(QMouseEvent *e) override;
-	void mouseReleaseEvent(QMouseEvent *e) override;
-
-	void updateSelectedRow();
-	void setSel(int sel, bool scroll = false);
-	void showPreview();
-	void selectByMouse(QPoint global);
-
-	QSize stickerBoundingBox() const;
-	void setupLottie(StickerSuggestion &suggestion);
-	void repaintSticker(not_null<DocumentData*> document);
-	std::shared_ptr<Lottie::FrameRenderer> getLottieRenderer();
-
-	not_null<FieldAutocomplete*> _parent;
-	not_null<MentionRows*> _mrows;
-	not_null<HashtagRows*> _hrows;
-	not_null<BotCommandRows*> _brows;
-	not_null<StickerRows*> _srows;
-	rpl::lifetime _stickersLifetime;
-	std::weak_ptr<Lottie::FrameRenderer> _lottieRenderer;
-	int _stickersPerRow = 1;
-	int _recentInlineBotsInRows = 0;
-	int _sel = -1;
-	int _down = -1;
-	std::optional<QPoint> _lastMousePosition;
-	bool _mouseSelection = false;
-
-	bool _overDelete = false;
-
-	bool _previewShown = false;
-
-	base::Timer _previewTimer;
+	Fn<bool(int)> _moderateKeyActivateCallback;
 
 };
 
-} // namespace internal
+struct FieldAutocompleteDescriptor {
+	not_null<QWidget*> parent;
+	std::shared_ptr<Show> show;
+	not_null<Ui::InputField*> field;
+	const style::EmojiPan *stOverride = nullptr;
+	not_null<PeerData*> peer;
+	Fn<ComposeFeatures()> features;
+	Fn<SendMenu::Details()> sendMenuDetails;
+	Fn<void()> stickerChoosing;
+	Fn<void(FileChosen&&)> stickerChosen;
+	Fn<void(TextWithTags)> setText;
+	Fn<void(QString)> sendBotCommand;
+	Fn<void(QString)> processShortcut;
+	Fn<bool(int)> moderateKeyActivateCallback;
+};
+void InitFieldAutocomplete(
+	std::unique_ptr<FieldAutocomplete> &autocomplete,
+	FieldAutocompleteDescriptor &&descriptor);
+
+} // namespace ChatHelpers

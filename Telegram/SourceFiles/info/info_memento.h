@@ -13,9 +13,21 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/section_memento.h"
 #include "base/object_ptr.h"
 
+namespace Api {
+struct WhoReadList;
+} // namespace Api
+
 namespace Storage {
 enum class SharedMediaType : signed char;
 } // namespace Storage
+
+namespace Data {
+class ForumTopic;
+class SavedMessages;
+class SavedSublist;
+class Thread;
+struct ReactionId;
+} // namespace Data
 
 namespace Ui {
 class ScrollArea;
@@ -27,17 +39,39 @@ namespace Settings {
 struct Tag;
 } // namespace Settings
 
+namespace Downloads {
+struct Tag;
+} // namespace Downloads
+
 class ContentMemento;
+class Memento;
 class WrapWidget;
+
+struct MementoThreadLifetime {
+	Memento *memento = nullptr;
+	Fn<void(not_null<Data::Thread*>)> removeFromWrap;
+	rpl::lifetime lifetime;
+};
 
 class Memento final : public Window::SectionMemento {
 public:
-	explicit Memento(PeerId peerId);
-	Memento(PeerId peerId, Section section);
-	//Memento(not_null<Data::Feed*> feed, Section section); // #feed
+	explicit Memento(not_null<PeerData*> peer);
+	Memento(not_null<PeerData*> peer, Section section);
+	explicit Memento(not_null<Data::ForumTopic*> topic);
+	Memento(not_null<Data::ForumTopic*> topic, Section section);
+	explicit Memento(not_null<Data::SavedSublist*> sublist);
+	Memento(not_null<Data::SavedSublist*> sublist, Section section);
+	explicit Memento(not_null<Data::SavedMessages*> savedMessages);
 	Memento(Settings::Tag settings, Section section);
 	Memento(not_null<PollData*> poll, FullMsgId contextId);
-	explicit Memento(std::vector<std::unique_ptr<ContentMemento>> stack);
+	Memento(
+		std::shared_ptr<Api::WhoReadList> whoReadIds,
+		FullMsgId contextId,
+		Data::ReactionId selected);
+	explicit Memento(
+		std::vector<std::shared_ptr<ContentMemento>> stack,
+		std::vector<std::unique_ptr<MementoThreadLifetime>> threadLifetimes
+			= {});
 
 	object_ptr<Window::SectionWidget> createWidget(
 		QWidget *parent,
@@ -49,10 +83,14 @@ public:
 		not_null<Window::SessionController*> controller,
 		const QRect &geometry) override;
 
+	rpl::producer<> removeRequests() const override {
+		return _removeRequests.events();
+	}
+
 	int stackSize() const {
 		return int(_stack.size());
 	}
-	std::vector<std::unique_ptr<ContentMemento>> takeStack();
+	std::vector<std::shared_ptr<ContentMemento>> takeStack();
 
 	not_null<ContentMemento*> content() {
 		Expects(!_stack.empty());
@@ -60,35 +98,61 @@ public:
 		return _stack.back().get();
 	}
 
-	static Section DefaultSection(not_null<PeerData*> peer);
-	//static Section DefaultSection(Dialogs::Key key); // #feed
-	static Memento Default(not_null<PeerData*> peer);
-	//static Memento Default(Dialogs::Key key); // #feed
+	static std::shared_ptr<Memento> Default(not_null<PeerData*> peer);
+	static std::shared_ptr<Memento> ProfileWithMediaTab(
+		not_null<PeerData*> peer,
+		Storage::SharedMediaType mediaTab);
+	[[nodiscard]] static std::unique_ptr<MementoThreadLifetime> WatchThread(
+		not_null<Data::Thread*> thread,
+		rpl::producer<> destroyed,
+		Fn<void(not_null<Data::Thread*>)> removeFromWrap = nullptr);
 
 	~Memento();
 
 private:
-	static std::vector<std::unique_ptr<ContentMemento>> DefaultStack(
-		PeerId peerId,
+	static Section DefaultSection(not_null<PeerData*> peer);
+
+	static std::vector<std::shared_ptr<ContentMemento>> DefaultStack(
+		not_null<PeerData*> peer,
 		Section section);
-	//static std::vector<std::unique_ptr<ContentMemento>> DefaultStack( // #feed
-	//	not_null<Data::Feed*> feed,
-	//	Section section);
-	static std::vector<std::unique_ptr<ContentMemento>> DefaultStack(
+	static std::vector<std::shared_ptr<ContentMemento>> DefaultStack(
+		not_null<Data::ForumTopic*> topic,
+		Section section);
+	static std::vector<std::shared_ptr<ContentMemento>> DefaultStack(
+		not_null<Data::SavedSublist*> sublist,
+		Section section);
+	static std::vector<std::shared_ptr<ContentMemento>> DefaultStack(
+		not_null<Data::SavedMessages*> savedMessages);
+	static std::vector<std::shared_ptr<ContentMemento>> DefaultStack(
 		Settings::Tag settings,
 		Section section);
-	static std::vector<std::unique_ptr<ContentMemento>> DefaultStack(
+	static std::vector<std::shared_ptr<ContentMemento>> DefaultStack(
 		not_null<PollData*> poll,
 		FullMsgId contextId);
+	static std::vector<std::shared_ptr<ContentMemento>> DefaultStack(
+		std::shared_ptr<Api::WhoReadList> whoReadIds,
+		FullMsgId contextId,
+		Data::ReactionId selected);
 
-	//static std::unique_ptr<ContentMemento> DefaultContent( // #feed
-	//	not_null<Data::Feed*> feed,
-	//	Section section);
-	static std::unique_ptr<ContentMemento> DefaultContent(
-		PeerId peerId,
+	static std::shared_ptr<ContentMemento> DefaultContent(
+		not_null<PeerData*> peer,
+		Section section);
+	static std::shared_ptr<ContentMemento> DefaultContent(
+		not_null<Data::ForumTopic*> topic,
+		Section section);
+	static std::shared_ptr<ContentMemento> DefaultContent(
+		not_null<Data::SavedSublist*> sublist,
 		Section section);
 
-	std::vector<std::unique_ptr<ContentMemento>> _stack;
+	void removeThread(not_null<Data::Thread*> thread);
+	[[nodiscard]] bool hasDyingContent() const;
+	[[nodiscard]] History *removeDyingContent();
+
+	std::vector<std::shared_ptr<ContentMemento>> _stack;
+	std::vector<std::unique_ptr<MementoThreadLifetime>> _threadLifetimes;
+	std::vector<base::weak_ptr<Data::Thread>> _prunedThreads;
+	rpl::event_stream<> _removeRequests;
+	rpl::lifetime _lifetime;
 
 };
 

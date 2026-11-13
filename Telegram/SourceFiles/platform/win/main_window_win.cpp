@@ -7,654 +7,803 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/win/main_window_win.h"
 
-#include "styles/style_window.h"
+#include "platform/platform_specific.h"
 #include "platform/platform_notifications_manager.h"
+#include "platform/win/tray_win.h"
 #include "platform/win/windows_dlls.h"
-#include "platform/win/windows_event_filter.h"
+#include "platform/win/integration_win.h"
 #include "window/notifications_manager.h"
+#include "window/window_session_controller.h"
 #include "mainwindow.h"
+#include "main/main_session.h"
+#include "base/algorithm.h"
 #include "base/crc32hash.h"
+#include "base/platform/win/base_windows_wrl.h"
+#include "base/platform/base_platform_info.h"
 #include "core/application.h"
+#include "core/sandbox.h"
 #include "lang/lang_keys.h"
 #include "storage/localstorage.h"
 #include "ui/widgets/popup_menu.h"
+#include "ui/ui_utility.h"
 #include "window/themes/window_theme.h"
+#include "window/window_controller.h"
 #include "history/history.h"
-#include "facades.h"
-#include "app.h"
 
-#include <QtWidgets/QDesktopWidget>
 #include <QtWidgets/QStyleFactory>
 #include <QtWidgets/QApplication>
 #include <QtGui/QWindow>
-#include <qpa/qplatformnativeinterface.h>
+#include <QtGui/QScreen>
+#include <QtCore/QOperatingSystemVersion>
 
 #include <Shobjidl.h>
 #include <shellapi.h>
 #include <WtsApi32.h>
+#include <dwmapi.h>
 
-#include <roapi.h>
-#include <wrl/client.h>
-#include "platform/win/wrapper_wrl_implements_h.h"
-#include <windows.ui.notifications.h>
+#include <windows.ui.viewmanagement.h>
+#include <UIViewSettingsInterop.h>
 
 #include <Windowsx.h>
 #include <VersionHelpers.h>
 
-#define min(a, b) ((a) < (b) ? (a) : (b))
-#define max(a, b) ((a) < (b) ? (b) : (a))
-#include <gdiplus.h>
-#undef min
-#undef max
-
+// Taken from qtbase/src/gui/image/qpixmap_win.cpp
 HICON qt_pixmapToWinHICON(const QPixmap &);
+HBITMAP qt_imageToWinHBITMAP(const QImage &, int hbitmapFormat);
 
-using namespace Microsoft::WRL;
+namespace ViewManagement = ABI::Windows::UI::ViewManagement;
 
 namespace Platform {
 namespace {
 
-HICON createHIconFromQIcon(const QIcon &icon, int xSize, int ySize) {
+// Mouse down on tray icon deactivates the application.
+// So there is no way to know for sure if the tray icon was clicked from
+// active application or from inactive application. So we assume that
+// if the application was deactivated less than 0.5s ago, then the tray
+// icon click (both left or right button) was made from the active app.
+constexpr auto kKeepActiveForTrayIcon = crl::time(500);
+
+using namespace Microsoft::WRL;
+
+// Taken from qtbase/src/gui/image/qpixmap_win.cpp
+enum HBitmapFormat {
+	HBitmapNoAlpha,
+	HBitmapPremultipliedAlpha,
+	HBitmapAlpha
+};
+
+class EventFilter final : public QAbstractNativeEventFilter {
+public:
+	explicit EventFilter(not_null<MainWindow*> window);
+
+private:
+	bool nativeEventFilter(
+		const QByteArray &eventType,
+		void *message,
+		native_event_filter_result *result) override;
+
+	bool mainWindowEvent(
+		HWND hWnd,
+		UINT msg,
+		WPARAM wParam,
+		LPARAM lParam,
+		LRESULT *result);
+
+	const not_null<MainWindow*> _window;
+
+};
+
+
+[[nodiscard]] HICON NativeIcon(const QIcon &icon, QSize size) {
 	if (!icon.isNull()) {
-		const QPixmap pm = icon.pixmap(icon.actualSize(QSize(xSize, ySize)));
-		if (!pm.isNull()) {
-			return qt_pixmapToWinHICON(pm);
+		const auto pixmap = icon.pixmap(icon.actualSize(size));
+		if (!pixmap.isNull()) {
+			return qt_pixmapToWinHICON(pixmap);
 		}
 	}
 	return nullptr;
 }
 
-HWND createTaskbarHider() {
-	HINSTANCE appinst = (HINSTANCE)GetModuleHandle(0);
-	HWND hWnd = 0;
-
-	QString cn = QString("TelegramTaskbarHider");
-	LPCWSTR _cn = (LPCWSTR)cn.utf16();
-	WNDCLASSEX wc;
-
-	wc.cbSize = sizeof(wc);
-	wc.style = 0;
-	wc.lpfnWndProc = DefWindowProc;
-	wc.cbClsExtra = 0;
-	wc.cbWndExtra = 0;
-	wc.hInstance = appinst;
-	wc.hIcon = 0;
-	wc.hCursor = 0;
-	wc.hbrBackground = 0;
-	wc.lpszMenuName = NULL;
-	wc.lpszClassName = _cn;
-	wc.hIconSm = 0;
-	if (!RegisterClassEx(&wc)) {
-		DEBUG_LOG(("Application Error: could not register taskbar hider window class, error: %1").arg(GetLastError()));
-		return hWnd;
+struct RealSize {
+	QSize value;
+	bool maximized = false;
+};
+[[nodiscard]] RealSize DetectRealSize(HWND hwnd) {
+	auto result = RECT();
+	auto placement = WINDOWPLACEMENT();
+	if (!GetWindowPlacement(hwnd, &placement)) {
+		return {};
+	} else if (placement.flags & WPF_RESTORETOMAXIMIZED) {
+		const auto monitor = MonitorFromRect(
+			&placement.rcNormalPosition,
+			MONITOR_DEFAULTTONULL);
+		if (!monitor) {
+			return {};
+		}
+		auto info = MONITORINFO{ .cbSize = sizeof(MONITORINFO) };
+		if (!GetMonitorInfo(monitor, &info)) {
+			return {};
+		}
+		result = info.rcWork;
+	} else {
+		CopyRect(&result, &placement.rcNormalPosition);
 	}
-
-	hWnd = CreateWindowEx(WS_EX_TOOLWINDOW, _cn, 0, WS_POPUP, 0, 0, 0, 0, 0, 0, appinst, 0);
-	if (!hWnd) {
-		DEBUG_LOG(("Application Error: could not create taskbar hider window class, error: %1").arg(GetLastError()));
-		return hWnd;
-	}
-	return hWnd;
+	return {
+		{ int(result.right - result.left), int(result.bottom - result.top) },
+		((placement.flags & WPF_RESTORETOMAXIMIZED) != 0)
+	};
 }
 
-enum {
-	_PsInitHor = 0x01,
-	_PsInitVer = 0x02,
-};
+[[nodiscard]] QImage PrepareLogoPreview(
+		QSize size,
+		QImage::Format format,
+		int radius = 0) {
+	auto result = QImage(size, QImage::Format_RGB32);
+	result.fill(st::windowBg->c);
 
-int32 _psSize = 0;
-class _PsShadowWindows {
-public:
-
-	using Change = MainWindow::ShadowsChange;
-	using Changes = MainWindow::ShadowsChanges;
-
-	_PsShadowWindows() : screenDC(0), noKeyColor(RGB(255, 255, 255)) {
-		for (int i = 0; i < 4; ++i) {
-			dcs[i] = 0;
-			bitmaps[i] = 0;
-			hwnds[i] = 0;
-		}
+	const auto logo = Window::Logo();
+	const auto width = size.width();
+	const auto height = size.height();
+	const auto side = logo.width();
+	const auto skip = width / 8;
+	const auto use = std::min({ width - skip, height - skip, side });
+	auto p = QPainter(&result);
+	if (use == side) {
+		p.drawImage((width - side) / 2, (height - side) / 2, logo);
+	} else {
+		const auto scaled = logo.scaled(
+			use,
+			use,
+			Qt::KeepAspectRatio,
+			Qt::SmoothTransformation);
+		p.drawImage((width - use) / 2, (height - use) / 2, scaled);
 	}
+	p.end();
 
-	void setColor(QColor c) {
-		r = c.red();
-		g = c.green();
-		b = c.blue();
-
-		if (!hwnds[0]) return;
-		Gdiplus::SolidBrush brush(Gdiplus::Color(_alphas[0], r, g, b));
-		for (int i = 0; i < 4; ++i) {
-			Gdiplus::Graphics graphics(dcs[i]);
-			graphics.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-			if ((i % 2) && _h || !(i % 2) && _w) {
-				graphics.FillRectangle(&brush, 0, 0, (i % 2) ? _size : _w, (i % 2) ? _h : _size);
-			}
-		}
-		initCorners();
-
-		_x = _y = _w = _h = 0;
-		update(Change::Moved | Change::Resized);
-	}
-
-	bool init(not_null<MainWindow*> window, QColor c) {
-		_window = window;
-		_fullsize = st::windowShadow.width();
-		_shift = st::windowShadowShift;
-		auto cornersImage = QImage(_fullsize, _fullsize, QImage::Format_ARGB32_Premultiplied);
-		{
-			Painter p(&cornersImage);
-			p.setCompositionMode(QPainter::CompositionMode_Source);
-			st::windowShadow.paint(p, 0, 0, _fullsize, QColor(0, 0, 0));
-		}
-		if (rtl()) cornersImage = cornersImage.mirrored(true, false);
-
-		_metaSize = _fullsize + 2 * _shift;
-		_alphas.reserve(_metaSize);
-		_colors.reserve(_metaSize * _metaSize);
-		for (int32 j = 0; j < _metaSize; ++j) {
-			for (int32 i = 0; i < _metaSize; ++i) {
-				_colors.push_back((i < 2 * _shift || j < 2 * _shift) ? 1 : qMax(BYTE(1), BYTE(cornersImage.pixel(QPoint(i - 2 * _shift, j - 2 * _shift)) >> 24)));
-			}
-		}
-		uchar prev = 0;
-		for (int32 i = 0; i < _metaSize; ++i) {
-			uchar a = _colors[(_metaSize - 1) * _metaSize + i];
-			if (a < prev) break;
-
-			_alphas.push_back(a);
-			prev = a;
-		}
-		_psSize = _size = _alphas.size() - 2 * _shift;
-
-		setColor(c);
-
-		Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-		ULONG_PTR gdiplusToken;
-		Gdiplus::Status gdiRes = Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
-
-		if (gdiRes != Gdiplus::Ok) {
-			LOG(("Application Error: could not init GDI+, error: %1").arg((int)gdiRes));
-			return false;
-		}
-		blend.AlphaFormat = AC_SRC_ALPHA;
-		blend.SourceConstantAlpha = 255;
-		blend.BlendFlags = 0;
-		blend.BlendOp = AC_SRC_OVER;
-
-		screenDC = GetDC(0);
-		if (!screenDC) {
-			LOG(("Application Error: could not GetDC(0), error: %2").arg(GetLastError()));
-			return false;
-		}
-
-		const auto avail = QApplication::desktop()->availableGeometry();
-		max_w = avail.width();
-		accumulate_max(max_w, st::windowMinWidth);
-		max_h = avail.height();
-		accumulate_max(max_h, st::defaultWindowTitle.height + st::windowMinHeight);
-
-		HINSTANCE appinst = (HINSTANCE)GetModuleHandle(0);
-		HWND hwnd = _window ? _window->psHwnd() : nullptr;
-
-		for (int i = 0; i < 4; ++i) {
-			QString cn = QString("TelegramShadow%1").arg(i);
-			LPCWSTR _cn = (LPCWSTR)cn.utf16();
-			WNDCLASSEX wc;
-
-			wc.cbSize = sizeof(wc);
-			wc.style = 0;
-			wc.lpfnWndProc = wndProc;
-			wc.cbClsExtra = 0;
-			wc.cbWndExtra = 0;
-			wc.hInstance = appinst;
-			wc.hIcon = 0;
-			wc.hCursor = 0;
-			wc.hbrBackground = 0;
-			wc.lpszMenuName = NULL;
-			wc.lpszClassName = _cn;
-			wc.hIconSm = 0;
-			if (!RegisterClassEx(&wc)) {
-				LOG(("Application Error: could not register shadow window class %1, error: %2").arg(i).arg(GetLastError()));
-				destroy();
-				return false;
-			}
-
-			hwnds[i] = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW, _cn, 0, WS_POPUP, 0, 0, 0, 0, 0, 0, appinst, 0);
-			if (!hwnds[i]) {
-				LOG(("Application Error: could not create shadow window class %1, error: %2").arg(i).arg(GetLastError()));
-				destroy();
-				return false;
-			}
-			SetWindowLong(hwnds[i], GWL_HWNDPARENT, (LONG)hwnd);
-
-			dcs[i] = CreateCompatibleDC(screenDC);
-			if (!dcs[i]) {
-				LOG(("Application Error: could not create dc for shadow window class %1, error: %2").arg(i).arg(GetLastError()));
-				destroy();
-				return false;
-			}
-
-			bitmaps[i] = CreateCompatibleBitmap(screenDC, (i % 2) ? _size : max_w, (i % 2) ? max_h : _size);
-			if (!bitmaps[i]) {
-				LOG(("Application Error: could not create bitmap for shadow window class %1, error: %2").arg(i).arg(GetLastError()));
-				destroy();
-				return false;
-			}
-
-			SelectObject(dcs[i], bitmaps[i]);
-		}
-
-		QStringList alphasForLog;
-		for_const (auto alpha, _alphas) {
-			alphasForLog.append(QString::number(alpha));
-		}
-		LOG(("Window Shadow: %1").arg(alphasForLog.join(", ")));
-
-		initCorners();
-		return true;
-	}
-
-	void initCorners(int directions = (_PsInitHor | _PsInitVer)) {
-		bool hor = (directions & _PsInitHor), ver = (directions & _PsInitVer);
-		Gdiplus::Graphics graphics0(dcs[0]), graphics1(dcs[1]), graphics2(dcs[2]), graphics3(dcs[3]);
-		graphics0.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-		graphics1.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-		graphics2.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-		graphics3.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-
-		Gdiplus::SolidBrush brush(Gdiplus::Color(_alphas[0], r, g, b));
-		if (hor) graphics0.FillRectangle(&brush, 0, 0, _fullsize - (_size - _shift), 2 * _shift);
-
-		if (ver) {
-			graphics1.FillRectangle(&brush, 0, 0, _size, 2 * _shift);
-			graphics3.FillRectangle(&brush, 0, 0, _size, 2 * _shift);
-			graphics1.FillRectangle(&brush, _size - _shift, 2 * _shift, _shift, _fullsize);
-			graphics3.FillRectangle(&brush, 0, 2 * _shift, _shift, _fullsize);
-		}
-
-		if (hor) {
-			for (int j = 2 * _shift; j < _size; ++j) {
-				for (int k = 0; k < _fullsize - (_size - _shift); ++k) {
-					brush.SetColor(Gdiplus::Color(_colors[j * _metaSize + k + (_size + _shift)], r, g, b));
-					graphics0.FillRectangle(&brush, k, j, 1, 1);
-					graphics2.FillRectangle(&brush, k, _size - (j - 2 * _shift) - 1, 1, 1);
-				}
-			}
-			for (int j = _size; j < _size + 2 * _shift; ++j) {
-				for (int k = 0; k < _fullsize - (_size - _shift); ++k) {
-					brush.SetColor(Gdiplus::Color(_colors[j * _metaSize + k + (_size + _shift)], r, g, b));
-					graphics2.FillRectangle(&brush, k, _size - (j - 2 * _shift) - 1, 1, 1);
-				}
-			}
-		}
-		if (ver) {
-			for (int j = 2 * _shift; j < _fullsize + 2 * _shift; ++j) {
-				for (int k = _shift; k < _size; ++k) {
-					brush.SetColor(Gdiplus::Color(_colors[j * _metaSize + (k + _shift)], r, g, b));
-					graphics1.FillRectangle(&brush, _size - k - 1, j, 1, 1);
-					graphics3.FillRectangle(&brush, k, j, 1, 1);
-				}
-			}
-		}
-	}
-	void verCorners(int h, Gdiplus::Graphics *pgraphics1, Gdiplus::Graphics *pgraphics3) {
-		Gdiplus::SolidBrush brush(Gdiplus::Color(_alphas[0], r, g, b));
-		pgraphics1->FillRectangle(&brush, _size - _shift, h - _fullsize, _shift, _fullsize);
-		pgraphics3->FillRectangle(&brush, 0, h - _fullsize, _shift, _fullsize);
-		for (int j = 0; j < _fullsize; ++j) {
-			for (int k = _shift; k < _size; ++k) {
-				brush.SetColor(Gdiplus::Color(_colors[(j + 2 * _shift) * _metaSize + k + _shift], r, g, b));
-				pgraphics1->FillRectangle(&brush, _size - k - 1, h - j - 1, 1, 1);
-				pgraphics3->FillRectangle(&brush, k, h - j - 1, 1, 1);
-			}
-		}
-	}
-	void horCorners(int w, Gdiplus::Graphics *pgraphics0, Gdiplus::Graphics *pgraphics2) {
-		Gdiplus::SolidBrush brush(Gdiplus::Color(_alphas[0], r, g, b));
-		pgraphics0->FillRectangle(&brush, w - 2 * _size - (_fullsize - (_size - _shift)), 0, _fullsize - (_size - _shift), 2 * _shift);
-		for (int j = 2 * _shift; j < _size; ++j) {
-			for (int k = 0; k < _fullsize - (_size - _shift); ++k) {
-				brush.SetColor(Gdiplus::Color(_colors[j * _metaSize + k + (_size + _shift)], r, g, b));
-				pgraphics0->FillRectangle(&brush, w - 2 * _size - k - 1, j, 1, 1);
-				pgraphics2->FillRectangle(&brush, w - 2 * _size - k - 1, _size - (j - 2 * _shift) - 1, 1, 1);
-			}
-		}
-		for (int j = _size; j < _size + 2 * _shift; ++j) {
-			for (int k = 0; k < _fullsize - (_size - _shift); ++k) {
-				brush.SetColor(Gdiplus::Color(_colors[j * _metaSize + k + (_size + _shift)], r, g, b));
-				pgraphics2->FillRectangle(&brush, w - 2 * _size - k - 1, _size - (j - 2 * _shift) - 1, 1, 1);
-			}
-		}
-	}
-
-	void update(Changes changes, WINDOWPOS *pos = 0) {
-		HWND hwnd = _window ? _window->psHwnd() : 0;
-		if (!hwnd || !hwnds[0]) return;
-
-		if (changes == Changes(Change::Activate)) {
-			for (int i = 0; i < 4; ++i) {
-				SetWindowPos(hwnds[i], hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-			}
-			return;
-		}
-
-		if (changes & Change::Hidden) {
-			if (!hidden) {
-				for (int i = 0; i < 4; ++i) {
-					hidden = true;
-					ShowWindow(hwnds[i], SW_HIDE);
-				}
-			}
-			return;
-		}
-		if (!_window->positionInited()) return;
-
-		int x = _x, y = _y, w = _w, h = _h;
-		if (pos && (!(pos->flags & SWP_NOMOVE) || !(pos->flags & SWP_NOSIZE) || !(pos->flags & SWP_NOREPOSITION))) {
-			if (!(pos->flags & SWP_NOMOVE)) {
-				x = pos->x - _size;
-				y = pos->y - _size;
-			} else if (pos->flags & SWP_NOSIZE) {
-				for (int i = 0; i < 4; ++i) {
-					SetWindowPos(hwnds[i], hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-				}
-				return;
-			}
-			if (!(pos->flags & SWP_NOSIZE)) {
-				w = pos->cx + 2 * _size;
-				h = pos->cy + 2 * _size;
-			}
-		} else {
-			RECT r;
-			GetWindowRect(hwnd, &r);
-			x = r.left - _size;
-			y = r.top - _size;
-			w = r.right + _size - x;
-			h = r.bottom + _size - y;
-		}
-		if (h < 2 * _fullsize + 2 * _shift) {
-			h = 2 * _fullsize + 2 * _shift;
-		}
-		if (w < 2 * (_fullsize + _shift)) {
-			w = 2 * (_fullsize + _shift);
-		}
-
-		if (w != _w) {
-			int from = (_w > 2 * (_fullsize + _shift)) ? (_w - _size - _fullsize - _shift) : (_fullsize - (_size - _shift));
-			int to = w - _size - _fullsize - _shift;
-			if (w > max_w) {
-				from = _fullsize - (_size - _shift);
-				max_w *= 2;
-				for (int i = 0; i < 4; i += 2) {
-					DeleteObject(bitmaps[i]);
-					bitmaps[i] = CreateCompatibleBitmap(screenDC, max_w, _size);
-					SelectObject(dcs[i], bitmaps[i]);
-				}
-				initCorners(_PsInitHor);
-			}
-			Gdiplus::Graphics graphics0(dcs[0]), graphics2(dcs[2]);
-			graphics0.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-			graphics2.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-			Gdiplus::SolidBrush brush(Gdiplus::Color(_alphas[0], r, g, b));
-			if (to > from) {
-				graphics0.FillRectangle(&brush, from, 0, to - from, 2 * _shift);
-				for (int i = 2 * _shift; i < _size; ++i) {
-					Gdiplus::Pen pen(Gdiplus::Color(_alphas[i], r, g, b));
-					graphics0.DrawLine(&pen, from, i, to, i);
-					graphics2.DrawLine(&pen, from, _size - (i - 2 * _shift) - 1, to, _size - (i - 2 * _shift) - 1);
-				}
-				for (int i = _size; i < _size + 2 * _shift; ++i) {
-					Gdiplus::Pen pen(Gdiplus::Color(_alphas[i], r, g, b));
-					graphics2.DrawLine(&pen, from, _size - (i - 2 * _shift) - 1, to, _size - (i - 2 * _shift) - 1);
-				}
-			}
-			if (_w > w) {
-				graphics0.FillRectangle(&brush, w - _size - _fullsize - _shift, 0, _fullsize - (_size - _shift), _size);
-				graphics2.FillRectangle(&brush, w - _size - _fullsize - _shift, 0, _fullsize - (_size - _shift), _size);
-			}
-			horCorners(w, &graphics0, &graphics2);
-			POINT p0 = { x + _size, y }, p2 = { x + _size, y + h - _size }, f = { 0, 0 };
-			SIZE s = { w - 2 * _size, _size };
-			updateWindow(0, &p0, &s);
-			updateWindow(2, &p2, &s);
-		} else if (x != _x || y != _y) {
-			POINT p0 = { x + _size, y }, p2 = { x + _size, y + h - _size };
-			updateWindow(0, &p0);
-			updateWindow(2, &p2);
-		} else if (h != _h) {
-			POINT p2 = { x + _size, y + h - _size };
-			updateWindow(2, &p2);
-		}
-
-		if (h != _h) {
-			int from = (_h > 2 * _fullsize + 2 * _shift) ? (_h - _fullsize) : (_fullsize + 2 * _shift);
-			int to = h - _fullsize;
-			if (h > max_h) {
-				from = (_fullsize + 2 * _shift);
-				max_h *= 2;
-				for (int i = 1; i < 4; i += 2) {
-					DeleteObject(bitmaps[i]);
-					bitmaps[i] = CreateCompatibleBitmap(dcs[i], _size, max_h);
-					SelectObject(dcs[i], bitmaps[i]);
-				}
-				initCorners(_PsInitVer);
-			}
-			Gdiplus::Graphics graphics1(dcs[1]), graphics3(dcs[3]);
-			graphics1.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-			graphics3.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-
-			Gdiplus::SolidBrush brush(Gdiplus::Color(_alphas[0], r, g, b));
-			if (to > from) {
-				graphics1.FillRectangle(&brush, _size - _shift, from, _shift, to - from);
-				graphics3.FillRectangle(&brush, 0, from, _shift, to - from);
-				for (int i = 2 * _shift; i < _size + _shift; ++i) {
-					Gdiplus::Pen pen(Gdiplus::Color(_alphas[i], r, g, b));
-					graphics1.DrawLine(&pen, _size + _shift - i - 1, from, _size + _shift - i - 1, to);
-					graphics3.DrawLine(&pen, i - _shift, from, i - _shift, to);
-				}
-			}
-			if (_h > h) {
-				graphics1.FillRectangle(&brush, 0, h - _fullsize, _size, _fullsize);
-				graphics3.FillRectangle(&brush, 0, h - _fullsize, _size, _fullsize);
-			}
-			verCorners(h, &graphics1, &graphics3);
-
-			POINT p1 = { x + w - _size, y }, p3 = { x, y }, f = { 0, 0 };
-			SIZE s = { _size, h };
-			updateWindow(1, &p1, &s);
-			updateWindow(3, &p3, &s);
-		} else if (x != _x || y != _y) {
-			POINT p1 = { x + w - _size, y }, p3 = { x, y };
-			updateWindow(1, &p1);
-			updateWindow(3, &p3);
-		} else if (w != _w) {
-			POINT p1 = { x + w - _size, y };
-			updateWindow(1, &p1);
-		}
-		_x = x;
-		_y = y;
-		_w = w;
-		_h = h;
-
-		if (hidden && (changes & Change::Shown)) {
-			for (int i = 0; i < 4; ++i) {
-				SetWindowPos(hwnds[i], hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-			}
-			hidden = false;
-		}
-	}
-
-	void updateWindow(int i, POINT *p, SIZE *s = 0) {
-		static POINT f = { 0, 0 };
-		if (s) {
-			UpdateLayeredWindow(hwnds[i], (s ? screenDC : 0), p, s, (s ? dcs[i] : 0), (s ? (&f) : 0), noKeyColor, &blend, ULW_ALPHA);
-		} else {
-			SetWindowPos(hwnds[i], 0, p->x, p->y, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
-		}
-	}
-
-	void destroy() {
-		for (int i = 0; i < 4; ++i) {
-			if (dcs[i]) DeleteDC(dcs[i]);
-			if (bitmaps[i]) DeleteObject(bitmaps[i]);
-			if (hwnds[i]) DestroyWindow(hwnds[i]);
-			dcs[i] = 0;
-			bitmaps[i] = 0;
-			hwnds[i] = 0;
-		}
-		if (screenDC) ReleaseDC(0, screenDC);
-	}
-
-	MainWindow *window() const {
-		return _window;
-	}
-
-private:
-
-	int _x = 0, _y = 0, _w = 0, _h = 0;
-	int _metaSize = 0, _fullsize = 0, _size = 0, _shift = 0;
-	QVector<BYTE> _alphas, _colors;
-
-	MainWindow *_window = nullptr;
-	bool hidden = true;
-
-	HWND hwnds[4];
-	HDC dcs[4], screenDC;
-	HBITMAP bitmaps[4];
-	int max_w = 0, max_h = 0;
-	BLENDFUNCTION blend;
-
-	BYTE r = 0, g = 0, b = 0;
-	COLORREF noKeyColor;
-
-	static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-};
-_PsShadowWindows _psShadowWindows;
-
-LRESULT CALLBACK _PsShadowWindows::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-	const auto window = _psShadowWindows.window();
-	if (!window || !window->shadowsWorking()) {
-		return DefWindowProc(hwnd, msg, wParam, lParam);
-	}
-
-	int i;
-	for (i = 0; i < 4; ++i) {
-		if (_psShadowWindows.hwnds[i] && hwnd == _psShadowWindows.hwnds[i]) {
-			break;
-		}
-	}
-	if (i == 4) return DefWindowProc(hwnd, msg, wParam, lParam);
-
-	switch (msg) {
-	case WM_CLOSE:
-		window->close();
-	break;
-
-	case WM_NCHITTEST: {
-		int32 xPos = GET_X_LPARAM(lParam), yPos = GET_Y_LPARAM(lParam);
-		switch (i) {
-		case 0: return HTTOP;
-		case 1: return (yPos < _psShadowWindows._y + _psSize) ? HTTOPRIGHT : ((yPos >= _psShadowWindows._y + _psShadowWindows._h - _psSize) ? HTBOTTOMRIGHT : HTRIGHT);
-		case 2: return HTBOTTOM;
-		case 3: return (yPos < _psShadowWindows._y + _psSize) ? HTTOPLEFT : ((yPos >= _psShadowWindows._y + _psShadowWindows._h - _psSize) ? HTBOTTOMLEFT : HTLEFT);
-		}
-		return HTTRANSPARENT;
-	} break;
-
-	case WM_NCACTIVATE: return DefWindowProc(hwnd, msg, wParam, lParam);
-	case WM_NCLBUTTONDOWN:
-	case WM_NCLBUTTONUP:
-	case WM_NCLBUTTONDBLCLK:
-	case WM_NCMBUTTONDOWN:
-	case WM_NCMBUTTONUP:
-	case WM_NCMBUTTONDBLCLK:
-	case WM_NCRBUTTONDOWN:
-	case WM_NCRBUTTONUP:
-	case WM_NCRBUTTONDBLCLK:
-	case WM_NCXBUTTONDOWN:
-	case WM_NCXBUTTONUP:
-	case WM_NCXBUTTONDBLCLK:
-	case WM_NCMOUSEHOVER:
-	case WM_NCMOUSELEAVE:
-	case WM_NCMOUSEMOVE:
-	case WM_NCPOINTERUPDATE:
-	case WM_NCPOINTERDOWN:
-	case WM_NCPOINTERUP:
-	if (window && window->psHwnd()) {
-		if (msg == WM_NCLBUTTONDOWN) {
-			::SetForegroundWindow(window->psHwnd());
-		}
-		LRESULT res = SendMessage(window->psHwnd(), msg, wParam, lParam);
-		return res;
-	}
-	return 0;
-	break;
-	case WM_ACTIVATE:
-	if (window && window->psHwnd() && wParam == WA_ACTIVE) {
-		if ((HWND)lParam != window->psHwnd()) {
-			::SetForegroundWindow(hwnd);
-			::SetWindowPos(window->psHwnd(), hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-		}
-	}
-	return DefWindowProc(hwnd, msg, wParam, lParam);
-	break;
-	default:
-	return DefWindowProc(hwnd, msg, wParam, lParam);
-	}
-	return 0;
+	return radius
+		? Images::Round(std::move(result), Images::CornersMask(radius))
+		: result;
 }
 
-ComPtr<ITaskbarList3> taskbarList;
+EventFilter::EventFilter(not_null<MainWindow*> window) : _window(window) {
+}
 
-bool handleSessionNotification = false;
-
-} // namespace
-
-UINT MainWindow::_taskbarCreatedMsgId = 0;
-
-MainWindow::MainWindow(not_null<Window::Controller*> controller)
-: Window::MainWindow(controller)
-, ps_tbHider_hWnd(createTaskbarHider()) {
-	QCoreApplication::instance()->installNativeEventFilter(
-		EventFilter::CreateInstance(this));
-
-	if (!_taskbarCreatedMsgId) {
-		_taskbarCreatedMsgId = RegisterWindowMessage(L"TaskbarButtonCreated");
-	}
-	subscribe(Window::Theme::Background(), [this](const Window::Theme::BackgroundUpdate &update) {
-		if (update.paletteChanged()) {
-			_psShadowWindows.setColor(st::windowShadowFg->c);
+bool EventFilter::nativeEventFilter(
+		const QByteArray &eventType,
+		void *message,
+		native_event_filter_result *result) {
+	return Core::Sandbox::Instance().customEnterFromEventLoop([&] {
+		const auto msg = static_cast<MSG*>(message);
+		if (msg->hwnd == _window->psHwnd()
+			|| msg->hwnd && !_window->psHwnd()) {
+			return mainWindowEvent(
+				msg->hwnd,
+				msg->message,
+				msg->wParam,
+				msg->lParam,
+				(LRESULT*)result);
 		}
+		return false;
 	});
 }
 
-void MainWindow::TaskbarCreated() {
-	HRESULT hr = CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&taskbarList));
-	if (!SUCCEEDED(hr)) {
-		taskbarList.Reset();
+bool EventFilter::mainWindowEvent(
+		HWND hWnd,
+		UINT msg,
+		WPARAM wParam,
+		LPARAM lParam,
+		LRESULT *result) {
+	switch (msg) {
+
+	case WM_DESTROY: {
+		_window->destroyedFromSystem();
+	} return false;
+
+	case WM_ACTIVATE: {
+		if (LOWORD(wParam) != WA_INACTIVE) {
+			_window->shadowsActivate();
+		} else {
+			_window->shadowsDeactivate();
+		}
+	} return false;
+
+	case WM_SIZE: {
+		if (wParam == SIZE_MAXIMIZED || wParam == SIZE_RESTORED || wParam == SIZE_MINIMIZED) {
+			if (wParam == SIZE_RESTORED && _window->windowState() == Qt::WindowNoState) {
+				_window->positionUpdated();
+			}
+		}
+	} return false;
+
+	case WM_MOVE: {
+		_window->positionUpdated();
+	} return false;
+
+	case WM_DWMSENDICONICTHUMBNAIL: {
+		if (!Core::App().passcodeLocked()) {
+			return false;
+		}
+		const auto size = QSize(int(HIWORD(lParam)), int(LOWORD(lParam)));
+		return _window->setDwmThumbnail(size);
+	}
+
+	case WM_DWMSENDICONICLIVEPREVIEWBITMAP: {
+		if (!Core::App().passcodeLocked()) {
+			return false;
+		}
+		const auto size = DetectRealSize(hWnd);
+		const auto radius = size.maximized ? 0 : style::ConvertScale(8);
+		return _window->setDwmPreview(size.value, radius);
+	}
+
+	}
+	return false;
+}
+
+[[nodiscard]] QString HumanReadableDisplayName(HMONITOR hMonitor) {
+	// https://github.com/qt/qtbase/commit/6136b92f540c15835e0c7eb7e01ab7b58fbea685
+	auto monitorInfo = MONITORINFOEX{};
+	monitorInfo.cbSize = sizeof(MONITORINFOEX);
+	if (!GetMonitorInfo(hMonitor, &monitorInfo)) {
+		return QString();
+	}
+
+	// Try Display Configuration API first (Windows 7+).
+	auto numPathArrayElements = UINT32(0);
+	auto numModeInfoArrayElements = UINT32(0);
+	if (GetDisplayConfigBufferSizes(
+			QDC_ONLY_ACTIVE_PATHS,
+			&numPathArrayElements,
+			&numModeInfoArrayElements) != ERROR_SUCCESS) {
+		return QString();
+	}
+
+	auto pathInfos = std::vector<DISPLAYCONFIG_PATH_INFO>(
+		numPathArrayElements);
+	auto modeInfos = std::vector<DISPLAYCONFIG_MODE_INFO>(
+		numModeInfoArrayElements);
+
+	if (QueryDisplayConfig(
+			QDC_ONLY_ACTIVE_PATHS,
+			&numPathArrayElements,
+			pathInfos.data(),
+			&numModeInfoArrayElements,
+			modeInfos.data(),
+			nullptr) != ERROR_SUCCESS) {
+		return QString();
+	}
+
+	// Find matching path.
+	for (const auto &path : pathInfos) {
+		auto deviceName = DISPLAYCONFIG_SOURCE_DEVICE_NAME{};
+		deviceName.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(
+			DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME);
+		deviceName.header.size = sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME);
+		deviceName.header.adapterId = path.sourceInfo.adapterId;
+		deviceName.header.id = path.sourceInfo.id;
+
+		if (DisplayConfigGetDeviceInfo(&deviceName.header) != ERROR_SUCCESS
+			|| wcscmp(
+				monitorInfo.szDevice,
+				deviceName.viewGdiDeviceName) != 0) {
+			continue;
+		}
+
+		auto targetName = DISPLAYCONFIG_TARGET_DEVICE_NAME{};
+		targetName.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(
+			DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME);
+		targetName.header.size = sizeof(DISPLAYCONFIG_TARGET_DEVICE_NAME);
+		targetName.header.adapterId = path.targetInfo.adapterId;
+		targetName.header.id = path.targetInfo.id;
+
+		if (DisplayConfigGetDeviceInfo(&targetName.header) == ERROR_SUCCESS) {
+			const auto friendlyName = QString::fromWCharArray(
+				targetName.monitorFriendlyDeviceName);
+			if (!friendlyName.isEmpty()) {
+				return friendlyName;
+			}
+		}
+	}
+
+	// Fallback to legacy method.
+	auto displayDevice = DISPLAY_DEVICE{};
+	displayDevice.cb = sizeof(DISPLAY_DEVICE);
+	for (auto deviceIndex = DWORD(0);
+			EnumDisplayDevices(
+				monitorInfo.szDevice,
+				deviceIndex,
+				&displayDevice,
+				0);
+			deviceIndex++) {
+		if (!(displayDevice.StateFlags & DISPLAY_DEVICE_ACTIVE)) {
+			continue;
+		}
+		const auto deviceName = QString::fromWCharArray(
+			displayDevice.DeviceString);
+		if (!deviceName.isEmpty()
+			&& deviceName != u"Generic PnP Monitor"_q) {
+			return deviceName;
+		}
+		break;
+	}
+
+	return QString();
+}
+
+} // namespace
+
+struct MainWindow::Private {
+	explicit Private(not_null<MainWindow*> window) : filter(window) {
+	}
+
+	EventFilter filter;
+	ComPtr<ViewManagement::IUIViewSettings> viewSettings;
+};
+
+MainWindow::BitmapPointer::BitmapPointer(HBITMAP value) : _value(value) {
+}
+
+MainWindow::BitmapPointer::BitmapPointer(BitmapPointer &&other)
+: _value(base::take(other._value)) {
+}
+
+MainWindow::BitmapPointer &MainWindow::BitmapPointer::operator=(
+		BitmapPointer &&other) {
+	if (_value != other._value) {
+		reset();
+		_value = base::take(other._value);
+	}
+	return *this;
+}
+
+MainWindow::BitmapPointer::~BitmapPointer() {
+	reset();
+}
+
+HBITMAP MainWindow::BitmapPointer::get() const {
+	return _value;
+}
+
+MainWindow::BitmapPointer::operator bool() const {
+	return _value != nullptr;
+}
+
+void MainWindow::BitmapPointer::release() {
+	_value = nullptr;
+}
+
+void MainWindow::BitmapPointer::reset(HBITMAP value) {
+	if (_value != value) {
+		if (const auto old = std::exchange(_value, value)) {
+			DeleteObject(old);
+		}
 	}
 }
 
-void MainWindow::shadowsUpdate(ShadowsChanges changes, WINDOWPOS *position) {
-	_psShadowWindows.update(changes, position);
+MainWindow::MainWindow(not_null<Window::Controller*> controller)
+: Window::MainWindow(controller)
+, _private(std::make_unique<Private>(this))
+, _taskbarHiderWindow(std::make_unique<QWindow>()) {
+	qApp->installNativeEventFilter(&_private->filter);
+
+	setupNativeWindowFrame();
+
+	SetWindowPriority(this, controller->isPrimary() ? 2 : 1);
+
+	using namespace rpl::mappers;
+	Core::App().appDeactivatedValue(
+	) | rpl::distinct_until_changed(
+	) | rpl::filter(_1) | rpl::on_next([=] {
+		_lastDeactivateTime = crl::now();
+	}, lifetime());
+
+	setupPreviewPasscodeLock();
+}
+
+void MainWindow::setupPreviewPasscodeLock() {
+	Core::App().passcodeLockValue(
+	) | rpl::on_next([=](bool locked) {
+		// Use iconic bitmap instead of the window content if passcoded.
+		BOOL fForceIconic = locked ? TRUE : FALSE;
+		BOOL fHasIconicBitmap = fForceIconic;
+		DwmSetWindowAttribute(
+			_hWnd,
+			DWMWA_FORCE_ICONIC_REPRESENTATION,
+			&fForceIconic,
+			sizeof(fForceIconic));
+		DwmSetWindowAttribute(
+			_hWnd,
+			DWMWA_HAS_ICONIC_BITMAP,
+			&fHasIconicBitmap,
+			sizeof(fHasIconicBitmap));
+	}, lifetime());
+}
+
+void MainWindow::setupNativeWindowFrame() {
+	auto nativeFrame = rpl::single(
+		Core::App().settings().nativeWindowFrame()
+	) | rpl::then(
+		Core::App().settings().nativeWindowFrameChanges()
+	);
+
+	rpl::combine(
+		std::move(nativeFrame),
+		Window::Theme::IsNightModeValue()
+	) | rpl::skip(1) | rpl::on_next([=](bool native, bool night) {
+		validateWindowTheme(native, night);
+	}, lifetime());
 }
 
 void MainWindow::shadowsActivate() {
-//	_psShadowWindows.setColor(_shActive);
-	shadowsUpdate(ShadowsChange::Activate);
+	_hasActiveFrame = true;
 }
 
 void MainWindow::shadowsDeactivate() {
-//	_psShadowWindows.setColor(_shInactive);
+	_hasActiveFrame = false;
 }
 
-void MainWindow::psShowTrayMenu() {
-	trayIconMenu->popup(QCursor::pos());
+void MainWindow::destroyedFromSystem() {
+	if (!Core::App().closeNonLastAsync(&controller())) {
+		Core::Quit();
+	}
 }
 
-int32 MainWindow::screenNameChecksum(const QString &name) const {
+bool MainWindow::setDwmThumbnail(QSize size) {
+	validateDwmPreviewColors();
+	if (size.isEmpty()) {
+		return false;
+	} else if (!_dwmThumbnail || _dwmThumbnailSize != size) {
+		const auto result = PrepareLogoPreview(size, QImage::Format_RGB32);
+		const auto bitmap = qt_imageToWinHBITMAP(result, HBitmapNoAlpha);
+		if (!bitmap) {
+			return false;
+		}
+		_dwmThumbnail.reset(bitmap);
+		_dwmThumbnailSize = size;
+	}
+	DwmSetIconicThumbnail(_hWnd, _dwmThumbnail.get(), NULL);
+	return true;
+}
+
+bool MainWindow::setDwmPreview(QSize size, int radius) {
+	Expects(radius >= 0);
+
+	validateDwmPreviewColors();
+	if (size.isEmpty()) {
+		return false;
+	} else if (!_dwmPreview
+		|| _dwmPreviewSize != size
+		|| _dwmPreviewRadius != radius) {
+		const auto format = (radius > 0)
+			? QImage::Format_ARGB32_Premultiplied
+			: QImage::Format_RGB32;
+		const auto result = PrepareLogoPreview(size, format, radius);
+		const auto bitmap = qt_imageToWinHBITMAP(
+			result,
+			(radius > 0) ? HBitmapPremultipliedAlpha : HBitmapNoAlpha);
+		if (!bitmap) {
+			return false;
+		}
+		_dwmPreview.reset(bitmap);
+		_dwmPreviewRadius = radius;
+		_dwmPreviewSize = size;
+	}
+	const auto flags = 0;
+	DwmSetIconicLivePreviewBitmap(_hWnd, _dwmPreview.get(), NULL, flags);
+	return true;
+}
+
+void MainWindow::validateDwmPreviewColors() {
+	if (_dwmBackground == st::windowBg->c) {
+		return;
+	}
+	_dwmBackground = st::windowBg->c;
+	_dwmThumbnail.reset();
+	_dwmPreview.reset();
+}
+
+void MainWindow::forceIconRefresh() {
+	const auto refresher = std::make_unique<QWidget>(this);
+	refresher->setWindowFlags(
+		static_cast<Qt::WindowFlags>(Qt::Tool) | Qt::FramelessWindowHint);
+	refresher->setGeometry(x() + 1, y() + 1, 1, 1);
+	auto palette = refresher->palette();
+	palette.setColor(
+		QPalette::Window,
+		(isActiveWindow() ? st::titleBgActive : st::titleBg)->c);
+	refresher->setPalette(palette);
+	refresher->show();
+	refresher->raise();
+	refresher->activateWindow();
+
+	updateTaskbarAndIconCounters();
+}
+
+void MainWindow::workmodeUpdated(Core::Settings::WorkMode mode) {
+	using WorkMode = Core::Settings::WorkMode;
+
+	switch (mode) {
+	case WorkMode::WindowAndTray: {
+		HWND psOwner = (HWND)GetWindowLongPtr(_hWnd, GWLP_HWNDPARENT);
+		if (psOwner) {
+			SetWindowLongPtr(_hWnd, GWLP_HWNDPARENT, 0);
+			windowHandle()->setTransientParent(nullptr);
+			forceIconRefresh();
+		}
+	} break;
+
+	case WorkMode::TrayOnly: {
+		HWND psOwner = (HWND)GetWindowLongPtr(_hWnd, GWLP_HWNDPARENT);
+		if (!psOwner) {
+			const auto hwnd = _taskbarHiderWindow->winId();
+			SetWindowLongPtr(_hWnd, GWLP_HWNDPARENT, (LONG_PTR)hwnd);
+			windowHandle()->setTransientParent(_taskbarHiderWindow.get());
+		}
+	} break;
+
+	case WorkMode::WindowOnly: {
+		HWND psOwner = (HWND)GetWindowLongPtr(_hWnd, GWLP_HWNDPARENT);
+		if (psOwner) {
+			SetWindowLongPtr(_hWnd, GWLP_HWNDPARENT, 0);
+			windowHandle()->setTransientParent(nullptr);
+			forceIconRefresh();
+		}
+	} break;
+	}
+}
+
+bool MainWindow::hasTabletView() const {
+	if (!_private->viewSettings) {
+		return false;
+	}
+	auto mode = ViewManagement::UserInteractionMode();
+	_private->viewSettings->get_UserInteractionMode(&mode);
+	return (mode == ViewManagement::UserInteractionMode_Touch);
+}
+
+bool MainWindow::initGeometryFromSystem() {
+	if (!hasTabletView() || !screen()) {
+		return false;
+	}
+	Ui::RpWidget::setGeometry(screen()->availableGeometry());
+	return true;
+}
+
+bool MainWindow::nativeEvent(
+		const QByteArray &eventType,
+		void *message,
+		native_event_filter_result *result) {
+	if (message) {
+		const auto msg = static_cast<MSG*>(message);
+		if (msg->message == WM_IME_STARTCOMPOSITION) {
+			Core::Sandbox::Instance().customEnterFromEventLoop([&] {
+				imeCompositionStartReceived();
+			});
+		}
+	}
+	return false;
+}
+
+void MainWindow::updateWindowIcon() {
+	updateTaskbarAndIconCounters();
+}
+
+bool MainWindow::isActiveForTrayMenu() {
+	return !_lastDeactivateTime
+		|| (_lastDeactivateTime + kKeepActiveForTrayIcon >= crl::now());
+}
+
+void MainWindow::unreadCounterChangedHook() {
+	updateTaskbarAndIconCounters();
+}
+
+void MainWindow::updateTaskbarAndIconCounters() {
+	const auto counter = Core::App().unreadBadge();
+	const auto muted = Core::App().unreadBadgeMuted();
+	const auto controller = sessionController();
+	const auto session = controller ? &controller->session() : nullptr;
+
+	const auto iconSizeSmall = QSize(
+		GetSystemMetrics(SM_CXSMICON),
+		GetSystemMetrics(SM_CYSMICON));
+	const auto iconSizeBig = QSize(
+		GetSystemMetrics(SM_CXICON),
+		GetSystemMetrics(SM_CYICON));
+	const auto supportMode = session && session->supportMode();
+
+	auto iconSmallPixmap16 = Tray::IconWithCounter(
+		Tray::CounterLayerArgs(16, counter, muted),
+		true,
+		false,
+		supportMode);
+	auto iconSmallPixmap32 = Tray::IconWithCounter(
+		Tray::CounterLayerArgs(32, counter, muted),
+		true,
+		false,
+		supportMode);
+	QIcon iconSmall, iconBig;
+	iconSmall.addPixmap(iconSmallPixmap16);
+	iconSmall.addPixmap(iconSmallPixmap32);
+	const auto integration = &Platform::WindowsIntegration::Instance();
+	const auto taskbarList = integration->taskbarList();
+	const auto bigCounter = taskbarList ? 0 : counter;
+	iconBig.addPixmap(Tray::IconWithCounter(
+		Tray::CounterLayerArgs(32, bigCounter, muted),
+		false,
+		false,
+		supportMode));
+	iconBig.addPixmap(Tray::IconWithCounter(
+		Tray::CounterLayerArgs(64, bigCounter, muted),
+		false,
+		false,
+		supportMode));
+
+	destroyCachedIcons();
+	_iconSmall = NativeIcon(iconSmall, iconSizeSmall);
+	_iconBig = NativeIcon(iconBig, iconSizeBig);
+	SendMessage(_hWnd, WM_SETICON, ICON_SMALL, (LPARAM)_iconSmall);
+	SendMessage(_hWnd, WM_SETICON, ICON_BIG, (LPARAM)(_iconBig ? _iconBig : _iconSmall));
+	if (taskbarList) {
+		if (counter > 0) {
+			const auto pixmap = [&](int size) {
+				return Ui::PixmapFromImage(Window::GenerateCounterLayer(
+					Tray::CounterLayerArgs(size, counter, muted)));
+			};
+			QIcon iconOverlay;
+			iconOverlay.addPixmap(pixmap(16));
+			iconOverlay.addPixmap(pixmap(32));
+			_iconOverlay = NativeIcon(iconOverlay, iconSizeSmall);
+		}
+		const auto description = (counter > 0)
+			? tr::lng_unread_bar(tr::now, lt_count, counter).toStdWString()
+			: std::wstring();
+		taskbarList->SetOverlayIcon(_hWnd, _iconOverlay, description.c_str());
+	}
+	SetWindowPos(_hWnd, 0, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void MainWindow::initHook() {
+	_hWnd = reinterpret_cast<HWND>(winId());
+	if (!_hWnd) {
+		return;
+	}
+
+	WTSRegisterSessionNotification(_hWnd, NOTIFY_FOR_THIS_SESSION);
+
+	using namespace base::Platform;
+	auto factory = ComPtr<IUIViewSettingsInterop>();
+	if (SupportsWRL()) {
+		ABI::Windows::Foundation::GetActivationFactory(
+			StringReferenceWrapper(
+				RuntimeClass_Windows_UI_ViewManagement_UIViewSettings).Get(),
+			&factory);
+		if (factory) {
+			// NB! No such method (or IUIViewSettingsInterop) in C++/WinRT :(
+			factory->GetForWindow(
+				_hWnd,
+				IID_PPV_ARGS(&_private->viewSettings));
+		}
+	}
+
+	validateWindowTheme(
+		Core::App().settings().nativeWindowFrame(),
+		Window::Theme::IsNightMode());
+}
+
+void MainWindow::validateWindowTheme(bool native, bool night) {
+	if (!IsWindows8OrGreater()) {
+		const auto empty = native ? nullptr : L" ";
+		SetWindowTheme(_hWnd, empty, empty);
+		QApplication::setStyle(QStyleFactory::create(u"Windows"_q));
+#if 0
+	} else if (!Core::App().settings().systemDarkMode().has_value()/*
+		|| (!Dlls::AllowDarkModeForApp && !Dlls::SetPreferredAppMode)
+		|| !Dlls::AllowDarkModeForWindow
+		|| !Dlls::RefreshImmersiveColorPolicyState
+		|| !Dlls::FlushMenuThemes*/) {
+		return;
+#endif
+	} else if (!native) {
+		SetWindowTheme(_hWnd, nullptr, nullptr);
+		return;
+	}
+
+	// See "https://github.com/microsoft/terminal/blob/"
+	// "eb480b6bbbd83a2aafbe62992d360838e0ab9da5/"
+	// "src/interactivity/win32/windowtheme.cpp#L43-L63"
+
+	auto darkValue = BOOL(night ? TRUE : FALSE);
+
+	const auto updateStyle = [&] {
+		static const auto kSystemVersion = QOperatingSystemVersion::current();
+		if (kSystemVersion.microVersion() >= 18875 && Dlls::SetWindowCompositionAttribute) {
+			Dlls::WINDOWCOMPOSITIONATTRIBDATA data = {
+				Dlls::WINDOWCOMPOSITIONATTRIB::WCA_USEDARKMODECOLORS,
+				&darkValue,
+				sizeof(darkValue)
+			};
+			Dlls::SetWindowCompositionAttribute(_hWnd, &data);
+		} else if (kSystemVersion.microVersion() >= 17763) {
+			static const auto kDWMWA_USE_IMMERSIVE_DARK_MODE = (kSystemVersion.microVersion() >= 18985)
+				? DWORD(20)
+				: DWORD(19);
+			DwmSetWindowAttribute(
+				_hWnd,
+				kDWMWA_USE_IMMERSIVE_DARK_MODE,
+				&darkValue,
+				sizeof(darkValue));
+		}
+	};
+
+	updateStyle();
+
+	// See "https://osdn.net/projects/tortoisesvn/scm/svn/blobs/28812/"
+	// "trunk/src/TortoiseIDiff/MainWindow.cpp"
+	//
+	// But for now it works event with a small part of that.
+	//
+
+	//const auto updateWindowTheme = [&] {
+	//	const auto set = [&](LPCWSTR name) {
+	//		return SetWindowTheme(_hWnd, name, nullptr);
+	//	};
+	//	if (!night || FAILED(set(L"DarkMode_Explorer"))) {
+	//		set(L"Explorer");
+	//	}
+	//};
+	//
+	//if (night) {
+	//	if (Dlls::SetPreferredAppMode) {
+	//		Dlls::SetPreferredAppMode(Dlls::PreferredAppMode::AllowDark);
+	//	} else {
+	//		Dlls::AllowDarkModeForApp(TRUE);
+	//	}
+	//	Dlls::AllowDarkModeForWindow(_hWnd, TRUE);
+	//	updateWindowTheme();
+	//	updateStyle();
+	//	Dlls::FlushMenuThemes();
+	//	Dlls::RefreshImmersiveColorPolicyState();
+	//} else {
+	//	updateWindowTheme();
+	//	Dlls::AllowDarkModeForWindow(_hWnd, FALSE);
+	//	updateStyle();
+	//	Dlls::FlushMenuThemes();
+	//	Dlls::RefreshImmersiveColorPolicyState();
+	//	if (Dlls::SetPreferredAppMode) {
+	//		Dlls::SetPreferredAppMode(Dlls::PreferredAppMode::Default);
+	//	} else {
+	//		Dlls::AllowDarkModeForApp(FALSE);
+	//	}
+	//}
+
+	// Didn't find any other way to definitely repaint with the new style.
+	SendMessage(_hWnd, WM_NCACTIVATE, _hasActiveFrame ? 0 : 1, 0);
+	SendMessage(_hWnd, WM_NCACTIVATE, _hasActiveFrame ? 1 : 0, 0);
+}
+
+HWND MainWindow::psHwnd() const {
+	return _hWnd;
+}
+
+void MainWindow::destroyCachedIcons() {
+	const auto destroy = [](HICON &icon) {
+		if (icon) {
+			DestroyIcon(icon);
+			icon = nullptr;
+		}
+	};
+	destroy(_iconBig);
+	destroy(_iconSmall);
+	destroy(_iconOverlay);
+}
+
+MainWindow::~MainWindow() {
+	WTSUnRegisterSessionNotification(_hWnd);
+	_private->viewSettings.Reset();
+	destroyCachedIcons();
+}
+
+int32 ScreenNameChecksum(const QString &name) {
 	constexpr int DeviceNameSize = base::array_size(MONITORINFOEX().szDevice);
 	wchar_t buffer[DeviceNameSize] = { 0 };
 	if (name.size() < DeviceNameSize) {
@@ -665,314 +814,51 @@ int32 MainWindow::screenNameChecksum(const QString &name) const {
 	return base::crc32(buffer, sizeof(buffer));
 }
 
-void MainWindow::psRefreshTaskbarIcon() {
-	const auto refresher = std::make_unique<QWidget>(this);
-	refresher->setWindowFlags(static_cast<Qt::WindowFlags>(Qt::Tool) | Qt::FramelessWindowHint);
-	refresher->setGeometry(x() + 1, y() + 1, 1, 1);
-	auto palette = refresher->palette();
-	palette.setColor(QPalette::Background, (isActiveWindow() ? st::titleBgActive : st::titleBg)->c);
-	refresher->setPalette(palette);
-	refresher->show();
-	refresher->activateWindow();
-
-	updateIconCounters();
+int32 ScreenNameChecksum(const QScreen *screen) {
+	return ScreenNameChecksum(screen->name());
 }
 
-void MainWindow::psTrayMenuUpdated() {
+QString ScreenDisplayLabel(const QScreen *screen) {
+	if (!screen) {
+		return QString();
+	}
+
+	const auto geometry = screen->geometry();
+	const auto hMonitor = MonitorFromPoint(
+		POINT{
+			geometry.x() + geometry.width() / 2,
+			geometry.y() + geometry.height() / 2,
+		},
+		MONITOR_DEFAULTTONEAREST);
+
+	const auto displayName = HumanReadableDisplayName(hMonitor);
+	if (!displayName.isEmpty()) {
+		return displayName;
+	}
+
+	const auto name = screen->name();
+	const auto genericName = u"\\\\.\\DISPLAY"_q;
+	if (name.startsWith(genericName)) {
+		const auto displayNum = name.mid(genericName.size());
+		return u"Display %1"_q.arg(displayNum);
+	}
+
+	return name;
 }
 
-void MainWindow::psSetupTrayIcon() {
-	if (!trayIcon) {
-		trayIcon = new QSystemTrayIcon(this);
-
-		auto icon = QIcon(App::pixmapFromImageInPlace(Core::App().logoNoMargin()));
-
-		trayIcon->setIcon(icon);
-		connect(trayIcon, SIGNAL(messageClicked()), this, SLOT(showFromTray()));
-		attachToTrayIcon(trayIcon);
+QRect ScreenAvailableGeometry(const QScreen *screen) {
+	if (!screen) {
+		return QRect();
 	}
-	updateIconCounters();
-
-	trayIcon->show();
-}
-
-void MainWindow::showTrayTooltip() {
-	if (trayIcon && !cSeenTrayTooltip()) {
-		trayIcon->showMessage(
-			AppName.utf16(),
-			tr::lng_tray_icon_text(tr::now),
-			QSystemTrayIcon::Information,
-			10000);
-		cSetSeenTrayTooltip(true);
-		Local::writeSettings();
+	auto result = screen->availableGeometry();
+	const auto geometry = screen->geometry();
+	const auto ratio = screen->devicePixelRatio();
+	if (ratio > 0.) {
+		result.moveTopLeft(geometry.topLeft() + QPoint(
+			int(base::SafeRound((result.x() - geometry.x()) / ratio)),
+			int(base::SafeRound((result.y() - geometry.y()) / ratio))));
 	}
-}
-
-void MainWindow::workmodeUpdated(DBIWorkMode mode) {
-	switch (mode) {
-	case dbiwmWindowAndTray: {
-		psSetupTrayIcon();
-		HWND psOwner = (HWND)GetWindowLong(ps_hWnd, GWL_HWNDPARENT);
-		if (psOwner) {
-			SetWindowLong(ps_hWnd, GWL_HWNDPARENT, 0);
-			psRefreshTaskbarIcon();
-		}
-	} break;
-
-	case dbiwmTrayOnly: {
-		psSetupTrayIcon();
-		HWND psOwner = (HWND)GetWindowLong(ps_hWnd, GWL_HWNDPARENT);
-		if (!psOwner) {
-			SetWindowLong(ps_hWnd, GWL_HWNDPARENT, (LONG)ps_tbHider_hWnd);
-		}
-	} break;
-
-	case dbiwmWindowOnly: {
-		if (trayIcon) {
-			trayIcon->setContextMenu(0);
-			trayIcon->deleteLater();
-		}
-		trayIcon = 0;
-
-		HWND psOwner = (HWND)GetWindowLong(ps_hWnd, GWL_HWNDPARENT);
-		if (psOwner) {
-			SetWindowLong(ps_hWnd, GWL_HWNDPARENT, 0);
-			psRefreshTaskbarIcon();
-		}
-	} break;
-	}
-}
-
-void MainWindow::unreadCounterChangedHook() {
-	setWindowTitle(titleText());
-	updateIconCounters();
-}
-
-void MainWindow::updateIconCounters() {
-	const auto counter = Core::App().unreadBadge();
-	const auto muted = Core::App().unreadBadgeMuted();
-
-	auto iconSizeSmall = QSize(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
-	auto iconSizeBig = QSize(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
-
-	auto &bg = (muted ? st::trayCounterBgMute : st::trayCounterBg);
-	auto &fg = st::trayCounterFg;
-	auto iconSmallPixmap16 = App::pixmapFromImageInPlace(iconWithCounter(16, counter, bg, fg, true));
-	auto iconSmallPixmap32 = App::pixmapFromImageInPlace(iconWithCounter(32, counter, bg, fg, true));
-	QIcon iconSmall, iconBig;
-	iconSmall.addPixmap(iconSmallPixmap16);
-	iconSmall.addPixmap(iconSmallPixmap32);
-	iconBig.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(32, taskbarList.Get() ? 0 : counter, bg, fg, false)));
-	iconBig.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(64, taskbarList.Get() ? 0 : counter, bg, fg, false)));
-	if (trayIcon) {
-		// Force Qt to use right icon size, not the larger one.
-		QIcon forTrayIcon;
-		forTrayIcon.addPixmap(iconSizeSmall.width() >= 20 ? iconSmallPixmap32 : iconSmallPixmap16);
-		trayIcon->setIcon(forTrayIcon);
-	}
-
-	psDestroyIcons();
-	ps_iconSmall = createHIconFromQIcon(iconSmall, iconSizeSmall.width(), iconSizeSmall.height());
-	ps_iconBig = createHIconFromQIcon(iconBig, iconSizeBig.width(), iconSizeBig.height());
-	SendMessage(ps_hWnd, WM_SETICON, 0, (LPARAM)ps_iconSmall);
-	SendMessage(ps_hWnd, WM_SETICON, 1, (LPARAM)(ps_iconBig ? ps_iconBig : ps_iconSmall));
-	if (taskbarList.Get()) {
-		if (counter > 0) {
-			QIcon iconOverlay;
-			iconOverlay.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(-16, counter, bg, fg, false)));
-			iconOverlay.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(-32, counter, bg, fg, false)));
-			ps_iconOverlay = createHIconFromQIcon(iconOverlay, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
-		}
-		auto description = (counter > 0) ? tr::lng_unread_bar(tr::now, lt_count, counter) : QString();
-		taskbarList->SetOverlayIcon(ps_hWnd, ps_iconOverlay, description.toStdWString().c_str());
-	}
-	SetWindowPos(ps_hWnd, 0, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-}
-
-void MainWindow::initHook() {
-	if (const auto native = QGuiApplication::platformNativeInterface()) {
-		ps_hWnd = static_cast<HWND>(native->nativeResourceForWindow(
-			QByteArrayLiteral("handle"),
-			windowHandle()));
-	}
-	if (!ps_hWnd) {
-		return;
-	}
-
-	handleSessionNotification = (Dlls::WTSRegisterSessionNotification != nullptr)
-		&& (Dlls::WTSUnRegisterSessionNotification != nullptr);
-	if (handleSessionNotification) {
-		Dlls::WTSRegisterSessionNotification(ps_hWnd, NOTIFY_FOR_THIS_SESSION);
-	}
-
-	psInitSysMenu();
-}
-
-void MainWindow::initShadows() {
-	_psShadowWindows.init(this, st::windowShadowFg->c);
-	_shadowsWorking = true;
-	psUpdateMargins();
-	shadowsUpdate(ShadowsChange::Hidden);
-}
-
-void MainWindow::firstShadowsUpdate() {
-	if (!(windowState() & Qt::WindowMinimized) && !isHidden()) {
-		shadowsUpdate(ShadowsChange::Moved | ShadowsChange::Resized | ShadowsChange::Shown);
-	}
-}
-
-void MainWindow::stateChangedHook(Qt::WindowState state) {
-	updateSystemMenu(state);
-}
-
-void MainWindow::psInitSysMenu() {
-	Qt::WindowStates states = windowState();
-	ps_menu = GetSystemMenu(ps_hWnd, FALSE);
-	updateSystemMenu(windowHandle()->windowState());
-}
-
-void MainWindow::updateSystemMenu(Qt::WindowState state) {
-	if (!ps_menu) return;
-
-	int menuToDisable = SC_RESTORE;
-	if (state == Qt::WindowMaximized) {
-		menuToDisable = SC_MAXIMIZE;
-	} else if (state == Qt::WindowMinimized) {
-		menuToDisable = SC_MINIMIZE;
-	}
-	int itemCount = GetMenuItemCount(ps_menu);
-	for (int i = 0; i < itemCount; ++i) {
-		MENUITEMINFO itemInfo = { 0 };
-		itemInfo.cbSize = sizeof(itemInfo);
-		itemInfo.fMask = MIIM_TYPE | MIIM_STATE | MIIM_ID;
-		if (GetMenuItemInfo(ps_menu, i, TRUE, &itemInfo)) {
-			if (itemInfo.fType & MFT_SEPARATOR) {
-				continue;
-			}
-			if (itemInfo.wID && !(itemInfo.fState & MFS_DEFAULT)) {
-				UINT fOldState = itemInfo.fState, fState = itemInfo.fState & ~MFS_DISABLED;
-				if (itemInfo.wID == SC_CLOSE) {
-					fState |= MFS_DEFAULT;
-				} else if (itemInfo.wID == menuToDisable || (itemInfo.wID != SC_MINIMIZE && itemInfo.wID != SC_MAXIMIZE && itemInfo.wID != SC_RESTORE)) {
-					fState |= MFS_DISABLED;
-				}
-				itemInfo.fMask = MIIM_STATE;
-				itemInfo.fState = fState;
-				if (!SetMenuItemInfo(ps_menu, i, TRUE, &itemInfo)) {
-					DEBUG_LOG(("PS Error: could not set state %1 to menu item %2, old state %3, error %4").arg(fState).arg(itemInfo.wID).arg(fOldState).arg(GetLastError()));
-					DestroyMenu(ps_menu);
-					ps_menu = 0;
-					break;
-				}
-			}
-		} else {
-			DEBUG_LOG(("PS Error: could not get state, menu item %1 of %2, error %3").arg(i).arg(itemCount).arg(GetLastError()));
-			DestroyMenu(ps_menu);
-			ps_menu = 0;
-			break;
-		}
-	}
-}
-
-Q_DECLARE_METATYPE(QMargins);
-void MainWindow::psUpdateMargins() {
-	if (!ps_hWnd || _inUpdateMargins) return;
-
-	_inUpdateMargins = true;
-
-	RECT r, a;
-
-	GetClientRect(ps_hWnd, &r);
-	a = r;
-
-	LONG style = GetWindowLong(ps_hWnd, GWL_STYLE), styleEx = GetWindowLong(ps_hWnd, GWL_EXSTYLE);
-	AdjustWindowRectEx(&a, style, false, styleEx);
-	QMargins margins = QMargins(a.left - r.left, a.top - r.top, r.right - a.right, r.bottom - a.bottom);
-	if (style & WS_MAXIMIZE) {
-		RECT w, m;
-		GetWindowRect(ps_hWnd, &w);
-		m = w;
-
-		HMONITOR hMonitor = MonitorFromRect(&w, MONITOR_DEFAULTTONEAREST);
-		if (hMonitor) {
-			MONITORINFO mi;
-			mi.cbSize = sizeof(mi);
-			GetMonitorInfo(hMonitor, &mi);
-			m = mi.rcWork;
-		}
-
-		_deltaLeft = w.left - m.left;
-		_deltaTop = w.top - m.top;
-		_deltaRight = m.right - w.right;
-		_deltaBottom = m.bottom - w.bottom;
-
-		margins.setLeft(margins.left() - _deltaLeft);
-		margins.setRight(margins.right() - _deltaRight);
-		margins.setBottom(margins.bottom() - _deltaBottom);
-		margins.setTop(margins.top() - _deltaTop);
-	} else if (_deltaLeft != 0 || _deltaTop != 0 || _deltaRight != 0 || _deltaBottom != 0) {
-		RECT w;
-		GetWindowRect(ps_hWnd, &w);
-		SetWindowPos(ps_hWnd, 0, 0, 0, w.right - w.left - _deltaLeft - _deltaRight, w.bottom - w.top - _deltaBottom - _deltaTop, SWP_NOMOVE | SWP_NOSENDCHANGING | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREPOSITION);
-		_deltaLeft = _deltaTop = _deltaRight = _deltaBottom = 0;
-	}
-
-	if (const auto native = QGuiApplication::platformNativeInterface()) {
-		native->setWindowProperty(
-			windowHandle()->handle(),
-			qsl("WindowsCustomMargins"),
-			QVariant::fromValue<QMargins>(margins));
-	}
-	if (!_themeInited) {
-		_themeInited = true;
-		if (!IsWindows8OrGreater()) {
-			if (Dlls::SetWindowTheme != nullptr) {
-				Dlls::SetWindowTheme(ps_hWnd, L" ", L" ");
-				QApplication::setStyle(QStyleFactory::create(qsl("Windows")));
-			}
-		}
-	}
-	_inUpdateMargins = false;
-}
-
-HWND MainWindow::psHwnd() const {
-	return ps_hWnd;
-}
-
-HMENU MainWindow::psMenu() const {
-	return ps_menu;
-}
-
-void MainWindow::psDestroyIcons() {
-	if (ps_iconBig) {
-		DestroyIcon(ps_iconBig);
-		ps_iconBig = 0;
-	}
-	if (ps_iconSmall) {
-		DestroyIcon(ps_iconSmall);
-		ps_iconSmall = 0;
-	}
-	if (ps_iconOverlay) {
-		DestroyIcon(ps_iconOverlay);
-		ps_iconOverlay = 0;
-	}
-}
-
-MainWindow::~MainWindow() {
-	if (handleSessionNotification) {
-		Dlls::WTSUnRegisterSessionNotification(ps_hWnd);
-	}
-	if (taskbarList) {
-		taskbarList.Reset();
-	}
-
-	_shadowsWorking = false;
-	if (ps_menu) DestroyMenu(ps_menu);
-	psDestroyIcons();
-	_psShadowWindows.destroy();
-	if (ps_tbHider_hWnd) DestroyWindow(ps_tbHider_hWnd);
-
-	EventFilter::Destroy();
+	return result;
 }
 
 } // namespace Platform

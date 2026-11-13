@@ -7,12 +7,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "storage/localimageloader.h"
 #include "ui/image/image_prepare.h"
 
 #include <QtCore/QTimer>
+#include <QtCore/QMutex>
 
+namespace Ui {
+struct PreparedFileInformation;
+} // namespace Ui
+
+namespace Core {
 class FileLocation;
+} // namespace Core
 
 namespace Media {
 namespace Clip {
@@ -24,29 +30,35 @@ enum class State {
 };
 
 struct FrameRequest {
-	bool valid() const {
+	[[nodiscard]] bool valid() const {
 		return factor > 0;
 	}
+
+	QSize frame;
+	QSize outer;
 	int factor = 0;
-	int framew = 0;
-	int frameh = 0;
-	int outerw = 0;
-	int outerh = 0;
 	ImageRoundRadius radius = ImageRoundRadius::None;
 	RectParts corners = RectPart::AllCorners;
+	QColor colored = QColor(0, 0, 0, 0);
+	bool keepAlpha = false;
 };
 
-enum ReaderSteps {
-	WaitingForDimensionsStep = -3, // before ReaderPrivate read the first image and got the original frame size
-	WaitingForRequestStep = -2, // before Reader got the original frame size and prepared the frame request
-	WaitingForFirstFrameStep = -1, // before ReaderPrivate got the frame request and started waiting for the 1-2 delay
+// Before ReaderPrivate read the first image and got the original frame size.
+inline constexpr auto kWaitingForDimensionsStep = -3;
+
+// Before Reader got the original frame size and prepared the frame request.
+inline constexpr auto kWaitingForRequestStep = -2;
+
+// Before ReaderPrivate got the frame request
+// and started waiting for the 1-2 delay.
+inline constexpr auto kWaitingForFirstFrameStep = -1;
+
+enum class Notification {
+	Reinit,
+	Repaint,
 };
 
-enum Notification {
-	NotificationReinit,
-	NotificationRepaint,
-};
-
+class Manager;
 class ReaderPrivate;
 class Reader {
 public:
@@ -56,102 +68,96 @@ public:
 		Video,
 	};
 
-	Reader(const QString &filepath, Callback &&callback, Mode mode = Mode::Gif, crl::time seekMs = 0);
-	Reader(not_null<DocumentData*> document, FullMsgId msgId, Callback &&callback, Mode mode = Mode::Gif, crl::time seekMs = 0);
-	Reader(const QByteArray &data, Callback &&callback, Mode mode = Mode::Gif, crl::time seekMs = 0);
+	Reader(const Core::FileLocation &location, const QByteArray &data, Callback &&callback);
+	Reader(const QString &filepath, Callback &&callback);
+	Reader(const QByteArray &data, Callback &&callback);
 
 	// Reader can be already deleted.
-	static void callback(Reader *reader, qint32 threadIndex, qint32 notification);
+	static void SafeCallback(
+		Reader *reader,
+		int threadIndex,
+		Notification notification);
 
-	void setAutoplay() {
-		_autoplay = true;
-	}
-	bool autoplay() const {
-		return _autoplay;
-	}
+	void start(FrameRequest request);
 
-	AudioMsgId audioMsgId() const {
-		return _audioMsgId;
+	struct FrameInfo {
+		QImage image;
+		int index = 0;
+	};
+	[[nodiscard]] FrameInfo frameInfo(FrameRequest request, crl::time now);
+	[[nodiscard]] QImage current(FrameRequest request, crl::time now) {
+		auto result = frameInfo(request, now).image;
+		moveToNextFrame();
+		return result;
 	}
-	crl::time seekPositionMs() const {
-		return _seekPositionMs;
-	}
-
-	void start(int framew, int frameh, int outerw, int outerh, ImageRoundRadius radius, RectParts corners);
-	QPixmap current(int framew, int frameh, int outerw, int outerh, ImageRoundRadius radius, RectParts corners, crl::time ms);
-	QPixmap current();
-	QPixmap frameOriginal() const {
-		if (auto frame = frameToShow()) {
-			auto result = QPixmap::fromImage(frame->original);
+	[[nodiscard]] QImage frameOriginal() const {
+		if (const auto frame = frameToShow()) {
+			auto result = frame->original;
 			result.detach();
 			return result;
 		}
-		return QPixmap();
+		return QImage();
 	}
-	bool currentDisplayed() const {
-		auto frame = frameToShow();
-		return frame ? (frame->displayed.loadAcquire() != 0) : true;
+	bool moveToNextFrame() {
+		return moveToNextShow();
 	}
-	bool autoPausedGif() const {
+	[[nodiscard]] bool currentDisplayed() const {
+		const auto frame = frameToShow();
+		return !frame || (frame->displayed.loadAcquire() != 0);
+	}
+	[[nodiscard]] bool autoPausedGif() const {
 		return _autoPausedGif.loadAcquire();
 	}
-	bool videoPaused() const;
-	int threadIndex() const {
+	[[nodiscard]] bool videoPaused() const;
+	[[nodiscard]] int threadIndex() const {
 		return _threadIndex;
 	}
 
-	int width() const;
-	int height() const;
+	[[nodiscard]] int width() const;
+	[[nodiscard]] int height() const;
 
-	State state() const;
-	bool started() const {
-		auto step = _step.loadAcquire();
-		return (step == WaitingForFirstFrameStep) || (step >= 0);
+	[[nodiscard]] State state() const;
+	[[nodiscard]] bool started() const {
+		const auto step = _step.loadAcquire();
+		return (step == kWaitingForFirstFrameStep) || (step >= 0);
 	}
-	bool ready() const;
+	[[nodiscard]] bool ready() const;
 
-	bool hasAudio() const;
-	crl::time getPositionMs() const;
-	crl::time getDurationMs() const;
-	void pauseResumeVideo();
+	[[nodiscard]] crl::time getPositionMs() const;
+	[[nodiscard]] crl::time getDurationMs() const;
 
 	void stop();
 	void error();
 	void finished();
 
-	Mode mode() const {
-		return _mode;
-	}
-
 	~Reader();
 
 private:
-	void init(const FileLocation &location, const QByteArray &data);
+	void init(const Core::FileLocation &location, const QByteArray &data);
 
 	Callback _callback;
-	Mode _mode;
-
 	State _state = State::Reading;
 
-	AudioMsgId _audioMsgId;
-	bool _hasAudio = false;
 	crl::time _durationMs = 0;
-	crl::time _seekPositionMs = 0;
 
 	mutable int _width = 0;
 	mutable int _height = 0;
 
 	// -2, -1 - init, 0-5 - work, show ((state + 1) / 2) % 3 state, write ((state + 3) / 2) % 3
-	mutable QAtomicInt _step = WaitingForDimensionsStep;
+	mutable QAtomicInt _step = kWaitingForDimensionsStep;
 	struct Frame {
 		void clear() {
-			pix = QPixmap();
+			prepared = QImage();
+			preparedColored = QColor(0, 0, 0, 0);
 			original = QImage();
 		}
-		QPixmap pix;
+
+		QImage prepared;
+		QColor preparedColored = QColor(0, 0, 0, 0);
 		QImage original;
 		FrameRequest request;
 		QAtomicInt displayed = 0;
+		int index = 0;
 
 		// Should be counted from the end,
 		// so that positionMs <= _durationMs.
@@ -161,14 +167,12 @@ private:
 	Frame *frameToShow(int *index = nullptr) const; // 0 means not ready
 	Frame *frameToWrite(int *index = nullptr) const; // 0 means not ready
 	Frame *frameToWriteNext(bool check, int *index = nullptr) const;
-	void moveToNextShow() const;
+	bool moveToNextShow() const;
 	void moveToNextWrite() const;
 
 	QAtomicInt _autoPausedGif = 0;
 	QAtomicInt _videoPauseRequest = 0;
 	int32 _threadIndex;
-
-	bool _autoplay = false;
 
 	friend class Manager;
 
@@ -191,7 +195,7 @@ public:
 		return *this;
 	}
 	void swap(ReaderPointer &other) {
-		qSwap(_pointer, other._pointer);
+		std::swap(_pointer, other._pointer);
 	}
 	Reader *get() const {
 		return valid() ? _pointer : nullptr;
@@ -234,72 +238,9 @@ inline ReaderPointer MakeReader(Args&&... args) {
 	return ReaderPointer(new Reader(std::forward<Args>(args)...));
 }
 
-enum class ProcessResult {
-	Error,
-	Started,
-	Finished,
-	Paused,
-	Repaint,
-	CopyFrame,
-	Wait,
-};
-
-class Manager : public QObject {
-	Q_OBJECT
-
-public:
-
-	Manager(QThread *thread);
-	int32 loadLevel() const {
-		return _loadLevel.load();
-	}
-	void append(Reader *reader, const FileLocation &location, const QByteArray &data);
-	void start(Reader *reader);
-	void update(Reader *reader);
-	void stop(Reader *reader);
-	bool carries(Reader *reader) const;
-	~Manager();
-
-signals:
-	void processDelayed();
-
-	void callback(Media::Clip::Reader *reader, qint32 threadIndex, qint32 notification);
-
-public slots:
-	void process();
-	void finish();
-
-private:
-
-	void clear();
-
-	QAtomicInt _loadLevel;
-	using ReaderPointers = QMap<Reader*, QAtomicInt>;
-	ReaderPointers _readerPointers;
-	mutable QMutex _readerPointersMutex;
-
-	ReaderPointers::const_iterator constUnsafeFindReaderPointer(ReaderPrivate *reader) const;
-	ReaderPointers::iterator unsafeFindReaderPointer(ReaderPrivate *reader);
-
-	bool handleProcessResult(ReaderPrivate *reader, ProcessResult result, crl::time ms);
-
-	enum ResultHandleState {
-		ResultHandleRemove,
-		ResultHandleStop,
-		ResultHandleContinue,
-	};
-	ResultHandleState handleResult(ReaderPrivate *reader, ProcessResult result, crl::time ms);
-
-	using Readers = QMap<ReaderPrivate*, crl::time>;
-	Readers _readers;
-
-	QTimer _timer;
-	QThread *_processingInThread = nullptr;
-	bool _needReProcess = false;
-
-};
-
-FileMediaInformation::Video PrepareForSending(const QString &fname, const QByteArray &data);
+[[nodiscard]] Ui::PreparedFileInformation PrepareForSending(
+	const QString &fname,
+	const QByteArray &data);
 
 void Finish();
 

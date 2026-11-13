@@ -20,12 +20,11 @@ class LoaderLocal : public Loader, public base::has_weak_ptr {
 public:
 	LoaderLocal(std::unique_ptr<QIODevice> device);
 
-	[[nodiscard]] auto baseCacheKey() const
-		->std::optional<Storage::Cache::Key> override;
-	[[nodiscard]] int size() const override;
+	[[nodiscard]] Storage::Cache::Key baseCacheKey() const override;
+	[[nodiscard]] int64 size() const override;
 
-	void load(int offset) override;
-	void cancel(int offset) override;
+	void load(int64 offset) override;
+	void cancel(int64 offset) override;
 	void resetPriorities() override;
 	void setPriority(int priority) override;
 	void stop() override;
@@ -34,6 +33,7 @@ public:
 
 	// Parts will be sent from the main thread.
 	[[nodiscard]] rpl::producer<LoadedPart> parts() const override;
+	[[nodiscard]] rpl::producer<SpeedEstimate> speedEstimate() const override;
 
 	void attachDownloader(
 		not_null<Storage::StreamedFileDownloader*> downloader) override;
@@ -43,7 +43,7 @@ private:
 	void fail();
 
 	const std::unique_ptr<QIODevice> _device;
-	const int _size = 0;
+	const int64 _size = 0;
 	rpl::event_stream<LoadedPart> _parts;
 
 };

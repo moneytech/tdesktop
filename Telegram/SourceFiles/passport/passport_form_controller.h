@@ -8,7 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "mtproto/sender.h"
-#include "boxes/confirm_phone_box.h"
+#include "base/timer.h"
 #include "base/weak_ptr.h"
 #include "core/core_cloud_password.h"
 
@@ -23,14 +23,17 @@ namespace Window {
 class SessionController;
 } // namespace Window
 
+namespace Main {
+class Session;
+} // namespace Main
+
+namespace Ui {
+class SentCodeCall;
+} // namespace Ui
+
 namespace Passport {
 
-struct Config {
-	int32 hash = 0;
-	std::map<QString, QString> languagesByCountryCode;
-};
-Config &ConfigInstance();
-Config ParseConfig(const MTPhelp_PassportConfig &data);
+struct EditDocumentCountry;
 
 struct SavedCredentials {
 	bytes::vector hashForAuth;
@@ -48,16 +51,43 @@ struct FormRequest {
 		const QString &scope,
 		const QString &callbackUrl,
 		const QString &publicKey,
-		const QString &nonce,
-		const QString &errors);
+		const QString &nonce);
 
 	UserId botId;
 	QString scope;
 	QString callbackUrl;
 	QString publicKey;
 	QString nonce;
-	QString errors;
 
+};
+
+class LoadStatus final {
+public:
+	enum class Status {
+		Done,
+		InProgress,
+		Failed,
+	};
+
+	LoadStatus() = default;
+
+	void set(Status status, int offset = 0) {
+		if (!offset) {
+			offset = _offset;
+		}
+		_offset = (status == Status::InProgress) ? offset : 0;
+		_status = status;
+	}
+
+	int offset() const {
+		return _offset;
+	}
+	Status status() const {
+		return _status;
+	}
+private:
+	int _offset = 0;
+	Status _status = Status::Done;
 };
 
 struct UploadScanData {
@@ -68,12 +98,14 @@ struct UploadScanData {
 	bytes::vector hash;
 	bytes::vector bytes;
 
-	int offset = 0;
+	LoadStatus status;
 };
 
 class UploadScanDataPointer {
 public:
-	UploadScanDataPointer(std::unique_ptr<UploadScanData> &&value);
+	UploadScanDataPointer(
+		not_null<Main::Session*> session,
+		std::unique_ptr<UploadScanData> &&value);
 	UploadScanDataPointer(UploadScanDataPointer &&other);
 	UploadScanDataPointer &operator=(UploadScanDataPointer &&other);
 	~UploadScanDataPointer();
@@ -84,6 +116,7 @@ public:
 	UploadScanData *operator->() const;
 
 private:
+	not_null<Main::Session*> _session;
 	std::unique_ptr<UploadScanData> _value;
 
 };
@@ -108,13 +141,14 @@ struct File {
 	bytes::vector secret;
 	bytes::vector encryptedSecret;
 
-	int downloadOffset = 0;
+	LoadStatus downloadStatus;
 	QImage image;
 	QString error;
 };
 
 struct EditFile {
 	EditFile(
+		not_null<Main::Session*> session,
 		not_null<const Value*> value,
 		FileType type,
 		const File &fields,
@@ -152,7 +186,8 @@ struct Verification {
 	mtpRequestId requestId = 0;
 	QString phoneCodeHash;
 	int codeLength = 0;
-	std::unique_ptr<SentCodeCall> call;
+	QString fragmentUrl;
+	std::unique_ptr<Ui::SentCodeCall> call;
 
 	QString error;
 
@@ -188,7 +223,7 @@ struct Value {
 	bool requiresSpecialScan(FileType type) const;
 	bool requiresScan(FileType type) const;
 	bool scansAreFilled() const;
-	void saveInEdit();
+	void saveInEdit(not_null<Main::Session*> session);
 	void clearEditData();
 	bool uploadingScan() const;
 	bool saving() const;
@@ -272,6 +307,7 @@ struct PasswordSettings {
 	bool hasRecovery = false;
 	bool notEmptyPassport = false;
 	bool unknownAlgo = false;
+	TimeId pendingResetDate = 0;
 
 	bool operator==(const PasswordSettings &other) const {
 		return (request == other.request)
@@ -279,14 +315,17 @@ struct PasswordSettings {
 // different random parts added on the client to the server salts.
 //			&& (newAlgo == other.newAlgo)
 //			&& (newSecureAlgo == other.newSecureAlgo)
-			&& ((!newAlgo && !other.newAlgo) || (newAlgo && other.newAlgo))
-			&& ((!newSecureAlgo && !other.newSecureAlgo)
-				|| (newSecureAlgo && other.newSecureAlgo))
+			&& ((v::is_null(newAlgo) && v::is_null(other.newAlgo))
+				|| (!v::is_null(newAlgo) && !v::is_null(other.newAlgo)))
+			&& ((v::is_null(newSecureAlgo) && v::is_null(other.newSecureAlgo))
+				|| (!v::is_null(newSecureAlgo)
+					&& !v::is_null(other.newSecureAlgo)))
 			&& (hint == other.hint)
 			&& (unconfirmedPattern == other.unconfirmedPattern)
 			&& (confirmedEmail == other.confirmedEmail)
 			&& (hasRecovery == other.hasRecovery)
-			&& (unknownAlgo == other.unknownAlgo);
+			&& (unknownAlgo == other.unknownAlgo)
+			&& (pendingResetDate == other.pendingResetDate);
 	}
 	bool operator!=(const PasswordSettings &other) const {
 		return !(*this == other);
@@ -295,16 +334,15 @@ struct PasswordSettings {
 
 struct FileKey {
 	uint64 id = 0;
-	int32 dcId = 0;
 
 	inline bool operator==(const FileKey &other) const {
-		return (id == other.id) && (dcId == other.dcId);
+		return (id == other.id);
 	}
 	inline bool operator!=(const FileKey &other) const {
 		return !(*this == other);
 	}
 	inline bool operator<(const FileKey &other) const {
-		return (id < other.id) || ((id == other.id) && (dcId < other.dcId));
+		return (id < other.id);
 	}
 	inline bool operator>(const FileKey &other) const {
 		return (other < *this);
@@ -324,9 +362,10 @@ public:
 		not_null<Window::SessionController*> controller,
 		const FormRequest &request);
 
-	not_null<Window::SessionController*> window() const {
+	[[nodiscard]] not_null<Window::SessionController*> window() const {
 		return _controller;
 	}
+	[[nodiscard]] Main::Session &session() const;
 
 	void show();
 	UserData *bot() const;
@@ -375,6 +414,9 @@ public:
 	void cancel();
 	void cancelSure();
 
+	[[nodiscard]] rpl::producer<EditDocumentCountry> preferredLanguage(
+		const QString &countryCode);
+
 	rpl::lifetime &lifetime();
 
 	~FormController();
@@ -398,7 +440,6 @@ private:
 
 	void requestForm();
 	void requestPassword();
-	void requestConfig();
 
 	void formDone(const MTPaccount_AuthorizationForm &result);
 	void formFail(const QString &error);
@@ -485,7 +526,7 @@ private:
 	QString getPlainTextFromValue(not_null<const Value*> value) const;
 	void startPhoneVerification(not_null<Value*> value);
 	void startEmailVerification(not_null<Value*> value);
-	void valueSaveShowError(not_null<Value*> value, const RPCError &error);
+	void valueSaveShowError(not_null<Value*> value, const MTP::Error &error);
 	void valueSaveFailed(not_null<Value*> value);
 	void requestPhoneCall(not_null<Value*> value);
 	void verificationError(
@@ -519,7 +560,6 @@ private:
 	mtpRequestId _formRequestId = 0;
 	mtpRequestId _passwordRequestId = 0;
 	mtpRequestId _passwordCheckRequestId = 0;
-	mtpRequestId _configRequestId = 0;
 
 	PasswordSettings _password;
 	crl::time _lastSrpIdInvalidTime = 0;
@@ -529,7 +569,12 @@ private:
 	Form _form;
 	bool _cancelled = false;
 	mtpRequestId _recoverRequestId = 0;
-	std::map<FileKey, std::unique_ptr<mtpFileLoader>> _fileLoaders;
+	base::flat_map<FileKey, std::unique_ptr<mtpFileLoader>> _fileLoaders;
+
+	struct {
+		int32 hash = 0;
+		std::map<QString, QString> languagesByCountryCode;
+	} _passportConfig;
 
 	rpl::event_stream<not_null<const EditFile*>> _scanUpdated;
 	rpl::event_stream<not_null<const Value*>> _valueSaveFinished;

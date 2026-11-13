@@ -12,6 +12,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_file_origin.h"
 #include "ui/rp_widget.h"
 
+namespace Data {
+class PhotoMedia;
+class DocumentMedia;
+} // namespace Data
+
 namespace Lottie {
 class SinglePlayer;
 } // namespace Lottie
@@ -20,7 +25,7 @@ namespace Window {
 
 class SessionController;
 
-class MediaPreviewWidget : public Ui::RpWidget, private base::Subscriber {
+class MediaPreviewWidget final : public Ui::RpWidget {
 public:
 	MediaPreviewWidget(
 		QWidget *parent,
@@ -33,6 +38,15 @@ public:
 		Data::FileOrigin origin,
 		not_null<PhotoData*> photo);
 	void hidePreview();
+	void setCustomPadding(const QMargins &padding = QMargins());
+	void setBackgroundMargins(const QMargins &margins = QMargins());
+	void setCustomRadius(int radius);
+	void setMaxContentSize(int size);
+	void setPaintBackground(bool paint);
+	void setCustomDuration(crl::time duration);
+	void setHideEmoji(bool hide);
+	void setContentShift(int y);
+	[[nodiscard]] int contentBottom() const;
 
 	~MediaPreviewWidget();
 
@@ -41,12 +55,17 @@ protected:
 	void resizeEvent(QResizeEvent *e) override;
 
 private:
+	void validateGifAnimation();
+	void startGifAnimation(const Media::Clip::ReaderPointer &gif);
 	QSize currentDimensions() const;
 	QPixmap currentImage() const;
+	void createLottieIfReady(not_null<DocumentData*> document);
 	void setupLottie();
 	void startShow();
 	void fillEmojiString();
 	void resetGifAndCache();
+	[[nodiscard]] QPoint innerPosition(QSize size) const;
+	[[nodiscard]] QPoint outerPosition(QSize size) const;
 	[[nodiscard]] QRect updateArea() const;
 
 	not_null<Window::SessionController*> _controller;
@@ -54,10 +73,15 @@ private:
 	Ui::Animations::Simple _a_shown;
 	bool _hiding = false;
 	Data::FileOrigin _origin;
-	DocumentData *_document = nullptr;
 	PhotoData *_photo = nullptr;
-	Media::Clip::ReaderPointer _gif;
+	DocumentData *_document = nullptr;
+	std::shared_ptr<Data::PhotoMedia> _photoMedia;
+	std::shared_ptr<Data::DocumentMedia> _documentMedia;
+	Media::Clip::ReaderPointer _gif, _gifThumbnail;
+	bool _gifWithAlpha = false;
+	crl::time _gifLastPosition = 0;
 	std::unique_ptr<Lottie::SinglePlayer> _lottie;
+	std::unique_ptr<Lottie::SinglePlayer> _effect;
 
 	int _emojiSize;
 	std::vector<not_null<EmojiPtr>> _emojiList;
@@ -72,6 +96,14 @@ private:
 	mutable CacheStatus _cacheStatus = CacheNotLoaded;
 	mutable QPixmap _cache;
 	mutable QSize _cachedSize;
+	QMargins _customPadding;
+	QMargins _backgroundMargins;
+	int _customRadius = 0;
+	int _maxContentSize = 0;
+	bool _paintBackground = true;
+	crl::time _customDuration = 0;
+	bool _hideEmoji = false;
+	int _contentShiftY = 0;
 
 };
 

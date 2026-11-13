@@ -7,25 +7,31 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "ui/effects/animations.h"
 #include "ui/rp_widget.h"
 #include "base/object_ptr.h"
 
-#include <QtCore/QTimer>
+class QWheelEvent;
 
 namespace Ui {
-class IconButton;
 class MediaSlider;
 } // namespace Ui
 
-namespace Media {
-namespace Player {
+namespace Window {
+class SessionController;
+} // namespace Window
 
-class VolumeController : public TWidget, private base::Subscriber {
+namespace Media::Player {
+
+class Dropdown;
+
+class VolumeController final : public Ui::RpWidget {
 public:
-	VolumeController(QWidget *parent);
+	VolumeController(
+		QWidget *parent,
+		not_null<Window::SessionController*> controller);
 
 	void setIsVertical(bool vertical);
+	void outerWheelEvent(not_null<QWheelEvent*> e);
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;
@@ -38,46 +44,9 @@ private:
 
 };
 
-class VolumeWidget : public Ui::RpWidget {
-	Q_OBJECT
+void PrepareVolumeDropdown(
+	not_null<Dropdown*> dropdown,
+	not_null<Window::SessionController*> controller,
+	rpl::producer<not_null<QWheelEvent*>> outerWheelEvents);
 
-public:
-	VolumeWidget(QWidget *parent);
-
-	bool overlaps(const QRect &globalRect);
-
-	QMargins getMargin() const;
-
-protected:
-	void resizeEvent(QResizeEvent *e) override;
-	void paintEvent(QPaintEvent *e) override;
-	void enterEventHook(QEvent *e) override;
-	void leaveEventHook(QEvent *e) override;
-
-	bool eventFilter(QObject *obj, QEvent *e) override;
-
-private slots:
-	void onShowStart();
-	void onHideStart();
-
-private:
-	void otherEnter();
-	void otherLeave();
-
-	void appearanceCallback();
-	void hidingFinished();
-	void startAnimation();
-
-	bool _hiding = false;
-
-	QPixmap _cache;
-	Ui::Animations::Simple _a_appearance;
-
-	QTimer _hideTimer, _showTimer;
-
-	object_ptr<VolumeController> _controller;
-
-};
-
-} // namespace Player
-} // namespace Media
+} // namespace Media::Player

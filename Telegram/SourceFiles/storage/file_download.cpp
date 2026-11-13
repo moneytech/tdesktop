@@ -13,54 +13,139 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mainwidget.h"
 #include "mainwindow.h"
 #include "core/application.h"
-#include "storage/localstorage.h"
+#include "core/file_location.h"
+#include "storage/storage_account.h"
+#include "storage/file_download_mtproto.h"
+#include "storage/file_download_web.h"
 #include "platform/platform_file_utilities.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
 #include "core/crash_reports.h"
 #include "base/bytes.h"
-#include "base/openssl_help.h"
-#include "facades.h"
-#include "app.h"
+
+namespace {
+
+[[nodiscard]] QByteArray OwningBytes(const QByteArray &data) {
+	// QByteArray::fromRawData() makes an array whose bytes live outside its
+	// own refcounted block, and every copy of it keeps pointing there, so it
+	// dangles once those bytes are freed. Qt marks such an array by leaving
+	// its allocated capacity at zero, while an array that owns its block
+	// always reports a capacity of at least size(), so only a borrowing one
+	// can report capacity() < size(). Measured on Qt 5.15.19 and 6.11.1.
+	return (data.capacity() < data.size())
+		? QByteArray(data.constData(), data.size())
+		: data;
+}
+
+class FromMemoryLoader final : public FileLoader {
+public:
+	FromMemoryLoader(
+		not_null<Main::Session*> session,
+		const QByteArray &data,
+		const QString &toFile,
+		int64 loadSize,
+		int64 fullSize,
+		LocationType locationType,
+		LoadToCacheSetting toCache,
+		LoadFromCloudSetting fromCloud,
+		bool autoLoading,
+		uint8 cacheTag);
+
+private:
+	Storage::Cache::Key cacheKey() const override;
+	std::optional<MediaKey> fileLocationKey() const override;
+	void cancelHook() override;
+	void startLoading() override;
+
+	QByteArray _data;
+
+};
+
+FromMemoryLoader::FromMemoryLoader(
+	not_null<Main::Session*> session,
+	const QByteArray &data,
+	const QString &toFile,
+	int64 loadSize,
+	int64 fullSize,
+	LocationType locationType,
+	LoadToCacheSetting toCache,
+	LoadFromCloudSetting fromCloud,
+	bool autoLoading,
+	uint8 cacheTag
+) : FileLoader(
+	session,
+	toFile,
+	loadSize,
+	fullSize,
+	locationType,
+	toCache,
+	fromCloud,
+	autoLoading,
+	cacheTag)
+, _data(data) {
+}
+
+Storage::Cache::Key FromMemoryLoader::cacheKey() const {
+	return {};
+}
+
+std::optional<MediaKey> FromMemoryLoader::fileLocationKey() const {
+	return std::nullopt;
+}
+
+void FromMemoryLoader::cancelHook() {
+}
+
+void FromMemoryLoader::startLoading() {
+	finishWithBytes(_data);
+}
+
+} // namespace
 
 FileLoader::FileLoader(
+	not_null<Main::Session*> session,
 	const QString &toFile,
-	int32 size,
+	int64 loadSize,
+	int64 fullSize,
 	LocationType locationType,
 	LoadToCacheSetting toCache,
 	LoadFromCloudSetting fromCloud,
 	bool autoLoading,
 	uint8 cacheTag)
-: _session(&Auth())
+: _session(session)
 , _autoLoading(autoLoading)
 , _cacheTag(cacheTag)
 , _filename(toFile)
 , _file(_filename)
 , _toCache(toCache)
 , _fromCloud(fromCloud)
-, _size(size)
+, _loadSize(loadSize)
+, _fullSize(fullSize)
 , _locationType(locationType) {
-	Expects(!_filename.isEmpty() || (_size <= Storage::kMaxFileInMemory));
+	Expects(_loadSize <= _fullSize);
+	Expects(!_filename.isEmpty() || (_fullSize <= Storage::kMaxFileInMemory));
 }
 
-FileLoader::~FileLoader() = default;
+FileLoader::~FileLoader() {
+	Expects(_finished);
+}
 
 Main::Session &FileLoader::session() const {
 	return *_session;
 }
 
 void FileLoader::finishWithBytes(const QByteArray &data) {
-	_data = data;
+	_data = OwningBytes(data);
 	_localStatus = LocalStatus::Loaded;
 	if (!_filename.isEmpty() && _toCache == LoadToCacheAsWell) {
 		if (!_fileIsOpen) _fileIsOpen = _file.open(QIODevice::WriteOnly);
 		if (!_fileIsOpen) {
-			cancel(true);
+			cancel(FailureReason::FileWriteFailure);
 			return;
 		}
 		_file.seek(0);
 		if (_file.write(_data) != qint64(_data.size())) {
-			cancel(true);
+			cancel(FailureReason::FileWriteFailure);
 			return;
 		}
 	}
@@ -72,33 +157,26 @@ void FileLoader::finishWithBytes(const QByteArray &data) {
 		Platform::File::PostprocessDownloaded(
 			QFileInfo(_file).absoluteFilePath());
 	}
-	Auth().downloaderTaskFinished().notify();
+	const auto session = _session;
+	_updates.fire_done();
+	session->notifyDownloaderTaskFinished();
 }
 
-QByteArray FileLoader::imageFormat(const QSize &shrinkBox) const {
-	if (_imageFormat.isEmpty() && _locationType == UnknownFileLocation) {
-		readImage(shrinkBox);
-	}
-	return _imageFormat;
-}
-
-QImage FileLoader::imageData(const QSize &shrinkBox) const {
+QImage FileLoader::imageData() const {
 	if (_imageData.isNull() && _locationType == UnknownFileLocation) {
-		readImage(shrinkBox);
+		readImage();
 	}
 	return _imageData;
 }
 
-void FileLoader::readImage(const QSize &shrinkBox) const {
-	auto format = QByteArray();
-	auto image = App::readImage(_data, &format, false);
-	if (!image.isNull()) {
-		if (!shrinkBox.isEmpty() && (image.width() > shrinkBox.width() || image.height() > shrinkBox.height())) {
-			_imageData = image.scaled(shrinkBox, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-		} else {
-			_imageData = std::move(image);
-		}
-		_imageFormat = format;
+void FileLoader::readImage() const {
+	const auto buffer = (_loadSize > 0 && _loadSize < _data.size())
+		? QByteArray::fromRawData(_data.data(), _loadSize)
+		: _data;
+	auto read = Images::Read({ .content = buffer });
+	if (!read.image.isNull()) {
+		_imageData = std::move(read.image);
+		_imageFormat = read.format;
 	}
 }
 
@@ -107,13 +185,11 @@ Data::FileOrigin FileLoader::fileOrigin() const {
 }
 
 float64 FileLoader::currentProgress() const {
-	if (_finished) return 1.;
-	if (!fullSize()) return 0.;
-	return snap(float64(currentOffset()) / fullSize(), 0., 1.);
-}
-
-int FileLoader::fullSize() const {
-	return _size;
+	return _finished
+		? 1.
+		: !_loadSize
+		? 0.
+		: std::clamp(float64(currentOffset()) / _loadSize, 0., 1.);
 }
 
 bool FileLoader::setFileName(const QString &fileName) {
@@ -129,8 +205,16 @@ void FileLoader::permitLoadFromCloud() {
 	_fromCloud = LoadFromCloudOrLocal;
 }
 
+void FileLoader::increaseLoadSize(int64 size, bool autoLoading) {
+	Expects(size > _loadSize);
+	Expects(size <= _fullSize);
+
+	_loadSize = size;
+	_autoLoading = autoLoading;
+}
+
 void FileLoader::notifyAboutProgress() {
-	emit progress(this);
+	_updates.fire({});
 }
 
 void FileLoader::localLoaded(
@@ -143,12 +227,24 @@ void FileLoader::localLoaded(
 		start();
 		return;
 	}
+	const auto partial = result.data.startsWith("partial:");
+	constexpr auto kPrefix = 8;
+	if (partial	&& result.data.size() < _loadSize + kPrefix) {
+		_localStatus = LocalStatus::NotFound;
+		if (checkForOpen()) {
+			startLoadingWithPartial(result.data);
+		}
+		return;
+	}
 	if (!imageData.isNull()) {
 		_imageFormat = imageFormat;
 		_imageData = imageData;
 	}
-	finishWithBytes(result.data);
-	notifyAboutProgress();
+	finishWithBytes(partial
+		? QByteArray::fromRawData(
+			result.data.data() + kPrefix,
+			result.data.size() - kPrefix)
+		: result.data);
 }
 
 void FileLoader::start() {
@@ -159,13 +255,23 @@ void FileLoader::start() {
 		return;
 	}
 
-	if (!_filename.isEmpty() && _toCache == LoadToFileOnly && !_fileIsOpen) {
-		_fileIsOpen = _file.open(QIODevice::WriteOnly);
-		if (!_fileIsOpen) {
-			return cancel(true);
-		}
+	if (checkForOpen()) {
+		startLoading();
 	}
-	startLoading();
+}
+
+bool FileLoader::checkForOpen() {
+	if (_filename.isEmpty()
+		|| (_toCache != LoadToFileOnly)
+		|| _fileIsOpen) {
+		return true;
+	}
+	_fileIsOpen = _file.open(QIODevice::WriteOnly);
+	if (_fileIsOpen) {
+		return true;
+	}
+	cancel(FailureReason::FileWriteFailure);
+	return false;
 }
 
 void FileLoader::loadLocal(const Storage::Cache::Key &key) {
@@ -186,20 +292,19 @@ void FileLoader::loadLocal(const Storage::Cache::Key &key) {
 				std::move(image));
 		});
 	};
-	session().data().cache().get(key, [=, callback = std::move(done)](
+	_session->data().cache().get(key, [=, callback = std::move(done)](
 			QByteArray &&value) mutable {
-		if (readImage) {
+		if (readImage && !value.startsWith("partial:")) {
 			crl::async([
 				value = std::move(value),
 				done = std::move(callback)
 			]() mutable {
-				auto format = QByteArray();
-				auto image = App::readImage(value, &format, false);
-				if (!image.isNull()) {
+				auto read = Images::Read({ .content = value });
+				if (!read.image.isNull()) {
 					done(
 						std::move(value),
-						std::move(image),
-						std::move(format));
+						std::move(read.image),
+						std::move(read.format));
 				} else {
 					done(std::move(value), {}, {});
 				}
@@ -218,14 +323,14 @@ bool FileLoader::tryLoadLocal() {
 		return true;
 	}
 
-	const auto weak = QPointer<FileLoader>(this);
 	if (_toCache == LoadToCacheAsWell) {
-		loadLocal(cacheKey());
-		emit progress(this);
+		const auto key = cacheKey();
+		if (key.low || key.high) {
+			loadLocal(key);
+			notifyAboutProgress();
+		}
 	}
-	if (!weak) {
-		return false;
-	} else if (_localStatus != LocalStatus::NotTried) {
+	if (_localStatus != LocalStatus::NotTried) {
 		return _finished;
 	} else if (_localLoading) {
 		_localStatus = LocalStatus::Loading;
@@ -236,10 +341,10 @@ bool FileLoader::tryLoadLocal() {
 }
 
 void FileLoader::cancel() {
-	cancel(false);
+	cancel(FailureReason::NoFailure);
 }
 
-void FileLoader::cancel(bool fail) {
+void FileLoader::cancel(FailureReason fail) {
 	const auto started = (currentOffset() > 0);
 
 	cancelHook();
@@ -253,11 +358,11 @@ void FileLoader::cancel(bool fail) {
 	}
 	_data = QByteArray();
 
-	const auto weak = QPointer<FileLoader>(this);
-	if (fail) {
-		emit failed(this, started);
+	const auto weak = base::make_weak(this);
+	if (fail != FailureReason::NoFailure) {
+		_updates.fire_error_copy({ fail, started });
 	} else {
-		emit progress(this);
+		_updates.fire_done();
 	}
 	if (weak) {
 		_filename = QString();
@@ -265,11 +370,11 @@ void FileLoader::cancel(bool fail) {
 	}
 }
 
-int FileLoader::currentOffset() const {
+int64 FileLoader::currentOffset() const {
 	return (_fileIsOpen ? _file.size() : _data.size()) - _skippedBytes;
 }
 
-bool FileLoader::writeResultPart(int offset, bytes::const_span buffer) {
+bool FileLoader::writeResultPart(int64 offset, bytes::const_span buffer) {
 	Expects(!_finished);
 
 	if (buffer.empty()) {
@@ -284,7 +389,7 @@ bool FileLoader::writeResultPart(int offset, bytes::const_span buffer) {
 		}
 		_file.seek(offset);
 		if (_file.write(reinterpret_cast<const char*>(buffer.data()), buffer.size()) != qint64(buffer.size())) {
-			cancel(true);
+			cancel(FailureReason::FileWriteFailure);
 			return false;
 		}
 		return true;
@@ -309,7 +414,7 @@ bool FileLoader::writeResultPart(int offset, bytes::const_span buffer) {
 	return true;
 }
 
-QByteArray FileLoader::readLoadedPartBack(int offset, int size) {
+QByteArray FileLoader::readLoadedPartBack(int64 offset, int size) {
 	Expects(offset >= 0 && size > 0);
 
 	if (_fileIsOpen) {
@@ -317,7 +422,7 @@ QByteArray FileLoader::readLoadedPartBack(int offset, int size) {
 			_file.close();
 			_fileIsOpen = _file.open(QIODevice::ReadWrite);
 			if (!_fileIsOpen) {
-				cancel(true);
+				cancel(FailureReason::FileWriteFailure);
 				return QByteArray();
 			}
 		}
@@ -335,13 +440,17 @@ QByteArray FileLoader::readLoadedPartBack(int offset, int size) {
 bool FileLoader::finalizeResult() {
 	Expects(!_finished);
 
+	if (_skippedBytes != 0) {
+		cancel(FailureReason::OtherFailure);
+		return false;
+	}
 	if (!_filename.isEmpty() && (_toCache == LoadToCacheAsWell)) {
 		if (!_fileIsOpen) {
 			_fileIsOpen = _file.open(QIODevice::WriteOnly);
 		}
 		_file.seek(0);
 		if (!_fileIsOpen || _file.write(_data) != qint64(_data.size())) {
-			cancel(true);
+			cancel(FailureReason::FileWriteFailure);
 			return false;
 		}
 	}
@@ -356,18 +465,105 @@ bool FileLoader::finalizeResult() {
 	if (_localStatus == LocalStatus::NotFound) {
 		if (const auto key = fileLocationKey()) {
 			if (!_filename.isEmpty()) {
-				Local::writeFileLocation(*key, FileLocation(_filename));
+				_session->local().writeFileLocation(
+					*key,
+					Core::FileLocation(_filename));
 			}
 		}
+		const auto key = cacheKey();
 		if ((_toCache == LoadToCacheAsWell)
-			&& (_data.size() <= Storage::kMaxFileInMemory)) {
-			session().data().cache().put(
+			&& (_data.size() <= Storage::kMaxFileInMemory)
+			&& (key.low || key.high)) {
+			_session->data().cache().put(
 				cacheKey(),
 				Storage::Cache::Database::TaggedValue(
-					base::duplicate(_data),
+					base::duplicate((!_fullSize || _data.size() == _fullSize)
+						? _data
+						: ("partial:" + _data)),
 					_cacheTag));
 		}
 	}
-	Auth().downloaderTaskFinished().notify();
+	const auto session = _session;
+	_updates.fire_done();
+	session->notifyDownloaderTaskFinished();
 	return true;
+}
+
+std::unique_ptr<FileLoader> CreateFileLoader(
+		not_null<Main::Session*> session,
+		const DownloadLocation &location,
+		Data::FileOrigin origin,
+		const QString &toFile,
+		int64 loadSize,
+		int64 fullSize,
+		LocationType locationType,
+		LoadToCacheSetting toCache,
+		LoadFromCloudSetting fromCloud,
+		bool autoLoading,
+		uint8 cacheTag) {
+	auto result = std::unique_ptr<FileLoader>();
+	v::match(location.data, [&](const StorageFileLocation &data) {
+		result = std::make_unique<mtpFileLoader>(
+			session,
+			data,
+			origin,
+			locationType,
+			toFile,
+			loadSize,
+			fullSize,
+			toCache,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const WebFileLocation &data) {
+		result = std::make_unique<mtpFileLoader>(
+			session,
+			data,
+			loadSize,
+			fullSize,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const GeoPointLocation &data) {
+		result = std::make_unique<mtpFileLoader>(
+			session,
+			data,
+			loadSize,
+			fullSize,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const PlainUrlLocation &data) {
+		result = std::make_unique<webFileLoader>(
+			session,
+			data.url,
+			toFile,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const AudioAlbumThumbLocation &data) {
+		result = std::make_unique<mtpFileLoader>(
+			session,
+			data,
+			loadSize,
+			fullSize,
+			fromCloud,
+			autoLoading,
+			cacheTag);
+	}, [&](const InMemoryLocation &data) {
+		result = std::make_unique<FromMemoryLoader>(
+			session,
+			data.bytes,
+			toFile,
+			loadSize,
+			fullSize,
+			locationType,
+			toCache,
+			LoadFromCloudOrLocal,
+			autoLoading,
+			cacheTag);
+	});
+
+	Ensures(result != nullptr);
+	return result;
 }

@@ -7,22 +7,33 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/window_media_preview.h"
 
-#include "data/data_photo.h"
+#include "chat_helpers/stickers_emoji_pack.h"
+#include "chat_helpers/stickers_lottie.h"
+#include "data/data_document_media.h"
 #include "data/data_document.h"
-#include "ui/image/image.h"
-#include "ui/emoji_config.h"
+#include "data/data_photo_media.h"
+#include "data/data_photo.h"
+#include "data/data_session.h"
+#include "data/stickers/data_stickers.h"
+#include "history/view/media/history_view_sticker.h"
 #include "lottie/lottie_single_player.h"
 #include "main/main_session.h"
-#include "chat_helpers/stickers.h"
+#include "ui/emoji_config.h"
+#include "ui/image/image.h"
+#include "ui/painter.h"
+#include "ui/rect.h"
+#include "ui/ui_utility.h"
 #include "window/window_session_controller.h"
-#include "styles/style_layers.h"
 #include "styles/style_chat_helpers.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 namespace Window {
 namespace {
 
-constexpr int kStickerPreviewEmojiLimit = 10;
+constexpr auto kStickerPreviewEmojiLimit = 10;
+constexpr auto kPremiumShift = 21. / 240;
+constexpr auto kPremiumMultiplier = (1 + 0.245 * 2);
+constexpr auto kPremiumDownscale = 1.25;
 
 } // namespace
 
@@ -31,60 +42,118 @@ MediaPreviewWidget::MediaPreviewWidget(
 	not_null<Window::SessionController*> controller)
 : RpWidget(parent)
 , _controller(controller)
-, _emojiSize(Ui::Emoji::GetSizeLarge() / cIntRetinaFactor()) {
+, _emojiSize(Ui::Emoji::GetSizeLarge() / style::DevicePixelRatio()) {
 	setAttribute(Qt::WA_TransparentForMouseEvents);
-	subscribe(_controller->session().downloaderTaskFinished(), [=] {
+	_controller->session().downloaderTaskFinished(
+	) | rpl::on_next([=] {
 		update();
-	});
+	}, lifetime());
+
+	style::PaletteChanged(
+	) | rpl::on_next([=] {
+		if (_document && _document->emojiUsesTextColor()) {
+			_cache = QPixmap();
+		}
+	}, lifetime());
 }
 
 QRect MediaPreviewWidget::updateArea() const {
 	const auto size = currentDimensions();
-	return QRect(
-		QPoint((width() - size.width()) / 2, (height() - size.height()) / 2),
-		size);
+	const auto position = QPoint(
+		(width() - size.width()) / 2,
+		(height() - size.height()) / 2 + _contentShiftY);
+	const auto premium = _document && _document->isPremiumSticker();
+	const auto adjusted = position
+		- (premium
+			? QPoint(
+				size.width() - (size.width() / 2),
+				size.height() / 2)
+			: QPoint())
+		+ (!_customPadding.isNull()
+			? QPoint(0, _customPadding.top())
+			: QPoint());
+	return QRect(adjusted, size * (premium ? 2 : 1));
 }
 
 void MediaPreviewWidget::paintEvent(QPaintEvent *e) {
-	Painter p(this);
-	QRect r(e->rect());
+	auto p = QPainter(this);
 
-	const auto image = [&] {
-		if (!_lottie || !_lottie->ready()) {
-			return QImage();
-		}
-		_lottie->markFrameShown();
-		return _lottie->frame();
-	}();
+	if (_customRadius > 0) {
+		auto hq = PainterHighQualityEnabler(p);
+		const auto r = rect() - _backgroundMargins;
+		auto path = QPainterPath();
+		path.addRoundedRect(r, _customRadius, _customRadius);
+		p.setClipPath(path);
+	}
+
+	const auto r = e->rect();
+	const auto factor = style::DevicePixelRatio();
+	const auto dimensions = currentDimensions();
+	const auto frame = (_lottie && _lottie->ready())
+		? _lottie->frameInfo({
+			.box = dimensions * factor,
+			.colored = ((_document && _document->emojiUsesTextColor())
+				? st::windowFg->c
+				: QColor(0, 0, 0, 0)),
+		})
+		: Lottie::Animation::FrameInfo();
+	const auto effect = (_effect && _effect->ready())
+		? _effect->frameInfo({ dimensions * kPremiumMultiplier * factor })
+		: Lottie::Animation::FrameInfo();
+	const auto image = frame.image;
+	const auto effectImage = effect.image;
+	//const auto framesCount = !image.isNull() ? _lottie->framesCount() : 1;
+	//const auto effectsCount = !effectImage.isNull()
+	//	? _effect->framesCount()
+	//	: 1;
 	const auto pixmap = image.isNull() ? currentImage() : QPixmap();
 	const auto size = image.isNull() ? pixmap.size() : image.size();
-	int w = size.width() / cIntRetinaFactor(), h = size.height() / cIntRetinaFactor();
-	auto shown = _a_shown.value(_hiding ? 0. : 1.);
+	const auto w = size.width() / factor;
+	const auto h = size.height() / factor;
+	const auto shown = _a_shown.value(_hiding ? 0. : 1.);
 	if (!_a_shown.animating()) {
 		if (_hiding) {
 			hide();
-			_controller->disableGifPauseReason(Window::GifPauseReason::MediaPreview);
+			_controller->disableGifPauseReason(
+				Window::GifPauseReason::MediaPreview);
 			return;
 		}
 	} else {
 		p.setOpacity(shown);
-//		w = qMax(qRound(w * (st::stickerPreviewMin + ((1. - st::stickerPreviewMin) * shown)) / 2.) * 2 + int(w % 2), 1);
-//		h = qMax(qRound(h * (st::stickerPreviewMin + ((1. - st::stickerPreviewMin) * shown)) / 2.) * 2 + int(h % 2), 1);
+//		w = qMax(qRound(w * (st::stickerPreviewMin
+//			+ ((1. - st::stickerPreviewMin) * shown)) / 2.) * 2
+//			+ int(w % 2), 1);
+//		h = qMax(qRound(h * (st::stickerPreviewMin
+//			+ ((1. - st::stickerPreviewMin) * shown)) / 2.) * 2
+//			+ int(h % 2), 1);
 	}
-	p.fillRect(r, st::stickerPreviewBg);
+	if (_paintBackground) {
+		const auto bg = _backgroundMargins.isNull()
+			? r
+			: (rect() - _backgroundMargins);
+		p.fillRect(bg, st::stickerPreviewBg);
+	}
+	if (!_customPadding.isNull()) {
+		p.translate(0, _customPadding.top());
+	}
+	const auto position = innerPosition({ w, h });
 	if (image.isNull()) {
-		p.drawPixmap((width() - w) / 2, (height() - h) / 2, pixmap);
+		p.drawPixmap(position, pixmap);
 	} else {
+		p.drawImage(QRect(position, QSize(w, h)), image);
+	}
+	if (!effectImage.isNull()) {
 		p.drawImage(
-			QRect((width() - w) / 2, (height() - h) / 2, w, h),
-			image);
+			QRect(outerPosition({ w, h }), effectImage.size() / factor),
+			effectImage);
 	}
 	if (!_emojiList.empty()) {
-		const auto emojiCount = _emojiList.size();
-		const auto emojiWidth = (emojiCount * _emojiSize) + (emojiCount - 1) * st::stickerEmojiSkip;
+		const auto emojiCount = int(_emojiList.size());
+		const auto emojiWidth = (emojiCount * _emojiSize)
+			+ (emojiCount - 1) * st::stickerEmojiSkip;
 		auto emojiLeft = (width() - emojiWidth) / 2;
 		const auto esize = Ui::Emoji::GetSizeLarge();
-		for (const auto emoji : _emojiList) {
+		for (const auto &emoji : _emojiList) {
 			Ui::Emoji::Draw(
 				p,
 				emoji,
@@ -94,10 +163,39 @@ void MediaPreviewWidget::paintEvent(QPaintEvent *e) {
 			emojiLeft += _emojiSize + st::stickerEmojiSkip;
 		}
 	}
+	if (!frame.image.isNull()/*
+		&& (!_effect || ((frame.index % effectsCount) <= effect.index))*/) {
+		_lottie->markFrameShown();
+	}
+	if (!effect.image.isNull()/*
+		&& ((effect.index % framesCount) <= frame.index)*/) {
+		_effect->markFrameShown();
+	}
 }
 
 void MediaPreviewWidget::resizeEvent(QResizeEvent *e) {
 	update();
+}
+
+QPoint MediaPreviewWidget::innerPosition(QSize size) const {
+	if (!_document || !_document->isPremiumSticker()) {
+		return QPoint(
+			(width() - size.width()) / 2,
+			(height() - size.height()) / 2 + _contentShiftY);
+	}
+	const auto outer = size * kPremiumMultiplier;
+	const auto shift = size.width() * kPremiumShift;
+	return outerPosition(size)
+		+ QPoint(
+			outer.width() - size.width() - shift,
+			(outer.height() - size.height()) / 2);
+}
+
+QPoint MediaPreviewWidget::outerPosition(QSize size) const {
+	const auto outer = size * kPremiumMultiplier;
+	return QPoint(
+		(width() - outer.width()) / 2,
+		(height() - outer.height()) / 2 + _contentShiftY);
 }
 
 void MediaPreviewWidget::showPreview(
@@ -113,7 +211,12 @@ void MediaPreviewWidget::showPreview(
 	startShow();
 	_origin = origin;
 	_photo = nullptr;
+	_photoMedia = nullptr;
 	_document = document;
+	_documentMedia = _document->createMediaView();
+	_documentMedia->thumbnailWanted(_origin);
+	_documentMedia->videoThumbnailWanted(_origin);
+	_documentMedia->automaticLoad(_origin, nullptr);
 	fillEmojiString();
 	resetGifAndCache();
 }
@@ -123,8 +226,10 @@ void MediaPreviewWidget::showPreview(
 		not_null<PhotoData*> photo) {
 	startShow();
 	_origin = origin;
-	_photo = photo;
 	_document = nullptr;
+	_documentMedia = nullptr;
+	_photo = photo;
+	_photoMedia = _photo->createMediaView();
 	fillEmojiString();
 	resetGifAndCache();
 }
@@ -134,10 +239,14 @@ void MediaPreviewWidget::startShow() {
 	if (isHidden() || _a_shown.animating()) {
 		if (isHidden()) {
 			show();
-			_controller->enableGifPauseReason(Window::GifPauseReason::MediaPreview);
+			_controller->enableGifPauseReason(
+				Window::GifPauseReason::MediaPreview);
 		}
 		_hiding = false;
-		_a_shown.start([this] { update(); }, 0., 1., st::stickerPreviewDuration);
+		const auto duration = _customDuration
+			? _customDuration
+			: st::stickerPreviewDuration;
+		_a_shown.start([=] { update(); }, 0., 1., duration);
 	} else {
 		update();
 	}
@@ -147,21 +256,29 @@ void MediaPreviewWidget::hidePreview() {
 	if (isHidden()) {
 		return;
 	}
-	if (_gif) _cache = currentImage();
+	if (_gif || _gifThumbnail) {
+		_cache = currentImage();
+	}
 	_hiding = true;
-	_a_shown.start([this] { update(); }, 1., 0., st::stickerPreviewDuration);
+	const auto duration = _customDuration
+		? _customDuration
+		: st::stickerPreviewDuration;
+	_a_shown.start([=] { update(); }, 1., 0., duration);
 	_photo = nullptr;
+	_photoMedia = nullptr;
 	_document = nullptr;
+	_documentMedia = nullptr;
 	resetGifAndCache();
 }
 
 void MediaPreviewWidget::fillEmojiString() {
 	_emojiList.clear();
-	if (_photo) {
+	if (_photo || _hideEmoji) {
 		return;
 	}
-	if (auto sticker = _document->sticker()) {
-		if (auto list = Stickers::GetEmojiListFromSet(_document)) {
+	if (const auto sticker = _document->sticker()) {
+		if (const auto list
+			= _document->owner().stickers().getEmojiListFromSet(_document)) {
 			_emojiList = std::move(*list);
 			while (_emojiList.size() > kStickerPreviewEmojiLimit) {
 				_emojiList.pop_back();
@@ -174,9 +291,61 @@ void MediaPreviewWidget::fillEmojiString() {
 
 void MediaPreviewWidget::resetGifAndCache() {
 	_lottie = nullptr;
+	_effect = nullptr;
 	_gif.reset();
+	_gifThumbnail.reset();
+	_gifLastPosition = 0;
 	_cacheStatus = CacheNotLoaded;
 	_cachedSize = QSize();
+}
+
+void MediaPreviewWidget::setCustomPadding(const QMargins &padding) {
+	_customPadding = padding;
+	_cachedSize = QSize();
+	update();
+}
+
+void MediaPreviewWidget::setBackgroundMargins(const QMargins &margins) {
+	_backgroundMargins = margins;
+	update();
+}
+
+void MediaPreviewWidget::setCustomRadius(int radius) {
+	_customRadius = radius;
+	update();
+}
+
+void MediaPreviewWidget::setMaxContentSize(int size) {
+	_maxContentSize = size;
+	_cachedSize = QSize();
+	update();
+}
+
+void MediaPreviewWidget::setPaintBackground(bool paint) {
+	_paintBackground = paint;
+	update();
+}
+
+void MediaPreviewWidget::setCustomDuration(crl::time duration) {
+	_customDuration = duration;
+}
+
+void MediaPreviewWidget::setHideEmoji(bool hide) {
+	_hideEmoji = hide;
+	if (hide) {
+		_emojiList.clear();
+	}
+}
+
+void MediaPreviewWidget::setContentShift(int y) {
+	_contentShiftY = y;
+	_cachedSize = QSize();
+	update();
+}
+
+int MediaPreviewWidget::contentBottom() const {
+	const auto s = currentDimensions();
+	return (height() + s.height()) / 2 + _contentShiftY;
 }
 
 QSize MediaPreviewWidget::currentDimensions() const {
@@ -184,157 +353,289 @@ QSize MediaPreviewWidget::currentDimensions() const {
 		return _cachedSize;
 	}
 	if (!_document && !_photo) {
-		_cachedSize = QSize(_cache.width() / cIntRetinaFactor(), _cache.height() / cIntRetinaFactor());
+		_cachedSize = _cache.size() * style::DevicePixelRatio();
 		return _cachedSize;
 	}
 
-	QSize result, box;
+	auto result = QSize();
+	auto box = QSize();
 	if (_photo) {
 		result = QSize(_photo->width(), _photo->height());
-		box = QSize(width() - 2 * st::boxVerticalMargin, height() - 2 * st::boxVerticalMargin);
+		const auto skip = st::mediaPreviewPhotoSkip;
+		const auto shiftSkip = 2 * std::abs(_contentShiftY);
+		box = QSize(width() - 2 * skip, height() - 2 * skip - shiftSkip);
 	} else {
 		result = _document->dimensions;
-		if (_gif && _gif->ready()) {
-			result = QSize(_gif->width(), _gif->height());
+		if (result.isEmpty()) {
+			const auto &gif = (_gif && _gif->ready())
+				? _gif
+				: _gifThumbnail;
+			if (gif && gif->ready()) {
+				result = QSize(gif->width(), gif->height());
+			}
 		}
+		const auto max = _maxContentSize
+			? _maxContentSize
+			: st::maxStickerSize;
 		if (_document->sticker()) {
-			box = QSize(st::maxStickerSize, st::maxStickerSize);
+			box = QSize(max, max);
+			if (_document->isPremiumSticker()) {
+				result = (box /= kPremiumDownscale);
+			}
 		} else {
-			box = QSize(2 * st::maxStickerSize, 2 * st::maxStickerSize);
+			box = QSize(2 * max, 2 * max);
 		}
 	}
-	result = QSize(qMax(style::ConvertScale(result.width()), 1), qMax(style::ConvertScale(result.height()), 1));
-	if (result.width() > box.width()) {
-		result.setHeight(qMax((box.width() * result.height()) / result.width(), 1));
-		result.setWidth(box.width());
+	result = QSize(
+		std::max(style::ConvertScale(result.width()), 1),
+		std::max(style::ConvertScale(result.height()), 1));
+
+	if (!_customPadding.isNull()) {
+		const auto emojiHeight = _emojiList.empty() ? 0 : (_emojiSize * 3);
+		const auto widgetBox = QSize(
+			width() - rect::m::sum::h(_customPadding),
+			height() - rect::m::sum::v(_customPadding) - emojiHeight);
+		result = result.scaled(widgetBox, Qt::KeepAspectRatio);
+	} else {
+		result = result.scaled(box, Qt::KeepAspectRatio);
 	}
-	if (result.height() > box.height()) {
-		result.setWidth(qMax((box.height() * result.width()) / result.height(), 1));
-		result.setHeight(box.height());
-	}
+
+	result = QSize(
+		std::max(result.width(), 1),
+		std::max(result.height(), 1));
+
 	if (_photo) {
 		_cachedSize = result;
 	}
 	return result;
 }
 
+void MediaPreviewWidget::createLottieIfReady(
+		not_null<DocumentData*> document) {
+	const auto sticker = document->sticker();
+	if (!sticker
+		|| !sticker->isLottie()
+		|| _lottie
+		|| !_documentMedia->loaded()) {
+		return;
+	} else if (document->isPremiumSticker()
+		&& _documentMedia->videoThumbnailContent().isEmpty()) {
+		return;
+	}
+	const_cast<MediaPreviewWidget*>(this)->setupLottie();
+}
+
 void MediaPreviewWidget::setupLottie() {
 	Expects(_document != nullptr);
 
-	_lottie = std::make_unique<Lottie::SinglePlayer>(
-		Lottie::ReadContent(_document->data(), _document->filepath()),
-		Lottie::FrameRequest{ currentDimensions() * cIntRetinaFactor() },
-		Lottie::Quality::High);
+	const auto factor = style::DevicePixelRatio();
+	if (_document->isPremiumSticker()) {
+		const auto size = HistoryView::Sticker::Size(_document);
+		_cachedSize = size;
+		_lottie = ChatHelpers::LottiePlayerFromDocument(
+			_documentMedia.get(),
+			nullptr,
+			ChatHelpers::StickerLottieSize::MessageHistory,
+			size * factor,
+			Lottie::Quality::High);
+		_effect = _document->session().emojiStickersPack().effectPlayer(
+			_document,
+			_documentMedia->videoThumbnailContent(),
+			QString(),
+			Stickers::EffectType::PremiumSticker);
+	} else {
+		const auto size = currentDimensions();
+		_lottie = std::make_unique<Lottie::SinglePlayer>(
+			Lottie::ReadContent(
+				_documentMedia->bytes(),
+				_document->filepath()),
+			Lottie::FrameRequest{ size * factor },
+			Lottie::Quality::High);
+	}
 
-	_lottie->updates(
-	) | rpl::start_with_next([=](Lottie::Update update) {
-		update.data.match([&](const Lottie::Information &) {
+	const auto handler = [=](Lottie::Update update) {
+		v::match(update.data, [&](const Lottie::Information &) {
 			this->update();
 		}, [&](const Lottie::DisplayFrameRequest &) {
 			this->update(updateArea());
 		});
-	}, lifetime());
+	};
+
+	_lottie->updates() | rpl::on_next(handler, lifetime());
+	if (_effect) {
+		_effect->updates() | rpl::on_next(handler, lifetime());
+	}
 }
 
 QPixmap MediaPreviewWidget::currentImage() const {
+	const auto blur = Images::PrepareArgs{ .options = Images::Option::Blur };
 	if (_document) {
-		if (const auto sticker = _document->sticker()) {
+		const auto sticker = _document->sticker();
+		const auto webm = sticker && sticker->isWebm();
+		if (sticker && !webm) {
 			if (_cacheStatus != CacheLoaded) {
-				if (sticker->animated && !_lottie && _document->loaded()) {
-					const_cast<MediaPreviewWidget*>(this)->setupLottie();
-				}
+				const_cast<MediaPreviewWidget*>(this)->createLottieIfReady(
+					_document);
 				if (_lottie && _lottie->ready()) {
 					return QPixmap();
-				} else if (const auto image = _document->getStickerLarge()) {
-					QSize s = currentDimensions();
-					_cache = image->pix(_origin, s.width(), s.height());
+				} else if (const auto image
+						= _documentMedia->getStickerLarge()) {
+					const auto s = currentDimensions();
+					_cache = image->pix(s);
 					_cacheStatus = CacheLoaded;
 				} else if (_cacheStatus != CacheThumbLoaded
 					&& _document->hasThumbnail()
-					&& _document->thumbnail()->loaded()) {
-					QSize s = currentDimensions();
-					_cache = _document->thumbnail()->pixBlurred(_origin, s.width(), s.height());
+					&& _documentMedia->thumbnail()) {
+					const auto s = currentDimensions();
+					_cache = _documentMedia->thumbnail()->pix(s, blur);
+					if (_document && _document->emojiUsesTextColor()) {
+						_cache = Ui::PixmapFromImage(
+							Images::Colored(
+								_cache.toImage(),
+								st::windowFg->c));
+					}
 					_cacheStatus = CacheThumbLoaded;
 				}
 			}
 		} else {
-			_document->automaticLoad(_origin, nullptr);
-			if (_document->loaded()) {
-				if (!_gif && !_gif.isBad()) {
-					auto that = const_cast<MediaPreviewWidget*>(this);
-					that->_gif = Media::Clip::MakeReader(_document, FullMsgId(), [=](Media::Clip::Notification notification) {
-						that->clipCallback(notification);
-					});
-					if (_gif) _gif->setAutoplay();
-				}
-			}
-			if (_gif && _gif->started()) {
-				auto s = currentDimensions();
-				auto paused = _controller->isGifPausedAtLeastFor(Window::GifPauseReason::MediaPreview);
-				return _gif->current(s.width(), s.height(), s.width(), s.height(), ImageRoundRadius::None, RectPart::None, paused ? 0 : crl::now());
+			const_cast<MediaPreviewWidget*>(this)->validateGifAnimation();
+			const auto &gif = (_gif && _gif->started())
+				? _gif
+				: _gifThumbnail;
+			if (gif && gif->started()) {
+				const auto paused = _controller->isGifPausedAtLeastFor(
+					Window::GifPauseReason::MediaPreview);
+				return QPixmap::fromImage(
+					gif->current(
+						{ .frame = currentDimensions(), .keepAlpha = webm },
+						paused ? 0 : crl::now()),
+					Qt::ColorOnly);
 			}
 			if (_cacheStatus != CacheThumbLoaded
 				&& _document->hasThumbnail()) {
-				QSize s = currentDimensions();
-				if (_document->thumbnail()->loaded()) {
-					_cache = _document->thumbnail()->pixBlurred(_origin, s.width(), s.height());
+				const auto s = currentDimensions();
+				const auto thumbnail = _documentMedia->thumbnail();
+				if (thumbnail) {
+					_cache = thumbnail->pix(s, blur);
 					_cacheStatus = CacheThumbLoaded;
-				} else if (const auto blurred = _document->thumbnailInline()) {
-					_cache = _document->thumbnail()->pixBlurred(_origin, s.width(), s.height());
+				} else if (const auto blurred
+						= _documentMedia->thumbnailInline()) {
+					_cache = blurred->pix(s, blur);
 					_cacheStatus = CacheThumbLoaded;
-				} else {
-					_document->thumbnail()->load(_origin);
 				}
 			}
 		}
 	} else if (_photo) {
 		if (_cacheStatus != CacheLoaded) {
-			if (_photo->loaded()) {
-				QSize s = currentDimensions();
-				_cache = _photo->large()->pix(_origin, s.width(), s.height());
+			if (_photoMedia->loaded()) {
+				const auto s = currentDimensions();
+				_cache = _photoMedia->image(Data::PhotoSize::Large)->pix(s);
 				_cacheStatus = CacheLoaded;
 			} else {
 				_photo->load(_origin);
 				if (_cacheStatus != CacheThumbLoaded) {
-					QSize s = currentDimensions();
-					if (_photo->thumbnail()->loaded()) {
-						_cache = _photo->thumbnail()->pixBlurred(_origin, s.width(), s.height());
+					const auto s = currentDimensions();
+					if (const auto thumb
+							= _photoMedia->image(Data::PhotoSize::Thumbnail)) {
+						_cache = thumb->pix(s, blur);
 						_cacheStatus = CacheThumbLoaded;
-					} else if (_photo->thumbnailSmall()->loaded()) {
-						_cache = _photo->thumbnailSmall()->pixBlurred(_origin, s.width(), s.height());
+					} else if (const auto small
+							= _photoMedia->image(Data::PhotoSize::Small)) {
+						_cache = small->pix(s, blur);
 						_cacheStatus = CacheThumbLoaded;
-					} else if (const auto blurred = _photo->thumbnailInline()) {
-						_cache = blurred->pixBlurred(_origin, s.width(), s.height());
+					} else if (const auto blurred
+							= _photoMedia->thumbnailInline()) {
+						_cache = blurred->pix(s, blur);
 						_cacheStatus = CacheThumbLoaded;
 					} else {
-						_photo->thumbnailSmall()->load(_origin);
+						_photoMedia->wanted(Data::PhotoSize::Small, _origin);
 					}
 				}
 			}
 		}
-
 	}
 	return _cache;
 }
 
-void MediaPreviewWidget::clipCallback(Media::Clip::Notification notification) {
+void MediaPreviewWidget::startGifAnimation(
+		const Media::Clip::ReaderPointer &gif) {
+	gif->start({ .frame = currentDimensions(), .keepAlpha = _gifWithAlpha });
+}
+
+void MediaPreviewWidget::validateGifAnimation() {
+	Expects(_documentMedia != nullptr);
+
+	if (_gifThumbnail && _gifThumbnail->started()) {
+		const auto position = _gifThumbnail->getPositionMs();
+		if (_gif
+			&& _gif->ready()
+			&& !_gif->started()
+			&& (_gifLastPosition > position)) {
+			startGifAnimation(_gif);
+			_gifThumbnail.reset();
+			_gifLastPosition = 0;
+			return;
+		} else {
+			_gifLastPosition = position;
+		}
+	} else if (_gif || _gif.isBad()) {
+		return;
+	}
+
+	const auto contentLoaded = _documentMedia->loaded();
+	const auto thumbContent = _documentMedia->videoThumbnailContent();
+	const auto thumbLoaded = !thumbContent.isEmpty();
+	if (!contentLoaded
+		&& (_gifThumbnail || _gifThumbnail.isBad() | !thumbLoaded)) {
+		return;
+	}
+	const auto callback = [=](Media::Clip::Notification notification) {
+		clipCallback(notification);
+	};
+	_gifWithAlpha = (_documentMedia->owner()->sticker() != nullptr);
+	if (contentLoaded) {
+		_gif = Media::Clip::MakeReader(
+			_documentMedia->owner()->location(),
+			_documentMedia->bytes(),
+			std::move(callback));
+	} else {
+		_gifThumbnail = Media::Clip::MakeReader(
+			thumbContent,
+			std::move(callback));
+	}
+}
+
+void MediaPreviewWidget::clipCallback(
+		Media::Clip::Notification notification) {
 	using namespace Media::Clip;
 	switch (notification) {
-	case NotificationReinit: {
+	case Notification::Reinit: {
+		if (_gifThumbnail && _gifThumbnail->state() == State::Error) {
+			_gifThumbnail.setBad();
+		}
 		if (_gif && _gif->state() == State::Error) {
 			_gif.setBad();
 		}
 
-		if (_gif && _gif->ready() && !_gif->started()) {
-			QSize s = currentDimensions();
-			_gif->start(s.width(), s.height(), s.width(), s.height(), ImageRoundRadius::None, RectPart::None);
+		if (_gif
+			&& _gif->ready()
+			&& !_gif->started()
+			&& (!_gifThumbnail || !_gifThumbnail->started())) {
+			startGifAnimation(_gif);
+		} else if (!_gif
+			&& _gifThumbnail
+			&& _gifThumbnail->ready()
+			&& !_gifThumbnail->started()) {
+			startGifAnimation(_gifThumbnail);
 		}
-
 		update();
 	} break;
 
-	case NotificationRepaint: {
-		if (_gif && !_gif->currentDisplayed()) {
+	case Notification::Repaint: {
+		if ((_gif && _gif->started() && !_gif->currentDisplayed())
+			|| (_gifThumbnail
+				&& _gifThumbnail->started()
+				&& !_gifThumbnail->currentDisplayed())) {
 			update(updateArea());
 		}
 	} break;
@@ -342,6 +643,10 @@ void MediaPreviewWidget::clipCallback(Media::Clip::Notification notification) {
 }
 
 MediaPreviewWidget::~MediaPreviewWidget() {
+	if (!isHidden()) {
+		_controller->disableGifPauseReason(
+			Window::GifPauseReason::MediaPreview);
+	}
 }
 
 } // namespace Window

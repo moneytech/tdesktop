@@ -8,9 +8,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "base/variant.h"
-#include "mtproto/mtproto_rpc_sender.h"
+#include "mtproto/mtproto_response.h"
 
+#include <QtCore/QPointer>
 #include <crl/crl_object_on_queue.h>
+
+namespace MTP {
+class Instance;
+} // namespace MTP
 
 namespace Export {
 
@@ -33,24 +38,20 @@ struct ProcessingState {
 		DialogsList,
 		PersonalInfo,
 		Userpics,
+		Stories,
+		ProfileMusic,
 		Contacts,
 		Sessions,
 		OtherData,
 		Dialogs,
-	};
-	enum class FileType {
-		None,
-		Photo,
-		Video,
-		VoiceMessage,
-		VideoMessage,
-		Sticker,
-		GIF,
-		File,
+		Topic,
 	};
 	enum class EntityType {
 		Chat,
 		SavedMessages,
+		RepliesMessages,
+		VerifyCodes,
+		Topic,
 		Other,
 	};
 
@@ -68,14 +69,14 @@ struct ProcessingState {
 	int itemIndex = 0;
 	int itemCount = 0;
 
-	FileType bytesType = FileType::None;
+	uint64 bytesRandomId = 0;
 	QString bytesName;
-	int bytesLoaded = 0;
-	int bytesCount = 0;
+	int64 bytesLoaded = 0;
+	int64 bytesCount = 0;
 };
 
 struct ApiErrorState {
-	RPCError data;
+	MTP::Error data;
 };
 
 struct OutputErrorState {
@@ -91,7 +92,8 @@ struct FinishedState {
 	int64 bytesCount = 0;
 };
 
-using State = base::optional_variant<
+using State = std::variant<
+	v::null_t,
 	PasswordCheckState,
 	ProcessingState,
 	ApiErrorState,
@@ -112,7 +114,15 @@ using State = base::optional_variant<
 
 class Controller {
 public:
-	explicit Controller(const MTPInputPeer &peer);
+	Controller(
+		QPointer<MTP::Instance> mtproto,
+		const MTPInputPeer &peer);
+	Controller(
+		QPointer<MTP::Instance> mtproto,
+		const MTPInputPeer &peer,
+		int32 topicRootId,
+		uint64 peerId,
+		const QString &topicTitle);
 
 	rpl::producer<State> state() const;
 
@@ -127,6 +137,7 @@ public:
 	void startExport(
 		const Settings &settings,
 		const Environment &environment);
+	void skipFile(uint64 randomId);
 	void cancelExportFast();
 
 	rpl::lifetime &lifetime();

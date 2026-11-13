@@ -10,12 +10,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "emoji_suggestions_helper.h"
 #include "lang/lang_instance.h"
 #include "lang/lang_cloud_manager.h"
+#include "lang/lang_keys.h"
 #include "core/application.h"
 #include "base/platform/base_platform_info.h"
 #include "ui/emoji_config.h"
-#include "main/main_account.h"
+#include "main/main_domain.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 
 #include <QtGui/QGuiApplication>
 
@@ -54,19 +57,19 @@ struct LangPackData {
 		const QString &word) {
 	if ((word.size() == 1) && !word[0].isLetter()) {
 		return true;
-	} else if (word == qstr("10")) {
+	} else if (word == u"10"_q) {
 		return true;
-	} else if (language != qstr("en")) {
+	} else if (language != u"en"_q) {
 		return false;
 	} else if ((word.size() == 1)
 		&& (word[0] != '$')
 		&& (word[0].unicode() != 8364)) { // Euro.
 		return true;
 	} else if ((word.size() == 2)
-		&& (word != qstr("us"))
-		&& (word != qstr("uk"))
-		&& (word != qstr("hi"))
-		&& (word != qstr("ok"))) {
+		&& (word != u"us"_q)
+		&& (word != u"uk"_q)
+		&& (word != u"hi"_q)
+		&& (word != u"ok"_q)) {
 		return true;
 	}
 	return false;
@@ -79,7 +82,7 @@ struct LangPackData {
 }
 
 void CreateCacheFilePath() {
-	QDir().mkpath(internal::CacheFileFolder() + qstr("/keywords"));
+	QDir().mkpath(internal::CacheFileFolder() + u"/keywords"_q);
 }
 
 [[nodiscard]] QString CacheFilePath(QString id) {
@@ -88,7 +91,7 @@ void CreateCacheFilePath() {
 	if (id.isEmpty()) {
 		return QString();
 	}
-	return internal::CacheFileFolder() + qstr("/keywords/") + id;
+	return internal::CacheFileFolder() + u"/keywords/"_q + id;
 }
 
 [[nodiscard]] LangPackData ReadLocalCache(const QString &id) {
@@ -132,7 +135,7 @@ void CreateCacheFilePath() {
 			}
 			list.push_back(entry);
 		}
-		result.maxKeyLength = std::max(result.maxKeyLength, key.size());
+		result.maxKeyLength = std::max(result.maxKeyLength, int(key.size()));
 	}
 	result.version = version;
 	return result;
@@ -179,16 +182,16 @@ void AppendFoundEmoji(
 	const auto alreadyBegin = begin(result);
 	const auto alreadyEnd = alreadyBegin + result.size();
 
-	auto &&add = ranges::view::all(
+	auto &&add = ranges::views::all(
 		list
-	) | ranges::view::filter([&](const LangPackEmoji &entry) {
+	) | ranges::views::filter([&](const LangPackEmoji &entry) {
 		const auto i = ranges::find(
 			alreadyBegin,
 			alreadyEnd,
 			entry.emoji,
 			&Result::emoji);
 		return (i == alreadyEnd);
-	}) | ranges::view::transform([&](const LangPackEmoji &entry) {
+	}) | ranges::views::transform([&](const LangPackEmoji &entry) {
 		return Result{ entry.emoji, label, entry.text };
 	});
 	result.insert(end(result), add.begin(), add.end());
@@ -205,7 +208,7 @@ void AppendLegacySuggestions(
 			&& (ch != '-')
 			&& (ch != '+');
 	};
-	if (ranges::find_if(query, badSuggestionChar) != query.end()) {
+	if (ranges::any_of(query, badSuggestionChar)) {
 		return;
 	}
 
@@ -216,15 +219,15 @@ void AppendLegacySuggestions(
 	const auto alreadyBegin = begin(result);
 	const auto alreadyEnd = alreadyBegin + result.size();
 
-	auto &&add = ranges::view::all(
+	auto &&add = ranges::views::all(
 		suggestions
-	) | ranges::view::transform([](const Suggestion &suggestion) {
+	) | ranges::views::transform([](const Suggestion &suggestion) {
 		return Result{
 			Find(QStringFromUTF16(suggestion.emoji())),
 			QStringFromUTF16(suggestion.label()),
 			QStringFromUTF16(suggestion.replacement())
 		};
-	}) | ranges::view::filter([&](const Result &entry) {
+	}) | ranges::views::filter([&](const Result &entry) {
 		const auto i = entry.emoji
 			? ranges::find(
 				alreadyBegin,
@@ -250,19 +253,20 @@ void ApplyDifference(
 				return;
 			}
 			auto &list = data.emoji[word];
-			auto &&emoji = ranges::view::all(
+			auto &&emoji = ranges::views::all(
 				keyword.vemoticons().v
-			) | ranges::view::transform([](const MTPstring &string) {
+			) | ranges::views::transform([](const MTPstring &string) {
 				const auto text = qs(string);
 				const auto emoji = MustAddPostfix(text)
 					? (text + QChar(Ui::Emoji::kPostfix))
 					: text;
 				return LangPackEmoji{ FindExact(emoji), text };
-			}) | ranges::view::filter([&](const LangPackEmoji &entry) {
+			}) | ranges::views::filter([&](const LangPackEmoji &entry) {
 				if (!entry.emoji) {
 					LOG(("API Warning: emoji %1 is not supported, word: %2."
-						).arg(entry.text
-						).arg(word));
+						).arg(
+							entry.text,
+							word));
 				}
 				return (entry.emoji != nullptr);
 			});
@@ -290,9 +294,9 @@ void ApplyDifference(
 	if (data.emoji.empty()) {
 		data.maxKeyLength = 0;
 	} else {
-		auto &&lengths = ranges::view::all(
+		auto &&lengths = ranges::views::all(
 			data.emoji
-		) | ranges::view::transform([](auto &&pair) {
+		) | ranges::views::transform([](auto &&pair) {
 			return pair.first.size();
 		});
 		data.maxKeyLength = *ranges::max_element(lengths);
@@ -399,7 +403,7 @@ void EmojiKeywords::LangPack::refresh() {
 			_requestId = 0;
 			_lastRefreshTime = crl::now();
 			applyDifference(result);
-		}).fail([=](const RPCError &error) {
+		}).fail([=] {
 			_requestId = 0;
 			_lastRefreshTime = crl::now();
 		}).send();
@@ -419,9 +423,9 @@ void EmojiKeywords::LangPack::applyDifference(
 		const auto version = data.vversion().v;
 		const auto &keywords = data.vkeywords().v;
 		if (code != _id) {
-			LOG(("API Error: Bad lang_code for emoji keywords %1 -> %2"
-				).arg(_id
-				).arg(code));
+			LOG(("API Error: Bad lang_code for emoji keywords %1 -> %2").arg(
+				_id,
+				code));
 			_data.version = 0;
 			_state = State::Refreshed;
 			return;
@@ -479,7 +483,7 @@ std::vector<Result> EmojiKeywords::LangPack::query(
 	auto &&chosen = ranges::make_subrange(
 		from,
 		end(_data.emoji)
-	) | ranges::view::take_while([&](const auto &pair) {
+	) | ranges::views::take_while([&](const auto &pair) {
 		const auto &key = pair.first;
 		return exact ? (key == normalized) : key.startsWith(normalized);
 	});
@@ -516,10 +520,10 @@ void EmojiKeywords::langPackRefreshed() {
 }
 
 void EmojiKeywords::handleSessionChanges() {
-	Core::App().activeAccount().sessionValue(
+	Core::App().domain().activeSessionValue( // #TODO multi someSessionValue
 	) | rpl::map([](Main::Session *session) {
 		return session ? &session->api() : nullptr;
-	}) | rpl::start_with_next([=](ApiWrap *api) {
+	}) | rpl::on_next([=](ApiWrap *api) {
 		apiChanged(api);
 	}, _lifetime);
 }
@@ -527,13 +531,12 @@ void EmojiKeywords::handleSessionChanges() {
 void EmojiKeywords::apiChanged(ApiWrap *api) {
 	_api = api;
 	if (_api) {
-		crl::on_main(&Auth(), crl::guard(&_guard, [=] {
-			base::ObservableViewer(
-				Lang::CurrentCloudManager().firstLanguageSuggestion()
+		crl::on_main(&_api->session(), crl::guard(&_guard, [=] {
+			Lang::CurrentCloudManager().firstLanguageSuggestion(
 			) | rpl::filter([=] {
 				// Refresh with the suggested language if we already were asked.
 				return !_data.empty();
-			}) | rpl::start_with_next([=] {
+			}) | rpl::on_next([=] {
 				refresh();
 			}, _suggestedChangeLifetime);
 		}));
@@ -557,7 +560,7 @@ void EmojiKeywords::refresh() {
 }
 
 std::vector<QString> EmojiKeywords::languages() {
-	if (!Main::Session::Exists()) {
+	if (!_api) {
 		return {};
 	}
 	refreshInputLanguages();
@@ -569,7 +572,7 @@ std::vector<QString> EmojiKeywords::languages() {
 	const auto yieldList = [&](const QStringList &list) {
 		result.insert(end(result), list.begin(), list.end());
 	};
-	yield(Lang::Current().id());
+	yield(Lang::Id());
 	yield(Lang::DefaultLanguageId());
 	yield(Lang::CurrentCloudManager().suggestedLanguage());
 	yield(Platform::SystemLanguage());
@@ -618,9 +621,9 @@ std::vector<Result> EmojiKeywords::query(
 		const auto alreadyBegin = begin(result);
 		const auto alreadyEnd = alreadyBegin + result.size();
 
-		auto &&add = ranges::view::all(
+		auto &&add = ranges::views::all(
 			list
-		) | ranges::view::filter([&](Result entry) {
+		) | ranges::views::filter([&](Result entry) {
 			// In each item->query() result the list has no duplicates.
 			// So we need to check only for duplicates between queries.
 			const auto i = ranges::find(
@@ -638,11 +641,49 @@ std::vector<Result> EmojiKeywords::query(
 	return result;
 }
 
+std::vector<Result> EmojiKeywords::queryMine(
+		const QString &query,
+		bool exact) const {
+	return ApplyVariants(PrioritizeRecent(this->query(query, exact)));
+}
+
+std::vector<Result> EmojiKeywords::PrioritizeRecent(
+		std::vector<Result> list) {
+	using Entry = Result;
+	auto lastRecent = begin(list);
+	const auto &recent = Core::App().settings().recentEmoji();
+	for (const auto &item : recent) {
+		const auto emoji = std::get_if<EmojiPtr>(&item.id.data);
+		if (!emoji) {
+			continue;
+		}
+		const auto original = (*emoji)->original()
+			? (*emoji)->original()
+			: (*emoji);
+		const auto it = ranges::find(list, original, [](const Entry &entry) {
+			return entry.emoji;
+		});
+		if (it > lastRecent && it != end(list)) {
+			std::rotate(lastRecent, it, it + 1);
+			++lastRecent;
+		}
+	}
+	return list;
+}
+
+std::vector<Result> EmojiKeywords::ApplyVariants(std::vector<Result> list) {
+	const auto &settings = Core::App().settings();
+	for (auto &item : list) {
+		item.emoji = settings.lookupEmojiVariant(item.emoji);
+	}
+	return list;
+}
+
 int EmojiKeywords::maxQueryLength() const {
 	if (_data.empty()) {
 		return 0;
 	}
-	auto &&lengths = _data | ranges::view::transform([](const auto &pair) {
+	auto &&lengths = _data | ranges::views::transform([](const auto &pair) {
 		return pair.second->maxQueryLength();
 	});
 	return *ranges::max_element(lengths);
@@ -662,15 +703,15 @@ void EmojiKeywords::refreshRemoteList() {
 	_langsRequestId = _api->request(MTPmessages_GetEmojiKeywordsLanguages(
 		MTP_vector<MTPstring>(languages)
 	)).done([=](const MTPVector<MTPEmojiLanguage> &result) {
-		setRemoteList(ranges::view::all(
+		setRemoteList(ranges::views::all(
 			result.v
-		) | ranges::view::transform([](const MTPEmojiLanguage &language) {
+		) | ranges::views::transform([](const MTPEmojiLanguage &language) {
 			return language.match([&](const MTPDemojiLanguage &language) {
 				return qs(language.vlang_code());
 			});
 		}) | ranges::to_vector);
 		_langsRequestId = 0;
-	}).fail([=](const RPCError &error) {
+	}).fail([=] {
 		_langsRequestId = 0;
 	}).send();
 }

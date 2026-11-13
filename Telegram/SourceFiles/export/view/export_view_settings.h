@@ -18,15 +18,24 @@ class ScrollArea;
 class BoxContent;
 } // namespace Ui
 
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace Export {
 namespace View {
 
-constexpr auto kSizeValueCount = 80;
-int SizeLimitByIndex(int index);
+constexpr auto kSizeValueCount = 100;
+int64 SizeLimitByIndex(int index);
 
 class SettingsWidget : public Ui::RpWidget {
 public:
-	SettingsWidget(QWidget *parent, Settings data);
+	SettingsWidget(
+		QWidget *parent,
+		not_null<Main::Session*> session,
+		Settings data);
+
+	[[nodiscard]] int sizeLimitExtraHeight() const;
 
 	rpl::producer<Settings> value() const;
 	rpl::producer<Settings> changes() const;
@@ -70,16 +79,21 @@ private:
 		const QString &text,
 		Types types);
 	void addMediaOptions(not_null<Ui::VerticalLayout*> container);
-	void addMediaOption(
+	not_null<Ui::Checkbox*> addMediaOption(
 		not_null<Ui::VerticalLayout*> container,
 		const QString &text,
 		MediaType type);
-	void addSizeSlider(not_null<Ui::VerticalLayout*> container);
+	void addSizeSlider(
+		not_null<Ui::VerticalLayout*> container,
+		not_null<Ui::Checkbox*> above);
 	void addLocationLabel(
+		not_null<Ui::VerticalLayout*> container);
+	void addFormatAndLocationLabel(
 		not_null<Ui::VerticalLayout*> container);
 	void addLimitsLabel(
 		not_null<Ui::VerticalLayout*> container);
 	void chooseFolder();
+	void chooseFormat();
 	void refreshButtons(
 		not_null<Ui::RpWidget*> container,
 		bool canStart);
@@ -95,11 +109,14 @@ private:
 	template <typename Callback>
 	void changeData(Callback &&callback);
 
+	const not_null<Main::Session*> _session;
 	PeerId _singlePeerId = 0;
 	Fn<void(object_ptr<Ui::BoxContent>)> _showBoxCallback;
 
 	// Use through readData / changeData wrappers.
 	Settings _internal_data;
+
+	int _sizeLimitExtraHeight = 0;
 
 	struct Wrap {
 		Wrap(rpl::producer<> value = nullptr)

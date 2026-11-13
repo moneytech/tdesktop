@@ -7,146 +7,251 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "base/weak_ptr.h"
-#include "base/timer.h"
+#include "base/object_ptr.h"
 #include "calls/calls_call.h"
-#include "ui/widgets/tooltip.h"
+#include "calls/group/ui/desktop_capture_choose_source.h"
 #include "ui/effects/animations.h"
 #include "ui/rp_widget.h"
 
+class Image;
+
+namespace base {
+class PowerSaveBlocker;
+} // namespace base
+
+namespace Data {
+class PhotoMedia;
+} // namespace Data
+
+namespace Main {
+class SessionShow;
+} // namespace Main
+
 namespace Ui {
+class Show;
+class BoxContent;
+class LayerWidget;
+enum class LayerOption;
+using LayerOptions = base::flags<LayerOption>;
 class IconButton;
+class CallButton;
+class LayerManager;
 class FlatLabel;
 template <typename Widget>
 class FadeWrap;
+template <typename Widget>
+class PaddingWrap;
+class RpWindow;
+class PopupMenu;
+class ImportantTooltip;
 } // namespace Ui
+
+namespace Ui::Toast {
+class Instance;
+struct Config;
+} // namespace Ui::Toast
+
+namespace Ui::Platform {
+struct SeparateTitleControls;
+} // namespace Ui::Platform
 
 namespace style {
 struct CallSignalBars;
+struct CallBodyLayout;
 } // namespace style
 
 namespace Calls {
 
-class SignalBars : public Ui::RpWidget, private base::Subscriber {
-public:
-	SignalBars(
-		QWidget *parent,
-		not_null<Call*> call,
-		const style::CallSignalBars &st,
-		Fn<void()> displayedChangedCallback = nullptr);
+class Window;
+class Userpic;
+class SignalBars;
+class VideoBubble;
+class PanelBackground;
+class RateCall;
+class EndCloseButton;
+struct DeviceSelection;
+struct ConferencePanelMigration;
 
-	bool isDisplayed() const;
-
-protected:
-	void paintEvent(QPaintEvent *e) override;
-
-private:
-	void changed(int count);
-
-	const style::CallSignalBars &_st;
-	int _count = Call::kSignalBarStarting;
-	Fn<void()> _displayedChangedCallback;
-
-};
-
-class Panel
-	: public Ui::RpWidget
-	, private base::Subscriber
-	, private Ui::AbstractTooltipShower {
-
+class Panel final
+	: public base::has_weak_ptr
+	, private Group::Ui::DesktopCapture::ChooseSourceDelegate {
 public:
 	Panel(not_null<Call*> call);
+	~Panel();
+
+	[[nodiscard]] not_null<Ui::RpWidget*> widget() const;
+	[[nodiscard]] not_null<UserData*> user() const;
+	[[nodiscard]] bool isVisible() const;
+	[[nodiscard]] bool isActive() const;
+	[[nodiscard]] QRect panelGeometry() const;
+
+	[[nodiscard]] ConferencePanelMigration migrationInfo() const;
 
 	void showAndActivate();
+	void minimize();
+	void toggleFullScreen();
 	void replaceCall(not_null<Call*> call);
-	void hideAndDestroy();
+	void savePanelGeometry();
+	void closeBeforeDestroy(bool windowIsReused = false);
 
-protected:
-	void paintEvent(QPaintEvent *e) override;
-	void closeEvent(QCloseEvent *e) override;
-	void resizeEvent(QResizeEvent *e) override;
-	void mousePressEvent(QMouseEvent *e) override;
-	void mouseReleaseEvent(QMouseEvent *e) override;
-	void mouseMoveEvent(QMouseEvent *e) override;
-	void leaveEventHook(QEvent *e) override;
-	void leaveToChildEvent(QEvent *e, QWidget *child) override;
-	bool eventHook(QEvent *e) override;
+	QWidget *chooseSourceParent() override;
+	QString chooseSourceActiveDeviceId() override;
+	bool chooseSourceActiveWithAudio() override;
+	bool chooseSourceWithAudioSupported() override;
+	rpl::lifetime &chooseSourceInstanceLifetime() override;
+	void chooseSourceAccepted(
+		const QString &deviceId,
+		bool withAudio) override;
+	void chooseSourceStop() override;
+
+	[[nodiscard]] rpl::producer<bool> startOutgoingRequests() const;
+
+	[[nodiscard]] std::shared_ptr<Main::SessionShow> sessionShow();
+	[[nodiscard]] std::shared_ptr<Ui::Show> uiShow();
+
+	[[nodiscard]] not_null<Ui::RpWindow*> window() const;
+
+	[[nodiscard]] rpl::lifetime &lifetime();
 
 private:
+	class Incoming;
 	using State = Call::State;
 	using Type = Call::Type;
+	enum class AnswerHangupRedialState : uchar {
+		Answer,
+		Hangup,
+		Redial,
+		StartCall,
+	};
 
-	// AbstractTooltipShower interface
-	QString tooltipText() const override;
-	QPoint tooltipPos() const override;
-	bool tooltipWindowActive() const override;
+	void paint(QRect clip);
 
+	void initWindow();
+	void initWidget();
 	void initControls();
-	void reinitControls();
+	void initConferenceInvite();
+	void reinitWithCall(Call *call);
 	void initLayout();
+	void initMediaDeviceToggles();
 	void initGeometry();
-	void hideDeactivated();
-	void createBottomImage();
-	void createDefaultCacheImage();
-	void refreshCacheImageUserPhoto();
 
-	void processUserPhoto();
-	void refreshUserPhoto();
-	bool isGoodUserPhoto(PhotoData *photo);
-	void createUserpicCache(Image *image, Data::FileOrigin origin);
-	QRect signalBarsRect() const;
-	void paintSignalBarsBg(Painter &p);
+	[[nodiscard]] bool handleClose() const;
 
+	void requestControlsHidden(bool hidden);
+	void controlsShownForce(bool shown);
+	void updateControlsShown();
 	void updateControlsGeometry();
 	void updateHangupGeometry();
 	void updateStatusGeometry();
+	[[nodiscard]] auto bottomButtons() const
+		-> std::vector<not_null<Ui::CallButton*>>;
+	void refreshButtonLabelsShown();
+	void setupButtonTooltip(not_null<Ui::CallButton*> button);
+	void showButtonTooltip(not_null<Ui::CallButton*> button);
+	void hideButtonTooltip();
+	void updateButtonTooltipGeometry();
+	void updateOutgoingVideoBubbleGeometry();
 	void stateChanged(State state);
 	void showControls();
 	void updateStatusText(State state);
+	void updateTextColors();
 	void startDurationUpdateTimer(crl::time currentDuration);
-	void fillFingerprint();
-	void toggleOpacityAnimation(bool visible);
-	void finishAnimating();
-	void destroyDelayed();
+	void setIncomingSize(QSize size);
+	void refreshIncomingGeometry();
+
+	void refreshOutgoingPreviewInBody(State state);
+	void showRateCall();
+	void finishRateCall();
+	void hideControlsForRating();
+	[[nodiscard]] QRect hangupCircleRect() const;
+	[[nodiscard]] QRect rateCloseRect() const;
+	void createPinOnTop();
+	[[nodiscard]] QRect pinOnTopRect() const;
+	void toggleFullScreen(bool fullscreen);
+	void createRemoteAudioMute();
+	void createRemoteLowBattery();
+	void showRemoteLowBattery();
+	void refreshAnswerHangupRedialLabel();
+
+	void addPeople();
+	void showDevicesMenu(
+		not_null<QWidget*> button,
+		std::vector<DeviceSelection> types);
+
+	[[nodiscard]] QRect incomingFrameGeometry() const;
+	[[nodiscard]] QRect outgoingFrameGeometry() const;
 
 	Call *_call = nullptr;
 	not_null<UserData*> _user;
 
-	bool _useTransparency = true;
-	style::margins _padding;
-	int _contentTop = 0;
+	std::shared_ptr<Window> _window;
+	std::unique_ptr<Incoming> _incoming;
 
-	bool _dragging = false;
-	QPoint _dragStartMousePosition;
-	QPoint _dragStartMyPosition;
+	QSize _incomingFrameSize;
 
-	int _stateChangedSubscription = 0;
+	rpl::lifetime _callLifetime;
 
-	class Button;
-	object_ptr<Button> _answerHangupRedial;
-	object_ptr<Ui::FadeWrap<Button>> _decline;
-	object_ptr<Ui::FadeWrap<Button>> _cancel;
+	not_null<const style::CallBodyLayout*> _bodySt;
+	base::unique_qptr<Ui::CallButton> _answerHangupRedial;
+	base::unique_qptr<Ui::FadeWrap<Ui::CallButton>> _decline;
+	base::unique_qptr<Ui::FadeWrap<Ui::CallButton>> _cancel;
 	bool _hangupShown = false;
+	bool _conferenceSupported = false;
+	bool _outgoingPreviewInBody = false;
+	std::optional<AnswerHangupRedialState> _answerHangupRedialState;
 	Ui::Animations::Simple _hangupShownProgress;
-	object_ptr<Ui::IconButton> _mute;
-	object_ptr<Ui::FlatLabel> _name;
-	object_ptr<Ui::FlatLabel> _status;
-	object_ptr<SignalBars> _signalBars;
-	std::vector<EmojiPtr> _fingerprint;
-	QRect _fingerprintArea;
+	base::unique_qptr<Ui::FadeWrap<Ui::CallButton>> _screencast;
+	base::unique_qptr<Ui::CallButton> _camera;
+	Ui::CallButton *_cameraDeviceToggle = nullptr;
+	base::unique_qptr<Ui::CallButton> _startVideo;
+	base::unique_qptr<Ui::FadeWrap<Ui::CallButton>> _mute;
+	Ui::CallButton *_audioDeviceToggle = nullptr;
+	base::unique_qptr<Ui::FadeWrap<Ui::CallButton>> _addPeople;
+	base::unique_qptr<Ui::IconButton> _pinOnTop;
+	object_ptr<Ui::ImportantTooltip> _buttonTooltip = { nullptr };
+	QPointer<Ui::CallButton> _buttonTooltipFor;
+	bool _buttonLabelsShown = true;
+	base::unique_qptr<Ui::FlatLabel> _name;
+	base::unique_qptr<Ui::FlatLabel> _status;
+	base::unique_qptr<RateCall> _rateCall;
+	base::unique_qptr<EndCloseButton> _rateClose;
+	Ui::Animations::Simple _rateNameFade;
+	QPoint _rateEndedIconPosition;
+	int _endedDuration = 0;
+	bool _rateNameSwapped = false;
+	base::unique_qptr<Ui::RpWidget> _conferenceParticipants;
+	base::unique_qptr<Ui::RpWidget> _fingerprint;
+	base::unique_qptr<Ui::PaddingWrap<Ui::FlatLabel>> _remoteAudioMute;
+	base::unique_qptr<Ui::PaddingWrap<Ui::FlatLabel>> _remoteLowBattery;
+	std::unique_ptr<Userpic> _userpic;
+	std::unique_ptr<VideoBubble> _outgoingVideoBubble;
+	QPixmap _bottomShadow;
+	int _bodyTop = 0;
+	int _buttonsTopShown = 0;
+	int _buttonsTop = 0;
+
+	base::Timer _hideControlsTimer;
+	base::Timer _controlsShownForceTimer;
+	std::unique_ptr<QObject> _hideControlsFilter;
+	bool _hideControlsRequested = false;
+	bool _unpinnedMaximized = false;
+	rpl::variable<bool> _fullScreenOrMaximized;
+	Ui::Animations::Simple _controlsShownAnimation;
+	bool _controlsShownForce = false;
+	bool _controlsShown = true;
+	bool _mouseInside = false;
+
+	base::unique_qptr<Ui::PopupMenu> _devicesMenu;
 
 	base::Timer _updateDurationTimer;
 	base::Timer _updateOuterRippleTimer;
 
-	bool _visible = false;
-	QPixmap _userPhoto;
-	PhotoId _userPhotoId = 0;
-	bool _userPhotoFull = false;
+	rpl::event_stream<bool> _startOutgoingRequests;
 
-	Ui::Animations::Simple _opacityAnimation;
-	QPixmap _animationCache;
-	QPixmap _bottomCache;
-	QPixmap _cache;
+	std::unique_ptr<PanelBackground> _background;
+
+	rpl::lifetime _geometryLifetime;
+	rpl::lifetime _lifetime;
 
 };
 

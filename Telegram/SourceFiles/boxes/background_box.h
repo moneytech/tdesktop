@@ -7,11 +7,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "boxes/abstract_box.h"
+#include "ui/layers/box_content.h"
 
-namespace Main {
-class Session;
-} // namespace Main
+class PeerData;
+
+namespace Window {
+class SessionController;
+} // namespace Window
 
 namespace Data {
 class WallPaper;
@@ -19,7 +21,10 @@ class WallPaper;
 
 class BackgroundBox : public Ui::BoxContent {
 public:
-	BackgroundBox(QWidget*, not_null<Main::Session*> session);
+	BackgroundBox(
+		QWidget*,
+		not_null<Window::SessionController*> controller,
+		PeerData *forPeer = nullptr);
 
 protected:
 	void prepare() override;
@@ -27,10 +32,19 @@ protected:
 private:
 	class Inner;
 
+	void chosen(const Data::WallPaper &paper);
+	[[nodiscard]] bool hasDefaultForPeer() const;
+	[[nodiscard]] bool chosenDefaultForPeer(
+		const Data::WallPaper &paper) const;
 	void removePaper(const Data::WallPaper &paper);
+	void resetForPeer();
+	[[nodiscard]] bool forChannel() const;
 
-	const not_null<Main::Session*> _session;
+	void chooseFromFile();
+
+	const not_null<Window::SessionController*> _controller;
 
 	QPointer<Inner> _inner;
+	PeerData *_forPeer = nullptr;
 
 };

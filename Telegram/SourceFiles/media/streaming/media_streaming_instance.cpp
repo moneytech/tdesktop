@@ -9,12 +9,26 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "media/streaming/media_streaming_document.h"
 #include "data/data_file_origin.h"
+#include "data/data_photo.h"
 #include "data/data_document.h"
 #include "data/data_session.h"
 #include "data/data_streaming.h"
 
 namespace Media {
 namespace Streaming {
+
+Instance::Instance(const Instance &other)
+: _shared(other._shared)
+, _waitingCallback(other._waitingCallback)
+, _priority(other._priority)
+, _playerLocked(other._playerLocked) {
+	if (_shared) {
+		_shared->registerInstance(this);
+		if (_playerLocked) {
+			_shared->player().lock();
+		}
+	}
+}
 
 Instance::Instance(
 	std::shared_ptr<Document> shared,
@@ -32,6 +46,30 @@ Instance::Instance(
 	Fn<void()> waitingCallback)
 : Instance(
 	document->owner().streaming().sharedDocument(document, origin),
+	std::move(waitingCallback)) {
+}
+
+Instance::Instance(
+	not_null<DocumentData*> quality,
+	not_null<DocumentData*> original,
+	HistoryItem *context,
+	Data::FileOrigin origin,
+	Fn<void()> waitingCallback)
+: Instance(
+	quality->owner().streaming().sharedDocument(
+		quality,
+		original,
+		context,
+		origin),
+	std::move(waitingCallback)) {
+}
+
+Instance::Instance(
+	not_null<PhotoData*> photo,
+	Data::FileOrigin origin,
+	Fn<void()> waitingCallback)
+: Instance(
+	photo->owner().streaming().sharedDocument(photo, origin),
 	std::move(waitingCallback)) {
 }
 
@@ -60,6 +98,10 @@ const Information &Instance::info() const {
 	Expects(_shared != nullptr);
 
 	return _shared->info();
+}
+
+rpl::producer<int> Instance::switchQualityRequests() const {
+	return _shared->switchQualityRequests();
 }
 
 void Instance::play(const PlaybackOptions &options) {
@@ -134,6 +176,12 @@ void Instance::setSpeed(float64 speed) {
 	_shared->player().setSpeed(speed);
 }
 
+void Instance::setVolume(float64 volume) {
+	Expects(_shared != nullptr);
+
+	_shared->player().setVolume(volume);
+}
+
 bool Instance::waitingShown() const {
 	Expects(_shared != nullptr);
 
@@ -162,7 +210,15 @@ QImage Instance::frame(const FrameRequest &request) const {
 	return player().frame(request, this);
 }
 
-bool Instance::markFrameShown() {
+FrameWithInfo Instance::frameWithInfo(const FrameRequest &request) const {
+	return player().frameWithInfo(request, this);
+}
+
+FrameWithInfo Instance::frameWithInfo() const {
+	return player().frameWithInfo(this);
+}
+
+bool Instance::markFrameShown() const {
 	Expects(_shared != nullptr);
 
 	return _shared->player().markFrameShown();

@@ -12,8 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 struct PeerListState;
 
-namespace Info {
-namespace Polls {
+namespace Info::Polls {
 
 class InnerWidget;
 
@@ -56,15 +55,16 @@ public:
 		const QRect &geometry,
 		not_null<Memento*> memento);
 
+	rpl::producer<QString> title() override;
+
 private:
 	void saveState(not_null<Memento*> memento);
 	void restoreState(not_null<Memento*> memento);
 
-	std::unique_ptr<ContentMemento> doCreateMemento() override;
+	std::shared_ptr<ContentMemento> doCreateMemento() override;
 
 	not_null<InnerWidget*> _inner;
 
 };
 
-} // namespace Settings
-} // namespace Info
+} // namespace Info::Polls

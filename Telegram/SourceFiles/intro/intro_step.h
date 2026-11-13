@@ -9,8 +9,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/object_ptr.h"
 #include "mtproto/sender.h"
+#include "ui/text/text_variant.h"
 #include "ui/rp_widget.h"
 #include "ui/effects/animations.h"
+
+namespace style {
+struct RoundButton;
+} // namespace style;
 
 namespace Main {
 class Account;
@@ -28,12 +33,10 @@ namespace Intro {
 namespace details {
 
 struct Data;
-enum class Direction;
+enum class StackAction;
+enum class Animate;
 
-class Step
-	: public Ui::RpWidget
-	, public RPCSender
-	, protected base::Subscriber {
+class Step : public Ui::RpWidget {
 public:
 	Step(
 		QWidget *parent,
@@ -42,9 +45,24 @@ public:
 		bool hasCover = false);
 	~Step();
 
+	QAccessible::Role accessibilityRole() override {
+		return QAccessible::Role::Dialog;
+	}
+	QString accessibilityName() override {
+		return _titleText.current();
+	}
+	QString accessibilityDescription() override {
+		return _descriptionText.current().text;
+	}
+
 	[[nodiscard]] Main::Account &account() const {
 		return *_account;
 	}
+
+	// It should not be called in StartWidget, in other steps it should be
+	// present and not changing.
+	[[nodiscard]] MTP::Sender &api() const;
+	void apiClear();
 
 	virtual void finishInit() {
 	}
@@ -53,15 +71,16 @@ public:
 	}
 
 	void setGoCallback(
-		Fn<void(Step *step, Direction direction)> callback);
+		Fn<void(Step *step, StackAction action, Animate animate)> callback);
+	void setStepBelowCallback(Fn<Step*()> callback);
 	void setShowResetCallback(Fn<void()> callback);
-	void setShowTermsCallback(
-		Fn<void()> callback);
+	void setShowTermsCallback(Fn<void()> callback);
+	void setCancelNearestDcCallback(Fn<void()> callback);
 	void setAcceptTermsCallback(
 		Fn<void(Fn<void()> callback)> callback);
 
 	void prepareShowAnimated(Step *after);
-	void showAnimated(Direction direction);
+	void showAnimated(Animate animate);
 	void showFast();
 	[[nodiscard]] bool animating() const;
 	void setShowAnimationClipping(QRect clipping);
@@ -74,6 +93,9 @@ public:
 
 	virtual void submit() = 0;
 	[[nodiscard]] virtual rpl::producer<QString> nextButtonText() const;
+	[[nodiscard]] virtual auto nextButtonStyle() const
+		-> rpl::producer<const style::RoundButton*>;
+	[[nodiscard]] virtual rpl::producer<> nextButtonFocusRequests() const;
 
 	[[nodiscard]] int contentLeft() const;
 	[[nodiscard]] int contentTop() const;
@@ -89,20 +111,21 @@ protected:
 	void resizeEvent(QResizeEvent *e) override;
 
 	void setTitleText(rpl::producer<QString> titleText);
-	void setDescriptionText(rpl::producer<QString> descriptionText);
-	void setDescriptionText(
-		rpl::producer<TextWithEntities> richDescriptionText);
-	bool paintAnimated(Painter &p, QRect clip);
+	void setDescriptionText(v::text::data &&descriptionText);
+	bool paintAnimated(QPainter &p, QRect clip);
 
 	void fillSentCodeData(const MTPDauth_sentCode &type);
-
-	void showDescription();
-	void hideDescription();
 
 	[[nodiscard]] not_null<Data*> getData() const {
 		return _data;
 	}
-	void finish(const MTPUser &user, QImage &&photo = QImage());
+	void finish(const MTPauth_Authorization &auth, QImage &&photo = {});
+	void finish(const MTPUser &user, QImage &&photo = {});
+	void createSession(
+		const MTPUser &user,
+		QImage photo,
+		const QVector<MTPDialogFilter> &filters,
+		bool tagsEnabled);
 
 	void goBack();
 
@@ -112,8 +135,17 @@ protected:
 	}
 
 	template <typename StepType>
-	void goReplace() {
-		goReplace(new StepType(parentWidget(), _account, _data));
+	void goNextOrBack() {
+		if (dynamic_cast<StepType*>(stepBelow())) {
+			goBack();
+		} else {
+			goNext<StepType>();
+		}
+	}
+
+	template <typename StepType>
+	void goReplace(Animate animate) {
+		goReplace(new StepType(parentWidget(), _account, _data), animate);
 	}
 
 	void showResetButton() {
@@ -126,6 +158,9 @@ protected:
 		if (_acceptTermsCallback) {
 			_acceptTermsCallback(callback);
 		}
+	}
+	void cancelNearestDcRequest() {
+		if (_cancelNearestDcCallback) _cancelNearestDcCallback();
 	}
 
 	virtual int errorTop() const;
@@ -148,14 +183,15 @@ private:
 	};
 	void updateLabelsPosition();
 	void paintContentSnapshot(
-		Painter &p,
+		QPainter &p,
 		const QPixmap &snapshot,
 		float64 alpha,
 		float64 howMuchHidden);
 	void refreshError(const QString &text);
 
 	void goNext(Step *step);
-	void goReplace(Step *step);
+	void goReplace(Step *step, Animate animate);
+	[[nodiscard]] Step *stepBelow() const;
 
 	[[nodiscard]] CoverAnimation prepareCoverAnimation(Step *step);
 	[[nodiscard]] QPixmap prepareContentSnapshot();
@@ -163,15 +199,18 @@ private:
 	void showFinished();
 
 	void prepareCoverMask();
-	void paintCover(Painter &p, int top);
+	void paintCover(QPainter &p, int top);
 
 	const not_null<Main::Account*> _account;
 	const not_null<Data*> _data;
+	mutable std::optional<MTP::Sender> _api;
 
 	bool _hasCover = false;
-	Fn<void(Step *step, Direction direction)> _goCallback;
+	Fn<void(Step *step, StackAction action, Animate animate)> _goCallback;
+	Fn<Step*()> _stepBelowCallback;
 	Fn<void()> _showResetCallback;
 	Fn<void()> _showTermsCallback;
+	Fn<void()> _cancelNearestDcCallback;
 	Fn<void(Fn<void()> callback)> _acceptTermsCallback;
 
 	rpl::variable<QString> _titleText;

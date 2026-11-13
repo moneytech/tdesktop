@@ -23,9 +23,7 @@ class InnerWidget;
 
 class Memento final : public ContentMemento {
 public:
-	Memento(UserId userId)
-	: ContentMemento(peerFromUser(userId), 0) {
-	}
+	explicit Memento(not_null<UserData*> user);
 
 	object_ptr<ContentWidget> createWidget(
 		QWidget *parent,
@@ -34,9 +32,7 @@ public:
 
 	Section section() const override;
 
-	UserId userId() const {
-		return peerToUser(peerId());
-	}
+	not_null<UserData*> user() const;
 
 	void setListState(std::unique_ptr<PeerListState> state);
 	std::unique_ptr<PeerListState> listState();
@@ -64,11 +60,13 @@ public:
 		const QRect &geometry,
 		not_null<Memento*> memento);
 
+	rpl::producer<QString> title() override;
+
 private:
 	void saveState(not_null<Memento*> memento);
 	void restoreState(not_null<Memento*> memento);
 
-	std::unique_ptr<ContentMemento> doCreateMemento() override;
+	std::shared_ptr<ContentMemento> doCreateMemento() override;
 
 	InnerWidget *_inner = nullptr;
 

@@ -25,8 +25,8 @@ void MessagesList::Slice::merge(
 
 	messages.merge(std::begin(moreMessages), std::end(moreMessages));
 	range = {
-		qMin(range.from, moreNoSkipRange.from),
-		qMax(range.till, moreNoSkipRange.till)
+		std::min(range.from, moreNoSkipRange.from),
+		std::max(range.till, moreNoSkipRange.till)
 	};
 }
 
@@ -98,7 +98,6 @@ void MessagesList::addRange(
 		bool incrementCount) {
 	Expects(!count || !incrementCount);
 
-	auto wasCount = _count;
 	auto update = MessagesSliceUpdate();
 	auto result = addRangeItemsAndCountNew(
 		update,
@@ -118,6 +117,11 @@ void MessagesList::addRange(
 	_sliceUpdated.fire(std::move(update));
 }
 
+void MessagesList::addOne(MessagePosition messageId) {
+	auto range = { messageId };
+	addRange(range, { messageId, messageId }, std::nullopt, true);
+}
+
 void MessagesList::addNew(MessagePosition messageId) {
 	auto range = { messageId };
 	addRange(range, { messageId, MaxMessagePosition }, std::nullopt, true);
@@ -131,6 +135,7 @@ void MessagesList::addSlice(
 }
 
 void MessagesList::removeOne(MessagePosition messageId) {
+	auto update = MessagesSliceUpdate();
 	auto slice = ranges::lower_bound(
 		_slices,
 		messageId,
@@ -140,29 +145,15 @@ void MessagesList::removeOne(MessagePosition messageId) {
 		_slices.modify(slice, [&](Slice &slice) {
 			return slice.messages.remove(messageId);
 		});
+		update.messages = &slice->messages;
+		update.range = slice->range;
 	}
 	if (_count) {
 		--*_count;
 	}
-}
-
-void MessagesList::removeAll(ChannelId channelId) {
-	auto removed = 0;
-	for (auto i = begin(_slices); i != end(_slices); ++i) {
-		_slices.modify(i, [&](Slice &slice) {
-			auto &messages = slice.messages;
-			for (auto j = begin(messages); j != end(messages);) {
-				if (j->fullId.channel == channelId) {
-					j = messages.erase(j);
-					++removed;
-				} else {
-					++j;
-				}
-			}
-		});
-	}
-	if (removed && _count) {
-		*_count -= removed;
+	update.count = _count;
+	if (update.messages) {
+		_sliceUpdated.fire(std::move(update));
 	}
 }
 
@@ -185,19 +176,26 @@ void MessagesList::invalidateBottom() {
 	_count = std::nullopt;
 }
 
+MessagesResult MessagesList::queryCurrent(const MessagesQuery &query) const {
+	if (!query.aroundId) {
+		return MessagesResult();
+	}
+	const auto slice = ranges::lower_bound(
+		_slices,
+		query.aroundId,
+		std::less<>(),
+		[](const Slice &slice) { return slice.range.till; });
+	return (slice != _slices.end() && slice->range.from <= query.aroundId)
+		? queryFromSlice(query, *slice)
+		: MessagesResult();
+}
+
 rpl::producer<MessagesResult> MessagesList::query(
 		MessagesQuery &&query) const {
 	return [this, query = std::move(query)](auto consumer) {
-		auto slice = query.aroundId
-			? ranges::lower_bound(
-				_slices,
-				query.aroundId,
-				std::less<>(),
-				[](const Slice &slice) { return slice.range.till; })
-			: _slices.end();
-		if (slice != _slices.end()
-			&& slice->range.from <= query.aroundId) {
-			consumer.put_next(queryFromSlice(query, *slice));
+		auto current = queryCurrent(query);
+		if (current.count.has_value() || !current.messageIds.empty()) {
+			consumer.put_next(std::move(current));
 		}
 		consumer.put_done();
 		return rpl::lifetime();
@@ -208,6 +206,30 @@ rpl::producer<MessagesSliceUpdate> MessagesList::sliceUpdated() const {
 	return _sliceUpdated.events();
 }
 
+MessagesResult MessagesList::snapshot(MessagesQuery &&query) const {
+	return queryCurrent(query);
+}
+
+bool MessagesList::empty() const {
+	for (const auto &slice : _slices) {
+		if (!slice.messages.empty()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+rpl::producer<MessagesResult> MessagesList::viewer(
+		MessagesQuery &&query) const {
+	return rpl::single(
+		queryCurrent(query)
+	) | rpl::then(sliceUpdated() | rpl::map([=] {
+		return queryCurrent(query);
+	})) | rpl::filter([=](const MessagesResult &value) {
+		return value.count.has_value() || !value.messageIds.empty();
+	});
+}
+
 MessagesResult MessagesList::queryFromSlice(
 		const MessagesQuery &query,
 		const Slice &slice) const {
@@ -215,8 +237,8 @@ MessagesResult MessagesList::queryFromSlice(
 	auto position = ranges::lower_bound(slice.messages, query.aroundId);
 	auto haveBefore = int(position - begin(slice.messages));
 	auto haveEqualOrAfter = int(end(slice.messages) - position);
-	auto before = qMin(haveBefore, query.limitBefore);
-	auto equalOrAfter = qMin(haveEqualOrAfter, query.limitAfter + 1);
+	auto before = std::min(haveBefore, query.limitBefore);
+	auto equalOrAfter = std::min(haveEqualOrAfter, query.limitAfter + 1);
 	auto ids = std::vector<MessagePosition>(position - before, position + equalOrAfter);
 	result.messageIds.merge(ids.begin(), ids.end());
 	if (slice.range.from == MinMessagePosition) {
@@ -321,22 +343,6 @@ bool MessagesSliceBuilder::removeAll() {
 	return true;
 }
 
-bool MessagesSliceBuilder::removeFromChannel(ChannelId channelId) {
-	for (auto i = _ids.begin(); i != _ids.end();) {
-		if ((*i).fullId.channel == channelId) {
-			i = _ids.erase(i);
-			if (_fullCount) {
-				--*_fullCount;
-			}
-		} else {
-			++i;
-		}
-	}
-	_skippedBefore = _skippedAfter = std::nullopt;
-	checkInsufficient();
-	return true;
-}
-
 bool MessagesSliceBuilder::invalidated() {
 	_fullCount = _skippedBefore = _skippedAfter = std::nullopt;
 	_ids.clear();
@@ -373,7 +379,7 @@ void MessagesSliceBuilder::mergeSliceData(
 	if (count) {
 		_fullCount = count;
 	}
-	const auto impossible = MessagePosition(-1, FullMsgId());
+	const auto impossible = MessagePosition{ .fullId = {}, .date = -1 };
 	auto wasMinId = _ids.empty() ? impossible : _ids.front();
 	auto wasMaxId = _ids.empty() ? impossible : _ids.back();
 	_ids.merge(messageIds.begin(), messageIds.end());
@@ -480,9 +486,15 @@ void MessagesSliceBuilder::requestMessagesCount() {
 MessagesSlice MessagesSliceBuilder::snapshot() const {
 	auto result = MessagesSlice();
 	result.ids.reserve(_ids.size());
+	auto nearestToAround = std::optional<FullMsgId>();
 	for (const auto &position : _ids) {
 		result.ids.push_back(position.fullId);
+		if (!nearestToAround && position >= _key) {
+			nearestToAround = position.fullId;
+		}
 	}
+	result.nearestToAround = nearestToAround.value_or(
+		_ids.empty() ? FullMsgId() : _ids.back().fullId);
 	result.skippedBefore = _skippedBefore;
 	result.skippedAfter = _skippedAfter;
 	result.fullCount = _fullCount;

@@ -7,105 +7,95 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/win/windows_dlls.h"
 
+#include "base/platform/win/base_windows_safe_library.h"
+#include "ui/gl/gl_detection.h"
+
 #include <VersionHelpers.h>
 #include <QtCore/QSysInfo>
 
+#define LOAD_SYMBOL(lib, name) ::base::Platform::LoadMethod(lib, #name, name)
+
+#ifdef DESKTOP_APP_USE_ANGLE
+bool DirectXResolveCompiler();
+#endif // DESKTOP_APP_USE_ANGLE
+
 namespace Platform {
 namespace Dlls {
+namespace {
 
-f_SetDllDirectory SetDllDirectory;
+struct SafeIniter {
+	SafeIniter();
+};
 
-HINSTANCE LibKernel32;
+SafeIniter::SafeIniter() {
+	base::Platform::InitDynamicLibraries();
 
-void init() {
-	static bool inited = false;
-	if (inited) return;
-	inited = true;
+	const auto LibShell32 = LoadLibrary(L"shell32.dll");
+	LOAD_SYMBOL(LibShell32, SHAssocEnumHandlers);
+	LOAD_SYMBOL(LibShell32, SHCreateItemFromParsingName);
+	LOAD_SYMBOL(LibShell32, SHOpenWithDialog);
+	LOAD_SYMBOL(LibShell32, OpenAs_RunDLL);
+	LOAD_SYMBOL(LibShell32, SHQueryUserNotificationState);
+	LOAD_SYMBOL(LibShell32, SHChangeNotify);
 
-	LibKernel32 = LoadLibrary(L"KERNEL32.DLL");
-	load(LibKernel32, "SetDllDirectoryW", SetDllDirectory);
-	if (SetDllDirectory) {
-		// Remove the current directory from the DLL search order.
-		SetDllDirectory(L"");
-	}
+	//if (IsWindows10OrGreater()) {
+	//	static const auto kSystemVersion = QOperatingSystemVersion::current();
+	//	static const auto kMinor = kSystemVersion.minorVersion();
+	//	static const auto kBuild = kSystemVersion.microVersion();
+	//	if (kMinor > 0 || (kMinor == 0 && kBuild >= 17763)) {
+	//		const auto LibUxTheme = LoadLibrary(L"uxtheme.dll");
+	//		if (kBuild < 18362) {
+	//			LOAD_SYMBOL(LibUxTheme, AllowDarkModeForApp, 135);
+	//		} else {
+	//			LOAD_SYMBOL(LibUxTheme, SetPreferredAppMode, 135);
+	//		}
+	//		LOAD_SYMBOL(LibUxTheme, AllowDarkModeForWindow, 133);
+	//		LOAD_SYMBOL(LibUxTheme, RefreshImmersiveColorPolicyState, 104);
+	//		LOAD_SYMBOL(LibUxTheme, FlushMenuThemes, 136);
+	//	}
+	//}
+
+	const auto LibPropSys = LoadLibrary(L"propsys.dll");
+	LOAD_SYMBOL(LibPropSys, PSStringFromPropertyKey);
+
+	const auto LibPsApi = LoadLibrary(L"psapi.dll");
+	LOAD_SYMBOL(LibPsApi, GetProcessMemoryInfo);
+
+	const auto LibUser32 = LoadLibrary(L"user32.dll");
+	LOAD_SYMBOL(LibUser32, SetWindowCompositionAttribute);
+
+	const auto LibShCore = LoadLibrary(L"Shcore.dll");
+	LOAD_SYMBOL(LibShCore, GetDpiForMonitor);
 }
 
-f_SetWindowTheme SetWindowTheme;
-f_OpenAs_RunDLL OpenAs_RunDLL;
-f_SHOpenWithDialog SHOpenWithDialog;
-f_SHAssocEnumHandlers SHAssocEnumHandlers;
-f_SHCreateItemFromParsingName SHCreateItemFromParsingName;
-f_WTSRegisterSessionNotification WTSRegisterSessionNotification;
-f_WTSUnRegisterSessionNotification WTSUnRegisterSessionNotification;
-f_SHQueryUserNotificationState SHQueryUserNotificationState;
-f_SHChangeNotify SHChangeNotify;
-f_SetCurrentProcessExplicitAppUserModelID SetCurrentProcessExplicitAppUserModelID;
-f_RoGetActivationFactory RoGetActivationFactory;
-f_WindowsCreateStringReference WindowsCreateStringReference;
-f_WindowsDeleteString WindowsDeleteString;
-f_PropVariantToString PropVariantToString;
-f_PSStringFromPropertyKey PSStringFromPropertyKey;
-f_DwmIsCompositionEnabled DwmIsCompositionEnabled;
-f_RmStartSession RmStartSession;
-f_RmRegisterResources RmRegisterResources;
-f_RmGetList RmGetList;
-f_RmShutdown RmShutdown;
-f_RmEndSession RmEndSession;
-f_GetProcessMemoryInfo GetProcessMemoryInfo;
+SafeIniter kSafeIniter;
 
-HINSTANCE LibUxTheme;
-HINSTANCE LibShell32;
-HINSTANCE LibWtsApi32;
-HINSTANCE LibPropSys;
-HINSTANCE LibComBase;
-HINSTANCE LibDwmApi;
-HINSTANCE LibRstrtMgr;
-HINSTANCE LibPsApi;
+} // namespace
 
-void start() {
-	init();
-
-	LibShell32 = LoadLibrary(L"SHELL32.DLL");
-	load(LibShell32, "SHAssocEnumHandlers", SHAssocEnumHandlers);
-	load(LibShell32, "SHCreateItemFromParsingName", SHCreateItemFromParsingName);
-	load(LibShell32, "SHOpenWithDialog", SHOpenWithDialog);
-	load(LibShell32, "OpenAs_RunDLLW", OpenAs_RunDLL);
-	load(LibShell32, "SHQueryUserNotificationState", SHQueryUserNotificationState);
-	load(LibShell32, "SHChangeNotify", SHChangeNotify);
-	load(LibShell32, "SetCurrentProcessExplicitAppUserModelID", SetCurrentProcessExplicitAppUserModelID);
-
-	LibUxTheme = LoadLibrary(L"UXTHEME.DLL");
-	load(LibUxTheme, "SetWindowTheme", SetWindowTheme);
-
-	if (IsWindowsVistaOrGreater()) {
-		LibWtsApi32 = LoadLibrary(L"WTSAPI32.DLL");
-		load(LibWtsApi32, "WTSRegisterSessionNotification", WTSRegisterSessionNotification);
-		load(LibWtsApi32, "WTSUnRegisterSessionNotification", WTSUnRegisterSessionNotification);
-
-		LibPropSys = LoadLibrary(L"PROPSYS.DLL");
-		load(LibPropSys, "PropVariantToString", PropVariantToString);
-		load(LibPropSys, "PSStringFromPropertyKey", PSStringFromPropertyKey);
-
-		if (IsWindows8OrGreater()) {
-			LibComBase = LoadLibrary(L"COMBASE.DLL");
-			load(LibComBase, "RoGetActivationFactory", RoGetActivationFactory);
-			load(LibComBase, "WindowsCreateStringReference", WindowsCreateStringReference);
-			load(LibComBase, "WindowsDeleteString", WindowsDeleteString);
+void CheckLoadedModules() {
+#ifdef DESKTOP_APP_USE_ANGLE
+	if (DirectXResolveCompiler()) {
+		auto LibD3DCompiler = HMODULE();
+		if (GetModuleHandleEx(0, L"d3dcompiler_47.dll", &LibD3DCompiler)) {
+			constexpr auto kMaxPathLong = 32767;
+			auto path = std::array<WCHAR, kMaxPathLong + 1>{ 0 };
+			const auto length = GetModuleFileName(
+				LibD3DCompiler,
+				path.data(),
+				kMaxPathLong);
+			if (length > 0 && length < kMaxPathLong) {
+				LOG(("Using DirectX compiler '%1'."
+					).arg(QString::fromWCharArray(path.data())));
+			} else {
+				LOG(("Error: Could not resolve DirectX compiler path."));
+			}
+		} else {
+			LOG(("Error: Could not resolve DirectX compiler module."));
 		}
-
-		LibDwmApi = LoadLibrary(L"DWMAPI.DLL");
-		load(LibDwmApi, "DwmIsCompositionEnabled", DwmIsCompositionEnabled);
-
-		LibRstrtMgr = LoadLibrary(L"RSTRTMGR.DLL");
-		load(LibRstrtMgr, "RmStartSession", RmStartSession);
-		load(LibRstrtMgr, "RmRegisterResources", RmRegisterResources);
-		load(LibRstrtMgr, "RmGetList", RmGetList);
-		load(LibRstrtMgr, "RmShutdown", RmShutdown);
-		load(LibRstrtMgr, "RmEndSession", RmEndSession);
+	} else {
+		LOG(("Error: Could not resolve DirectX compiler library."));
 	}
-
-	LibPsApi = LoadLibrary(L"PSAPI.DLL");
-	load(LibPsApi, "GetProcessMemoryInfo", GetProcessMemoryInfo);
+#endif // DESKTOP_APP_USE_ANGLE
 }
 
 } // namespace Dlls

@@ -9,18 +9,41 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "data/data_wall_paper.h"
 #include "data/data_cloud_themes.h"
+#include "ui/style/style_core_palette.h"
+
+class QFileSystemWatcher;
+struct FilePrepareResult;
+
+namespace style {
+struct colorizer;
+} // namespace style
 
 namespace Main {
 class Session;
 } // namespace Main
 
 namespace Window {
+class Controller;
+} // namespace Window
+
+namespace Ui {
+struct ChatThemeBackground;
+class ChatTheme;
+} // namespace Ui
+
+namespace Webview {
+struct ThemeParams;
+} // namespace Webview
+
+namespace Window {
 namespace Theme {
 
+inline constexpr auto kThemeFileSizeLimit = 5 * 1024 * 1024;
 inline constexpr auto kThemeSchemeSizeLimit = 1024 * 1024;
 inline constexpr auto kThemeBackgroundSizeLimit = 4 * 1024 * 1024;
 
 struct ParsedTheme;
+enum class EmbeddedType;
 
 [[nodiscard]] bool IsEmbeddedTheme(const QString &path);
 
@@ -74,26 +97,40 @@ void KeepFromEditor(
 QString NightThemePath();
 [[nodiscard]] bool IsNightMode();
 void SetNightModeValue(bool nightMode);
+[[nodiscard]] rpl::producer<bool> IsNightModeValue();
 void ToggleNightMode();
 void ToggleNightMode(const QString &themePath);
+void ToggleNightModeWithConfirmation(
+	not_null<Controller*> window,
+	Fn<void()> toggle);
 void ResetToSomeDefault();
 [[nodiscard]] bool IsNonDefaultBackground();
+// Counts a theme being applied but not kept yet.
+[[nodiscard]] std::optional<EmbeddedType> CurrentEmbeddedType();
 void Revert();
+
+[[nodiscard]] rpl::producer<bool> IsThemeDarkValue();
 
 [[nodiscard]] QString EditingPalettePath();
 
+// NB! This method looks to Core::App().settings() to get colorizer by 'file'.
 bool LoadFromFile(
-	const QString &file,
+	const QString &path,
 	not_null<Instance*> out,
 	Cached *outCache,
-	not_null<QByteArray*> outContent);
+	QByteArray *outContent);
+bool LoadFromFile(
+	const QString &path,
+	not_null<Instance*> out,
+	Cached *outCache,
+	QByteArray *outContent,
+	const style::colorizer &colorizer);
 bool LoadFromContent(
 	const QByteArray &content,
 	not_null<Instance*> out,
 	Cached *outCache);
-QColor CountAverageColor(const QImage &image);
-QColor AdjustedColor(QColor original, QColor background);
-QImage ProcessBackgroundImage(QImage image);
+[[nodiscard]] std::optional<QByteArray> ReadPaletteContent(
+	const QString &path);
 
 struct BackgroundUpdate {
 	enum class Type {
@@ -111,7 +148,8 @@ struct BackgroundUpdate {
 	[[nodiscard]] bool paletteChanged() const {
 		return (type == Type::TestingTheme)
 			|| (type == Type::RevertingTheme)
-			|| (type == Type::ApplyingEdit);
+			|| (type == Type::ApplyingEdit)
+			|| (type == Type::New);
 	}
 	Type type;
 	bool tiled;
@@ -123,17 +161,21 @@ enum class ClearEditing {
 	KeepChanges,
 };
 
-class ChatBackground
-	: public base::Observable<BackgroundUpdate>
-	, private base::Subscriber {
+class ChatBackground final {
 public:
 	ChatBackground();
+	~ChatBackground();
+
+	[[nodiscard]] rpl::producer<BackgroundUpdate> updates() const {
+		return _updates.events();
+	}
+
+	void start();
 
 	// This method is allowed to (and should) be called before start().
 	void setThemeData(QImage &&themeImage, bool themeTile);
 
 	// This method is setting the default (themed) image if none was set yet.
-	void start();
 	void set(const Data::WallPaper &paper, QImage image = QImage());
 	void setTile(bool tile);
 	void setTileDayValue(bool tile);
@@ -150,24 +192,29 @@ public:
 	void setTestingDefaultTheme();
 	void revert();
 
-	[[nodiscard]] Data::WallPaper paper() const {
+	void appliedEditedPalette();
+	void downloadingStarted(bool tile);
+
+	[[nodiscard]] const Data::WallPaper &paper() const {
 		return _paper;
 	}
 	[[nodiscard]] WallPaperId id() const {
 		return _paper.id();
 	}
-	[[nodiscard]] const QPixmap &pixmap() const {
-		return _pixmap;
+	[[nodiscard]] const QImage &prepared() const {
+		return _prepared;
 	}
-	[[nodiscard]] const QPixmap &pixmapForTiled() const {
-		return _pixmapForTiled;
+	[[nodiscard]] const QImage &preparedForTiled() const {
+		return _preparedForTiled;
 	}
 	[[nodiscard]] std::optional<QColor> colorForFill() const;
+	[[nodiscard]] QImage gradientForFill() const;
 	[[nodiscard]] QImage createCurrentImage() const;
 	[[nodiscard]] bool tile() const;
 	[[nodiscard]] bool tileDay() const;
 	[[nodiscard]] bool tileNight() const;
-	[[nodiscard]] bool isMonoColorImage() const;
+	[[nodiscard]] std::optional<QColor> imageMonoColor() const;
+	[[nodiscard]] bool nightModeChangeAllowed() const;
 
 private:
 	struct AdjustableColor {
@@ -177,15 +224,18 @@ private:
 		QColor original;
 	};
 
-	void ensureStarted();
+	[[nodiscard]] bool started() const;
+	void initialRead();
 	void saveForRevert();
-	void setPreparedImage(QImage original, QImage prepared);
-	void preparePixmaps(QImage image);
+	void setPreparedAfterPaper(QImage image);
+	void setPrepared(QImage original, QImage prepared, QImage gradient);
 	void writeNewBackgroundSettings();
 	void setPaper(const Data::WallPaper &paper);
 
 	[[nodiscard]] bool adjustPaletteRequired();
+	void applyDefaultThemeAccentColorizer();
 	void adjustPaletteUsingBackground(const QImage &image);
+	void adjustPaletteUsingColors(const std::vector<QColor> &colors);
 	void adjustPaletteUsingColor(QColor color);
 	void restoreAdjustableColors();
 
@@ -199,6 +249,8 @@ private:
 	[[nodiscard]] bool isNonDefaultThemeOrBackground();
 	[[nodiscard]] bool isNonDefaultBackground();
 	void checkUploadWallPaper();
+	[[nodiscard]] QImage postprocessBackgroundImage(QImage image);
+	void refreshThemeWatcher();
 
 	friend bool IsNightMode();
 	friend void SetNightModeValue(bool nightMode);
@@ -216,21 +268,26 @@ private:
 	friend bool IsNonDefaultBackground();
 
 	Main::Session *_session = nullptr;
+	rpl::event_stream<BackgroundUpdate> _updates;
 	Data::WallPaper _paper = Data::details::UninitializedWallPaper();
 	std::optional<QColor> _paperColor;
+	QImage _gradient;
 	QImage _original;
-	QPixmap _pixmap;
-	QPixmap _pixmapForTiled;
+	QImage _prepared;
+	QImage _preparedForTiled;
 	bool _nightMode = false;
 	bool _tileDayValue = false;
 	bool _tileNightValue = true;
+	std::optional<bool> _localStoredTileDayValue;
+	std::optional<bool> _localStoredTileNightValue;
 
-	bool _isMonoColorImage = false;
+	std::optional<QColor> _imageMonoColor;
 
 	Object _themeObject;
 	QImage _themeImage;
 	bool _themeTile = false;
 	std::optional<Data::CloudTheme> _editingTheme;
+	std::unique_ptr<QFileSystemWatcher> _themeWatcher;
 
 	Data::WallPaper _paperForRevert
 		= Data::details::UninitializedWallPaper();
@@ -246,11 +303,20 @@ private:
 
 };
 
-ChatBackground *Background();
+[[nodiscard]] std::shared_ptr<FilePrepareResult> PrepareWallPaper(
+	MTP::DcId dcId,
+	const QImage &image);
 
-void ComputeBackgroundRects(QRect wholeFill, QSize imageSize, QRect &to, QRect &from);
+[[nodiscard]] ChatBackground *Background();
 
-bool ReadPaletteValues(const QByteArray &content, Fn<bool(QLatin1String name, QLatin1String value)> callback);
+bool ReadPaletteValues(
+	const QByteArray &content,
+	Fn<bool(QLatin1String name, QLatin1String value)> callback);
+
+[[nodiscard]] Webview::ThemeParams WebViewParams();
+
+[[nodiscard]] std::unique_ptr<Ui::ChatTheme> DefaultChatThemeOn(
+	rpl::lifetime &lifetime);
 
 } // namespace Theme
 } // namespace Window

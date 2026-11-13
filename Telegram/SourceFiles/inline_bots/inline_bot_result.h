@@ -7,11 +7,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "data/data_cloud_file.h"
+#include "api/api_common.h"
+#include "media/view/media_view_open_common.h"
+#include "ui/effects/message_sending_animation_common.h"
+
 class FileLoader;
 class History;
+class UserData;
+struct HistoryMessageMarkupData;
+struct HistoryItemCommonFields;
 
 namespace Data {
 class LocationPoint;
+struct SendError;
 } // namespace Data
 
 namespace InlineBots {
@@ -30,13 +39,14 @@ private:
 	struct Creator;
 
 public:
-
 	// Constructor is public only for std::make_unique<>() to work.
 	// You should use create() static method instead.
-	explicit Result(const Creator &creator);
-	static std::unique_ptr<Result> create(uint64 queryId, const MTPBotInlineResult &mtpData);
-	Result(const Result &other) = delete;
-	Result &operator=(const Result &other) = delete;
+	Result(not_null<Main::Session*> session, const Creator &creator);
+
+	static std::shared_ptr<Result> Create(
+		not_null<Main::Session*> session,
+		uint64 queryId,
+		const MTPBotInlineResult &mtpData);
 
 	uint64 getQueryId() const {
 		return _queryId;
@@ -44,28 +54,30 @@ public:
 	QString getId() const {
 		return _id;
 	}
+	DocumentData *document() const {
+		return _document;
+	}
+	const QString &contentUrl() const {
+		return _content_url;
+	}
 
 	// This is real SendClickHandler::onClick implementation for the specified
 	// inline bot result. If it returns true you need to send this result.
 	bool onChoose(Layout::ItemBase *layout);
 
-	void unload();
-	void openFile();
+	Media::View::OpenRequest openRequest();
 	void cancelFile();
 
 	bool hasThumbDisplay() const;
 
 	void addToHistory(
-		History *history,
-		MTPDmessage::Flags flags,
-		MTPDmessage_ClientFlags clientFlags,
-		MsgId msgId,
-		UserId fromId,
-		MTPint mtpDate,
-		UserId viaBotId,
-		MsgId replyToId,
-		const QString &postAuthor) const;
-	QString getErrorOnSend(History *history) const;
+		not_null<History*> history,
+		HistoryItemCommonFields &&fields) const;
+	[[nodiscard]] not_null<HistoryItem*> makeMessage(
+		not_null<History*> history,
+		HistoryItemCommonFields &&fields) const;
+	[[nodiscard]] Data::SendError getErrorOnSend(
+		not_null<History*> history) const;
 
 	// interface for Layout:: usage
 	std::optional<Data::LocationPoint> getLocationPoint() const;
@@ -75,8 +87,7 @@ public:
 	~Result();
 
 private:
-	void createGame();
-	QSize thumbBox() const;
+	void createGame(not_null<Main::Session*> session);
 	MTPWebDocument adjustAttributes(const MTPWebDocument &document);
 	MTPVector<MTPDocumentAttribute> adjustAttributes(
 		const MTPVector<MTPDocumentAttribute> &document,
@@ -95,15 +106,17 @@ private:
 		Geo,
 		Venue,
 		Game,
+		Widget,
 	};
 
 	friend class internal::SendData;
 	friend class Layout::ItemBase;
 	struct Creator {
-		uint64 queryId;
-		Type type;
+		uint64 queryId = 0;
+		Type type = Type::Unknown;
 	};
 
+	not_null<Main::Session*> _session;
 	uint64 _queryId = 0;
 	QString _id;
 	Type _type = Type::Unknown;
@@ -113,12 +126,23 @@ private:
 	PhotoData *_photo = nullptr;
 	GameData *_game = nullptr;
 
-	std::unique_ptr<MTPReplyMarkup> _mtpKeyboard;
+	std::unique_ptr<HistoryMessageMarkupData> _replyMarkup;
 
-	ImagePtr _thumb, _locationThumb;
+	Data::CloudImage _thumbnail;
+	Data::CloudImage _locationThumbnail;
 
 	std::unique_ptr<internal::SendData> sendData;
 
+};
+
+struct ResultSelected {
+	std::shared_ptr<Result> result;
+	not_null<UserData*> bot;
+	PeerData *recipientOverride = nullptr;
+	Api::SendOptions options;
+	Ui::MessageSendingAnimationFrom messageSendingFrom;
+	// Open in OverlayWidget;
+	bool open = false;
 };
 
 } // namespace InlineBots

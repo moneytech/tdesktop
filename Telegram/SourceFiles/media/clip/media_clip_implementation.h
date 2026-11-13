@@ -8,8 +8,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include <QtCore/QBuffer>
+#include <QtCore/QFile>
 
+namespace Core {
 class FileLocation;
+} // namespace Core
 
 namespace Media {
 namespace Clip {
@@ -17,13 +20,12 @@ namespace internal {
 
 class ReaderImplementation {
 public:
-	ReaderImplementation(FileLocation *location, QByteArray *data)
-		: _location(location)
-		, _data(data) {
+	ReaderImplementation(Core::FileLocation *location, QByteArray *data)
+	: _location(location)
+	, _data(data) {
 	}
 	enum class Mode {
 		Silent,
-		Normal,
 		Inspecting, // Not playing video, but reading data.
 	};
 
@@ -40,10 +42,13 @@ public:
 	virtual crl::time framePresentationTime() const = 0;
 
 	// Render current frame to an image with specific size.
-	virtual bool renderFrame(QImage &to, bool &hasAlpha, const QSize &size) = 0;
+	virtual bool renderFrame(
+		QImage &to,
+		bool &hasAlpha,
+		int &index,
+		const QSize &size) = 0;
 
 	virtual crl::time durationMs() const = 0;
-	virtual bool hasAudio() const = 0;
 
 	virtual bool start(Mode mode, crl::time &positionMs) = 0;
 
@@ -54,8 +59,8 @@ public:
 	}
 
 protected:
-	FileLocation *_location;
-	QByteArray *_data;
+	Core::FileLocation *_location = nullptr;
+	QByteArray *_data = nullptr;
 	QFile _file;
 	QBuffer _buffer;
 	QIODevice *_device = nullptr;

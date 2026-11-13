@@ -8,36 +8,66 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "platform/platform_specific.h"
-#include "base/platform/win/base_windows_h.h"
 
-namespace Data {
-class LocationPoint;
-} // namespace Data
+#include <windows.h>
 
 namespace Platform {
 
-inline void SetWatchingMediaKeys(bool watching) {
+inline bool CheckAppTranslocation() {
+	return true;
 }
-
-QString CurrentExecutablePath(int argc, char *argv[]);
-
-QString SingleInstanceLocalServerName(const QString &hash);
 
 inline void IgnoreApplicationActivationRightNow() {
 }
 
-inline void FallbackFontConfigCheckBegin() {
+inline rpl::producer<bool> ApplicationHiddenValue() {
+	return rpl::single(false);
 }
 
-inline void FallbackFontConfigCheckEnd() {
+inline int64 ClipboardChangeCount() {
+	return 0;
+}
+
+inline bool TrayIconSupported() {
+	return true;
+}
+
+inline bool SkipTaskbarSupported() {
+	return true;
+}
+
+inline bool PreventsQuit(Core::QuitReason reason) {
+	return false;
+}
+
+inline void ActivateThisProcess() {
+}
+
+// 1 - secondary, 2 - primary.
+void SetWindowPriority(not_null<QWidget*> window, uint32 priority);
+
+[[nodiscard]] uint64 ActivationWindowId(not_null<QWidget*> window);
+
+// Activate window with windowId (if found) or the largest priority.
+void ActivateOtherProcess(uint64 processId, uint64 windowId);
+
+[[nodiscard]] bool WaitForProcessExit(uint64 processId, crl::time timeout);
+
+inline bool LocalSocketPeerAllowed(qintptr) {
+	return true;
+}
+
+inline QString ApplicationIconName() {
+	return {};
+}
+
+inline QString ExecutablePathForShortcuts() {
+	return cExeDir() + cExeName();
 }
 
 namespace ThirdParty {
 
 void start();
-
-inline void finish() {
-}
 
 } // namespace ThirdParty
 } // namespace Platform
@@ -45,55 +75,15 @@ inline void finish() {
 inline void psCheckLocalSocket(const QString &) {
 }
 
-void psWriteDump();
-
-void psDeleteDir(const QString &dir);
-
-QStringList psInitLogs();
-void psClearInitLogs();
-
-void psActivateProcess(uint64 pid = 0);
-QString psLocalServerPrefix();
 QString psAppDataPath();
 QString psAppDataPathOld();
-void psAutoStart(bool start, bool silent = false);
 void psSendToMenu(bool send, bool silent = false);
-
-QRect psDesktopRect();
 
 int psCleanup();
 int psFixPrevious();
 
-void psNewVersion();
-
 inline QByteArray psDownloadPathBookmark(const QString &path) {
-	return QByteArray();
-}
-inline QByteArray psPathBookmark(const QString &path) {
 	return QByteArray();
 }
 inline void psDownloadPathEnableAccess() {
 }
-
-class PsFileBookmark {
-public:
-	PsFileBookmark(const QByteArray &bookmark) {
-	}
-	bool check() const {
-		return true;
-	}
-	bool enable() const {
-		return true;
-	}
-	void disable() const {
-	}
-	const QString &name(const QString &original) const {
-		return original;
-	}
-	QByteArray bookmark() const {
-		return QByteArray();
-	}
-
-};
-
-bool psLaunchMaps(const Data::LocationPoint &point);

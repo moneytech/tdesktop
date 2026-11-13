@@ -11,6 +11,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/rp_widget.h"
 #include "base/object_ptr.h"
 
+namespace style {
+struct colorizer;
+} // namespace style
+
 namespace Ui {
 class FlatButton;
 class ScrollArea;
@@ -27,8 +31,6 @@ class Controller;
 
 namespace Theme {
 
-struct Colorizer;
-
 struct ParsedTheme {
 	QByteArray palette;
 	QByteArray background;
@@ -43,9 +45,9 @@ struct ParsedTheme {
 	const QByteArray &value);
 [[nodiscard]] QByteArray WriteCloudToText(const Data::CloudTheme &cloud);
 [[nodiscard]] Data::CloudTheme ReadCloudFromText(const QByteArray &text);
-[[nodisacrd]] QByteArray StripCloudTextFields(const QByteArray &text);
+[[nodiscard]] QByteArray StripCloudTextFields(const QByteArray &text);
 
-class Editor : public TWidget {
+class Editor : public Ui::RpWidget {
 public:
 	Editor(
 		QWidget*,
@@ -54,7 +56,7 @@ public:
 
 	[[nodiscard]] static QByteArray ColorizeInContent(
 		QByteArray content,
-		const Colorizer &colorizer);
+		const style::colorizer &colorizer);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -80,7 +82,7 @@ private:
 	QPointer<Inner> _inner;
 	object_ptr<Ui::CrossButton> _close;
 	object_ptr<Ui::IconButton> _menuToggle;
-	object_ptr<Ui::DropdownMenu> _menu = { nullptr };
+	base::unique_qptr<Ui::DropdownMenu> _menu;
 	object_ptr<Ui::MultiSelect> _select;
 	object_ptr<Ui::PlainShadow> _leftShadow;
 	object_ptr<Ui::PlainShadow> _topShadow;

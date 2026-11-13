@@ -8,10 +8,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "ui/effects/animation_value.h"
-#include "storage/localimageloader.h"
+#include "core/file_location.h"
+#include "data/data_audio_msg_id.h"
 #include "base/bytes.h"
+#include "base/timer.h"
 
 #include <QtCore/QTimer>
+
+namespace Ui {
+struct PreparedFileInformation;
+} // namespace Ui
 
 namespace Media {
 struct ExternalSoundData;
@@ -23,6 +29,10 @@ namespace Streaming {
 struct TimePoint;
 } // namespace Streaming
 } // namespace Media
+
+namespace Webrtc {
+struct DeviceResolvedId;
+} // namespace Webrtc
 
 namespace Media {
 namespace Audio {
@@ -56,7 +66,7 @@ constexpr auto kWaveformSamplesCount = 100;
 class Fader;
 class Loaders;
 
-base::Observable<AudioMsgId> &Updated();
+[[nodiscard]] rpl::producer<AudioMsgId> Updated();
 
 float64 ComputeVolume(AudioMsgId::Type type);
 
@@ -126,7 +136,7 @@ struct TrackState {
 	bool waitingForData = false;
 };
 
-class Mixer : public QObject, private base::Subscriber {
+class Mixer final : public QObject {
 	Q_OBJECT
 
 public:
@@ -144,20 +154,20 @@ public:
 	// External player audio stream interface.
 	void feedFromExternal(ExternalSoundPart &&part);
 	void forceToBufferExternal(const AudioMsgId &audioId);
+
+	// Thread: Main. Locks: AudioMutex.
 	void setSpeedFromExternal(const AudioMsgId &audioId, float64 speed);
+	void setVolumeFromExternal(const AudioMsgId &audioId, float64 volume);
+
 	Streaming::TimePoint getExternalSyncTimePoint(
 		const AudioMsgId &audio) const;
-	crl::time getExternalCorrectedTime(
-		const AudioMsgId &id,
-		crl::time frameMs,
-		crl::time systemMs);
 
 	void stopAndClear();
 
 	TrackState currentState(AudioMsgId::Type type);
 
 	// Thread: Main. Must be locked: AudioMutex.
-	void detachTracks();
+	void prepareToCloseDevice();
 
 	// Thread: Main. Must be locked: AudioMutex.
 	void reattachIfNeeded();
@@ -171,33 +181,27 @@ public:
 	void setVideoVolume(float64 volume);
 	float64 getVideoVolume() const;
 
+	void scheduleFaderCallback();
+
 	~Mixer();
 
-private slots:
+private Q_SLOTS:
 	void onError(const AudioMsgId &audio);
 	void onStopped(const AudioMsgId &audio);
 
 	void onUpdated(const AudioMsgId &audio);
 
-signals:
+Q_SIGNALS:
 	void updated(const AudioMsgId &audio);
 	void stoppedOnError(const AudioMsgId &audio);
 	void loaderOnStart(const AudioMsgId &audio, qint64 positionMs);
 	void loaderOnCancel(const AudioMsgId &audio);
-
-	void faderOnTimer();
 
 	void suppressSong();
 	void unsuppressSong();
 	void suppressAll(qint64 duration);
 
 private:
-	bool fadedStop(AudioMsgId::Type type, bool *fadedStart = 0);
-	void resetFadeStartPosition(AudioMsgId::Type type, int positionInBuffered = -1);
-	bool checkCurrentALError(AudioMsgId::Type type);
-
-	void externalSoundProgress(const AudioMsgId &audio);
-
 	class Track {
 	public:
 		static constexpr int kBuffersCount = 3;
@@ -205,8 +209,10 @@ private:
 		// Thread: Any. Must be locked: AudioMutex.
 		void reattach(AudioMsgId::Type type);
 
+		// Thread: Main. Must be locked: AudioMutex.
 		void detach();
 		void clear();
+
 		void started();
 
 		bool isStreamCreated() const;
@@ -214,45 +220,55 @@ private:
 
 		int getNotQueuedBufferIndex();
 
+		// Thread: Main. Must be locked: AudioMutex.
 		void setExternalData(std::unique_ptr<ExternalSoundData> data);
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-		void changeSpeedEffect(float64 speed);
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
+
+		void updateStatePosition();
+		void updateWithSpeedPosition();
+
+		[[nodiscard]] static int64 SpeedIndependentPosition(
+			int64 position,
+			float64 speed);
+		[[nodiscard]] static int64 SpeedDependentPosition(
+			int64 position,
+			float64 speed);
 
 		~Track();
 
 		TrackState state;
 
-		FileLocation file;
+		Core::FileLocation file;
 		QByteArray data;
-		int64 bufferedPosition = 0;
-		int64 bufferedLength = 0;
+
+		int format = 0;
 		bool loading = false;
 		bool loaded = false;
-		int64 fadeStartPosition = 0;
+		bool waitingForBuffer = false;
+		float64 volume = 1.;
 
-		int32 format = 0;
-		int32 frequency = kDefaultFrequency;
-		int samplesCount[kBuffersCount] = { 0 };
-		QByteArray bufferSamples[kBuffersCount];
+		// Speed dependent values.
+		float64 speed = 1.;
+		float64 nextSpeed = 1.;
+		struct WithSpeed {
+			int64 fineTunedPosition = 0;
+			int64 position = 0;
+			int64 length = 0;
+			int64 bufferedPosition = 0;
+			int64 bufferedLength = 0;
+			int64 fadeStartPosition = 0;
+			int samples[kBuffersCount] = { 0 };
+			QByteArray buffered[kBuffersCount];
+		};
+		WithSpeed withSpeed;
 
 		struct Stream {
 			uint32 source = 0;
 			uint32 buffers[kBuffersCount] = { 0 };
 		};
 		Stream stream;
+
 		std::unique_ptr<ExternalSoundData> externalData;
 
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-		struct SpeedEffect {
-			uint32 effect = 0;
-			uint32 effectSlot = 0;
-			uint32 filter = 0;
-			int coarseTune = 0;
-			float64 speed = 1.;
-		};
-		std::unique_ptr<SpeedEffect> speedEffect;
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
 		crl::time lastUpdateWhen = 0;
 		crl::time lastUpdatePosition = 0;
 
@@ -260,13 +276,14 @@ private:
 		void createStream(AudioMsgId::Type type);
 		void destroyStream();
 		void resetStream();
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-		void resetSpeedEffect();
-		void applySourceSpeedEffect();
-		void removeSourceSpeedEffect();
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
 
 	};
+
+	bool fadedStop(AudioMsgId::Type type, bool *fadedStart = 0);
+	void resetFadeStartPosition(AudioMsgId::Type type, int positionInBuffered = -1);
+	bool checkCurrentALError(AudioMsgId::Type type);
+
+	void externalSoundProgress(const AudioMsgId &audio);
 
 	// Thread: Any. Must be locked: AudioMutex.
 	void setStoppedState(Track *current, State state = State::Stopped);
@@ -276,7 +293,7 @@ private:
 	int *currentIndex(AudioMsgId::Type type);
 	const int *currentIndex(AudioMsgId::Type type) const;
 
-	not_null<Audio::Instance*> _instance;
+	const not_null<Audio::Instance*> _instance;
 
 	int _audioCurrent = 0;
 	Track _audioTracks[kTogetherLimit];
@@ -296,6 +313,8 @@ private:
 	Fader *_fader;
 	Loaders *_loader;
 
+	rpl::lifetime _lifetime;
+
 };
 
 Mixer *mixer();
@@ -306,21 +325,22 @@ class Fader : public QObject {
 public:
 	Fader(QThread *thread);
 
-signals:
+	void songVolumeChanged();
+	void videoVolumeChanged();
+
+Q_SIGNALS:
 	void error(const AudioMsgId &audio);
 	void playPositionUpdated(const AudioMsgId &audio);
 	void audioStopped(const AudioMsgId &audio);
 	void needToPreload(const AudioMsgId &audio);
 
-public slots:
+public Q_SLOTS:
 	void onInit();
 	void onTimer();
 
 	void onSuppressSong();
 	void onUnsuppressSong();
 	void onSuppressAll(qint64 duration);
-	void onSongVolumeChanged();
-	void onVideoVolumeChanged();
 
 private:
 	enum {
@@ -349,7 +369,9 @@ private:
 
 };
 
-FileMediaInformation::Song PrepareForSending(const QString &fname, const QByteArray &data);
+[[nodiscard]] Ui::PreparedFileInformation PrepareForSending(
+	const QString &fname,
+	const QByteArray &data);
 
 namespace internal {
 
@@ -358,6 +380,9 @@ bool CheckAudioDeviceConnected();
 
 // Thread: Main. Locks: AudioMutex.
 void DetachFromDevice(not_null<Audio::Instance*> instance);
+bool DetachIfDeviceChanged(
+	not_null<Audio::Instance*> instance,
+	const Webrtc::DeviceResolvedId &nowDeviceId);
 
 // Thread: Any.
 QMutex *audioPlayerMutex();
@@ -370,17 +395,17 @@ bool audioCheckError();
 } // namespace Player
 } // namespace Media
 
-VoiceWaveform audioCountWaveform(const FileLocation &file, const QByteArray &data);
+VoiceWaveform audioCountWaveform(const Core::FileLocation &file, const QByteArray &data);
 
 namespace Media {
 namespace Audio {
 
 TG_FORCE_INLINE uint16 ReadOneSample(uchar data) {
-	return qAbs((static_cast<int16>(data) - 0x80) * 0x100);
+	return std::abs((static_cast<int16>(data) - 0x80) * 0x100);
 }
 
 TG_FORCE_INLINE uint16 ReadOneSample(int16 data) {
-	return qAbs(data);
+	return std::abs(data);
 }
 
 template <typename SampleType, typename Callback>

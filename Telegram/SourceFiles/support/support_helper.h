@@ -44,22 +44,27 @@ public:
 	explicit Helper(not_null<Main::Session*> session);
 
 	static std::unique_ptr<Helper> Create(not_null<Main::Session*> session);
+	static void CheckIfLost(not_null<Window::SessionController*> controller);
 
 	void registerWindow(not_null<Window::SessionController*> controller);
 	void cloudDraftChanged(not_null<History*> history);
 
 	void chatOccupiedUpdated(not_null<History*> history);
 
-	bool isOccupiedByMe(History *history) const;
-	bool isOccupiedBySomeone(History *history) const;
+	[[nodiscard]] bool isOccupiedByMe(History *history) const;
+	[[nodiscard]] bool isOccupiedBySomeone(History *history) const;
 
 	void refreshInfo(not_null<UserData*> user);
-	rpl::producer<UserInfo> infoValue(not_null<UserData*> user) const;
-	rpl::producer<QString> infoLabelValue(not_null<UserData*> user) const;
-	rpl::producer<TextWithEntities> infoTextValue(
+	[[nodiscard]] rpl::producer<UserInfo> infoValue(
 		not_null<UserData*> user) const;
-	UserInfo infoCurrent(not_null<UserData*> user) const;
-	void editInfo(not_null<UserData*> user);
+	[[nodiscard]] rpl::producer<QString> infoLabelValue(
+		not_null<UserData*> user) const;
+	[[nodiscard]] rpl::producer<TextWithEntities> infoTextValue(
+		not_null<UserData*> user) const;
+	[[nodiscard]] UserInfo infoCurrent(not_null<UserData*> user) const;
+	void editInfo(
+		not_null<Window::SessionController*> controller,
+		not_null<UserData*> user);
 
 	Templates &templates();
 
@@ -80,13 +85,17 @@ private:
 	void applyInfo(
 		not_null<UserData*> user,
 		const MTPhelp_UserInfo &result);
-	void showEditInfoBox(not_null<UserData*> user);
+	void showEditInfoBox(
+		not_null<Window::SessionController*> controller,
+		not_null<UserData*> user);
 	void saveInfo(
 		not_null<UserData*> user,
 		TextWithEntities text,
 		Fn<void(bool success)> done);
 
-	not_null<Main::Session*> _session;
+	static bool ShouldUse(not_null<Main::Session*> session);
+
+	const not_null<Main::Session*> _session;
 	MTP::Sender _api;
 	Templates _templates;
 	QString _supportName;
@@ -98,15 +107,36 @@ private:
 	base::flat_map<not_null<History*>, TimeId> _occupiedChats;
 
 	base::flat_map<not_null<UserData*>, UserInfo> _userInformation;
-	base::flat_set<not_null<UserData*>> _userInfoEditPending;
+	base::flat_map<
+		not_null<UserData*>,
+		base::weak_ptr<Window::SessionController>> _userInfoEditPending;
 	base::flat_map<not_null<UserData*>, SavingInfo> _userInfoSaving;
 
 	rpl::lifetime _lifetime;
 
 };
 
-QString ChatOccupiedString(not_null<History*> history);
+class FastButtonsBots final {
+public:
+	explicit FastButtonsBots(not_null<Main::Session*> session);
 
-QString InterpretSendPath(const QString &path);
+	[[nodiscard]] bool enabled(not_null<PeerData*> peer) const;
+	[[nodiscard]] rpl::producer<bool> enabledValue(
+		not_null<PeerData*> peer) const;
+	void setEnabled(not_null<PeerData*> peer, bool value);
+
+private:
+	void write();
+	void read();
+
+	const not_null<Main::Session*> _session;
+
+	base::flat_set<PeerId> _bots;
+	rpl::event_stream<PeerId> _changes;
+	bool _read = false;
+
+};
+
+QString ChatOccupiedString(not_null<History*> history);
 
 } // namespace Support

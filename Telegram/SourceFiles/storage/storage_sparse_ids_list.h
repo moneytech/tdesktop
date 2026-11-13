@@ -41,16 +41,25 @@ struct SparseIdsSliceUpdate {
 class SparseIdsList {
 public:
 	void addNew(MsgId messageId);
-	void addExisting(MsgId messageId, MsgRange noSkipRange);
+	void addExisting(
+		MsgId messageId,
+		MsgRange noSkipRange,
+		bool incrementCount = false);
 	void addSlice(
 		std::vector<MsgId> &&messageIds,
 		MsgRange noSkipRange,
 		std::optional<int> count);
-	void removeOne(MsgId messageId);
+	void removeOne(MsgId messageId, bool onlyMatched = false);
 	void removeAll();
 	void invalidateBottom();
 	rpl::producer<SparseIdsListResult> query(SparseIdsListQuery &&query) const;
 	rpl::producer<SparseIdsSliceUpdate> sliceUpdated() const;
+	SparseIdsListResult snapshot(const SparseIdsListQuery &query) const;
+	[[nodiscard]] std::optional<int> countAfter(
+		MsgId tillId,
+		int limit,
+		Fn<bool(MsgId)> counts) const;
+	bool empty() const;
 
 private:
 	struct Slice {
@@ -69,7 +78,6 @@ private:
 	};
 
 	struct AddResult {
-		int inslice = 0;
 		int added = 0;
 	};
 	template <typename Range>

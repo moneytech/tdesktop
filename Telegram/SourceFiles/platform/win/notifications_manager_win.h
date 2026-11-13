@@ -9,32 +9,38 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "platform/platform_notifications_manager.h"
 
+struct ToastActivation;
+
 namespace Platform {
 namespace Notifications {
 
 class Manager : public Window::Notifications::NativeManager {
 public:
 	Manager(Window::Notifications::System *system);
+	~Manager();
 
 	bool init();
+	void clearNotification(NotificationId id);
 
-	void clearNotification(PeerId peerId, MsgId msgId);
-
-	~Manager();
+	void handleActivation(const ToastActivation &activation);
 
 protected:
 	void doShowNativeNotification(
-		not_null<PeerData*> peer,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		bool hideNameAndPhoto,
-		bool hideReplyButton) override;
+		NotificationInfo &&info,
+		Ui::PeerUserpicView &userpicView) override;
 	void doClearAllFast() override;
+	void doClearFromItem(not_null<HistoryItem*> item) override;
+	void doClearFromTopic(not_null<Data::ForumTopic*> topic) override;
+	void doClearFromSublist(not_null<Data::SavedSublist*> sublist) override;
 	void doClearFromHistory(not_null<History*> history) override;
-	void onBeforeNotificationActivated(PeerId peerId, MsgId msgId) override;
-	void onAfterNotificationActivated(PeerId peerId, MsgId msgId) override;
+	void doClearFromSession(not_null<Main::Session*> session) override;
+	void onBeforeNotificationActivated(NotificationId id) override;
+	void onAfterNotificationActivated(
+		NotificationId id,
+		not_null<Window::SessionController*> window) override;
+	bool doSkipToast() const override;
+	void doMaybePlaySound(Fn<void()> playSound) override;
+	void doMaybeFlashBounce(Fn<void()> flashBounce) override;
 
 private:
 	class Private;

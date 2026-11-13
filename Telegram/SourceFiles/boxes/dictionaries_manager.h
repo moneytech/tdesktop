@@ -9,7 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #ifndef TDESKTOP_DISABLE_SPELLCHECK
 
-#include "boxes/abstract_box.h"
+#include "ui/layers/box_content.h"
 
 namespace Main {
 class Session;
@@ -19,9 +19,7 @@ namespace Ui {
 
 class ManageDictionariesBox : public Ui::BoxContent {
 public:
-	ManageDictionariesBox(
-		QWidget*,
-		not_null<Main::Session*> session);
+	ManageDictionariesBox(QWidget*, not_null<Main::Session*> session);
 
 protected:
 	void prepare() override;

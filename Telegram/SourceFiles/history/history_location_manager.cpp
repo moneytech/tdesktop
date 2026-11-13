@@ -14,13 +14,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_file_origin.h"
 #include "platform/platform_specific.h"
 
-namespace {
-
-constexpr auto kCoordPrecision = 8;
-constexpr auto kMaxHttpRedirects = 5;
-
-} // namespace
-
 QString LocationClickHandler::copyToClipboardText() const {
 	return _text;
 }
@@ -30,9 +23,9 @@ QString LocationClickHandler::copyToClipboardContextItemText() const {
 }
 
 void LocationClickHandler::onClick(ClickContext context) const {
-	if (!psLaunchMaps(_point)) {
-		File::OpenUrl(_text);
-	}
+	Platform::LaunchMaps(_point, [text = _text] {
+		File::OpenUrl(text);
+	});
 }
 
 void LocationClickHandler::setup() {
@@ -41,5 +34,9 @@ void LocationClickHandler::setup() {
 
 QString LocationClickHandler::Url(const Data::LocationPoint &point) {
 	const auto latlon = point.latAsString() + ',' + point.lonAsString();
-	return qsl("https://maps.google.com/maps?q=") + latlon + qsl("&ll=") + latlon + qsl("&z=16");
+	return u"https://maps.google.com/maps?q="_q
+		+ latlon
+		+ u"&ll="_q
+		+ latlon
+		+ u"&z=16"_q;
 }

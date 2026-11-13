@@ -10,6 +10,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "export/export_controller.h"
 
 namespace Export {
+struct Settings;
+} // namespace Export
+
+namespace Export {
 namespace View {
 
 struct Content {
@@ -18,6 +22,7 @@ struct Content {
 		QString label;
 		QString info;
 		float64 progress = 0.;
+		uint64 randomId = 0;
 	};
 
 	std::vector<Row> rows;
@@ -26,18 +31,22 @@ struct Content {
 
 };
 
-Content ContentFromState(const ProcessingState &state);
-Content ContentFromState(const FinishedState &state);
+[[nodiscard]] Content ContentFromState(
+	not_null<Settings*> settings,
+	const ProcessingState &state);
+[[nodiscard]] Content ContentFromState(const FinishedState &state);
 
-inline auto ContentFromState(rpl::producer<State> state) {
+[[nodiscard]] inline auto ContentFromState(
+		not_null<Settings*> settings,
+		rpl::producer<State> state) {
 	return std::move(
 		state
 	) | rpl::filter([](const State &state) {
-		return state.is<ProcessingState>() || state.is<FinishedState>();
-	}) | rpl::map([](const State &state) {
-		if (const auto process = base::get_if<ProcessingState>(&state)) {
-			return ContentFromState(*process);
-		} else if (const auto done = base::get_if<FinishedState>(&state)) {
+		return v::is<ProcessingState>(state) || v::is<FinishedState>(state);
+	}) | rpl::map([=](const State &state) {
+		if (const auto process = std::get_if<ProcessingState>(&state)) {
+			return ContentFromState(settings, *process);
+		} else if (const auto done = std::get_if<FinishedState>(&state)) {
 			return ContentFromState(*done);
 		}
 		Unexpected("State type in ContentFromState.");

@@ -8,87 +8,228 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "mtproto/sender.h"
-#include "calls/calls_call.h"
 
-namespace Media {
-namespace Audio {
+namespace crl {
+class semaphore;
+} // namespace crl
+
+namespace Data {
+class GroupCall;
+} // namespace Data
+
+namespace Platform {
+enum class PermissionType;
+} // namespace Platform
+
+namespace Media::Audio {
 class Track;
-} // namespace Audio
-} // namespace Media
+} // namespace Media::Audio
 
 namespace Main {
 class Session;
 } // namespace Main
 
+namespace Ui {
+class Show;
+} // namespace Ui
+
+namespace Calls::Group {
+struct JoinInfo;
+struct ConferenceInfo;
+class Panel;
+class ChooseJoinAsProcess;
+class StartRtmpProcess;
+} // namespace Calls::Group
+
+namespace tgcalls {
+class VideoCaptureInterface;
+} // namespace tgcalls
+
 namespace Calls {
 
+class Call;
+enum class CallType;
+class GroupCall;
 class Panel;
+struct DhConfig;
+struct InviteRequest;
+struct StartConferenceInfo;
 
-class Instance
-	: private Call::Delegate
-	, private base::Subscriber
-	, public base::has_weak_ptr {
+struct StartOutgoingCallArgs {
+	bool video = false;
+	bool isConfirmed = false;
+};
+
+struct StartGroupCallArgs {
+	enum class JoinConfirm {
+		None,
+		IfNowInAnother,
+		Always,
+	};
+	QString joinHash;
+	JoinConfirm confirm = JoinConfirm::IfNowInAnother;
+	bool scheduleNeeded = false;
+};
+
+struct ConferenceInviteMessages {
+	base::flat_set<MsgId> incoming;
+	base::flat_set<MsgId> outgoing;
+};
+
+struct ConferenceInvites {
+	base::flat_map<not_null<UserData*>, ConferenceInviteMessages> users;
+};
+
+class Instance final : public base::has_weak_ptr {
 public:
-	explicit Instance(not_null<Main::Session*> session);
-
-	void startOutgoingCall(not_null<UserData*> user);
-	void handleUpdate(const MTPDupdatePhoneCall &update);
-	void showInfoPanel(not_null<Call*> call);
-	Call* currentCall();
-
-	base::Observable<Call*> &currentCallChanged() {
-		return _currentCallChanged;
-	}
-
-	base::Observable<FullMsgId> &newServiceMessage() {
-		return _newServiceMessage;
-	}
-
-	bool isQuitPrevent();
-
+	Instance();
 	~Instance();
 
+	void startOutgoingCall(not_null<UserData*> user, StartOutgoingCallArgs);
+	void startOrJoinGroupCall(
+		std::shared_ptr<Ui::Show> show,
+		not_null<PeerData*> peer,
+		StartGroupCallArgs args);
+	void startOrJoinConferenceCall(StartConferenceInfo args);
+	void startedConferenceReady(
+		not_null<GroupCall*> call,
+		StartConferenceInfo args);
+	void showStartWithRtmp(
+		std::shared_ptr<Ui::Show> show,
+		not_null<PeerData*> peer);
+	void handleUpdate(
+		not_null<Main::Session*> session,
+		const MTPUpdate &update);
+
+	// Called by Data::GroupCall when it is appropriate by the 'version'.
+	void applyGroupCallUpdateChecked(
+		not_null<Main::Session*> session,
+		const MTPUpdate &update);
+
+	void showInfoPanel(not_null<Call*> call);
+	void showInfoPanel(not_null<GroupCall*> call);
+	[[nodiscard]] Call *currentCall() const;
+	[[nodiscard]] rpl::producer<Call*> currentCallValue() const;
+	[[nodiscard]] GroupCall *currentGroupCall() const;
+	[[nodiscard]] rpl::producer<GroupCall*> currentGroupCallValue() const;
+	[[nodiscard]] bool inCall() const;
+	[[nodiscard]] bool inGroupCall() const;
+	[[nodiscard]] bool hasVisiblePanel(
+		Main::Session *session = nullptr) const;
+	[[nodiscard]] bool hasActivePanel(
+		Main::Session *session = nullptr) const;
+	bool activateCurrentCall(const QString &joinHash = QString());
+	bool minimizeCurrentActiveCall();
+	bool toggleFullScreenCurrentActiveCall();
+	bool closeCurrentActiveCall();
+	void hidePanelLayers();
+	[[nodiscard]] auto getVideoCapture(
+		std::optional<QString> deviceId = std::nullopt,
+		bool isScreenCapture = false)
+		-> std::shared_ptr<tgcalls::VideoCaptureInterface>;
+	void requestPermissionsOrFail(Fn<void()> onSuccess, bool video = true);
+
+	void registerConferenceInvite(
+		CallId conferenceId,
+		not_null<UserData*> user,
+		MsgId messageId,
+		bool incoming);
+	void unregisterConferenceInvite(
+		CallId conferenceId,
+		not_null<UserData*> user,
+		MsgId messageId,
+		bool incoming,
+		bool onlyStopCalling = false);
+	void showConferenceInvite(
+		not_null<UserData*> user,
+		MsgId conferenceInviteMsgId);
+	void declineIncomingConferenceInvites(CallId conferenceId);
+	void declineOutgoingConferenceInvite(
+		CallId conferenceId,
+		not_null<UserData*> user,
+		bool discard = false);
+
+	[[nodiscard]] FnMut<void()> addAsyncWaiter();
+
+	void registerVideoStream(not_null<GroupCall*> call);
+
+	[[nodiscard]] bool isSharingScreen() const;
+	[[nodiscard]] bool isQuitPrevent();
+
 private:
-	not_null<Call::Delegate*> getCallDelegate() {
-		return static_cast<Call::Delegate*>(this);
-	}
-	DhConfig getDhConfig() const override {
-		return _dhConfig;
-	}
-	void callFinished(not_null<Call*> call) override;
-	void callFailed(not_null<Call*> call) override;
-	void callRedial(not_null<Call*> call) override;
-	using Sound = Call::Delegate::Sound;
-	void playSound(Sound sound) override;
-	void createCall(not_null<UserData*> user, Call::Type type);
+	class Delegate;
+	friend class Delegate;
+
+	not_null<Media::Audio::Track*> ensureSoundLoaded(const QString &key);
+	void playSoundOnce(const QString &key);
+
+	void createCall(
+		not_null<UserData*> user,
+		CallType type,
+		StartOutgoingCallArgs);
 	void destroyCall(not_null<Call*> call);
-	void destroyCurrentPanel();
-	void requestMicrophonePermissionOrFail(Fn<void()> onSuccess) override;
+	void finishConferenceInvitations(const StartConferenceInfo &args);
+
+	void createGroupCall(
+		Group::JoinInfo info,
+		const MTPInputGroupCall &inputCall);
+	void destroyGroupCall(not_null<GroupCall*> call);
+	void confirmLeaveCurrent(
+		std::shared_ptr<Ui::Show> show,
+		not_null<PeerData*> peer,
+		StartGroupCallArgs args,
+		Fn<void(StartGroupCallArgs)> confirmed);
+
+	void requestPermissionOrFail(
+		Platform::PermissionType type,
+		Fn<void()> onSuccess);
 
 	void refreshDhConfig();
-	void refreshServerConfig();
+	void refreshServerConfig(not_null<Main::Session*> session);
 	bytes::const_span updateDhConfig(const MTPmessages_DhConfig &data);
+	bool activateUnconfirmedCall(not_null<UserData*> user);
 
-	bool alreadyInCall();
-	void handleCallUpdate(const MTPPhoneCall &call);
+	void destroyCurrentCall(
+		Data::GroupCall *migrateCall = nullptr,
+		const QString &migrateSlug = QString());
+	void handleCallUpdate(
+		not_null<Main::Session*> session,
+		const MTPPhoneCall &call);
+	void handleSignalingData(
+		not_null<Main::Session*> session,
+		const MTPDupdatePhoneCallSignalingData &data);
+	void handleGroupCallUpdate(
+		not_null<Main::Session*> session,
+		const MTPUpdate &update);
 
-	const not_null<Main::Session*> _session;
-	MTP::Sender _api;
-
-	DhConfig _dhConfig;
+	const std::unique_ptr<Delegate> _delegate;
+	const std::unique_ptr<DhConfig> _cachedDhConfig;
 
 	crl::time _lastServerConfigUpdateTime = 0;
-	mtpRequestId _serverConfigRequestId = 0;
+	base::weak_ptr<Main::Session> _serverConfigRequestSession;
+	std::weak_ptr<tgcalls::VideoCaptureInterface> _videoCapture;
 
 	std::unique_ptr<Call> _currentCall;
+	rpl::event_stream<Call*> _currentCallChanges;
 	std::unique_ptr<Panel> _currentCallPanel;
-	base::Observable<Call*> _currentCallChanged;
-	base::Observable<FullMsgId> _newServiceMessage;
-	std::vector<QPointer<Panel>> _pendingPanels;
 
-	std::unique_ptr<Media::Audio::Track> _callConnectingTrack;
-	std::unique_ptr<Media::Audio::Track> _callEndedTrack;
-	std::unique_ptr<Media::Audio::Track> _callBusyTrack;
+	std::unique_ptr<GroupCall> _currentGroupCall;
+	std::unique_ptr<GroupCall> _startingGroupCall;
+	rpl::event_stream<GroupCall*> _currentGroupCallChanges;
+	std::unique_ptr<Group::Panel> _currentGroupCallPanel;
+
+	base::flat_map<QString, std::unique_ptr<Media::Audio::Track>> _tracks;
+
+	const std::unique_ptr<Group::ChooseJoinAsProcess> _chooseJoinAs;
+	const std::unique_ptr<Group::StartRtmpProcess> _startWithRtmp;
+
+	base::flat_map<CallId, ConferenceInvites> _conferenceInvites;
+
+	base::flat_set<std::unique_ptr<crl::semaphore>> _asyncWaiters;
+
+	base::flat_map<
+		not_null<Main::Session*>,
+		std::vector<base::weak_ptr<GroupCall>>> _streams;
 
 };
 

@@ -10,83 +10,51 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/variant.h"
 #include "api/api_common.h"
 
-enum class CompressConfirm {
-	Auto,
-	Yes,
-	No,
-	None,
-};
+#include <memory>
+
+namespace Ui {
+struct PreparedFileInformation;
+struct PreparedFileArchive;
+} // namespace Ui
+
+namespace Media::Encode {
+struct Job;
+struct VideoSource;
+} // namespace Media::Encode
+
+namespace Main {
+class Session;
+} // namespace Main
+
+namespace Storage {
+struct ArchiveEntries;
+} // namespace Storage
+
+struct FilePrepareResult;
+
+// Load files up to 2'000 MB.
+constexpr auto kFileSizeLimit = 2'000 * int64(1024 * 1024);
+
+// Load files up to 4'000 MB.
+constexpr auto kFileSizePremiumLimit = 4'000 * int64(1024 * 1024);
+
+[[nodiscard]] int PhotoSideLimit(bool large);
+[[nodiscard]] int PhotoSideLimit();
 
 enum class SendMediaType {
 	Photo,
 	Audio,
+	Round,
 	File,
 	ThemeFile,
 	Secure,
+
+	// Uploaded just to get an InputFile, without a document or a message.
+	SecondaryFile,
 };
-
-struct SendMediaPrepare {
-	SendMediaPrepare(const QString &file, const PeerId &peer, SendMediaType type, MsgId replyTo) : id(rand_value<PhotoId>()), file(file), peer(peer), type(type), replyTo(replyTo) {
-	}
-	SendMediaPrepare(const QImage &img, const PeerId &peer, SendMediaType type, MsgId replyTo) : id(rand_value<PhotoId>()), img(img), peer(peer), type(type), replyTo(replyTo) {
-	}
-	SendMediaPrepare(const QByteArray &data, const PeerId &peer, SendMediaType type, MsgId replyTo) : id(rand_value<PhotoId>()), data(data), peer(peer), type(type), replyTo(replyTo) {
-	}
-	SendMediaPrepare(const QByteArray &data, int duration, const PeerId &peer, SendMediaType type, MsgId replyTo) : id(rand_value<PhotoId>()), data(data), peer(peer), type(type), duration(duration), replyTo(replyTo) {
-	}
-	PhotoId id;
-	QString file;
-	QImage img;
-	QByteArray data;
-	PeerId peer;
-	SendMediaType type;
-	int duration = 0;
-	MsgId replyTo;
-
-};
-using SendMediaPrepareList = QList<SendMediaPrepare>;
-
-using UploadFileParts =  QMap<int, QByteArray>;
-struct SendMediaReady {
-	SendMediaReady() = default; // temp
-	SendMediaReady(
-		SendMediaType type,
-		const QString &file,
-		const QString &filename,
-		int32 filesize,
-		const QByteArray &data,
-		const uint64 &id,
-		const uint64 &thumbId,
-		const QString &thumbExt,
-		const PeerId &peer,
-		const MTPPhoto &photo,
-		const PreparedPhotoThumbs &photoThumbs,
-		const MTPDocument &document,
-		const QByteArray &jpeg,
-		MsgId replyTo);
-
-	MsgId replyTo;
-	SendMediaType type;
-	QString file, filename;
-	int32 filesize;
-	QByteArray data;
-	QString thumbExt;
-	uint64 id, thumbId; // id always file-id of media, thumbId is file-id of thumb ( == id for photos)
-	PeerId peer;
-
-	MTPPhoto photo;
-	MTPDocument document;
-	PreparedPhotoThumbs photoThumbs;
-	UploadFileParts parts;
-	QByteArray jpeg_md5;
-
-	QString caption;
-
-};
-
-SendMediaReady PreparePeerPhoto(PeerId peerId, QImage &&image);
 
 using TaskId = void*; // no interface, just id
+inline constexpr auto kEmptyTaskId = TaskId();
 
 class Task {
 public:
@@ -113,10 +81,10 @@ public:
 
 	~TaskQueue();
 
-signals:
+Q_SIGNALS:
 	void taskAdded();
 
-public slots:
+public Q_SLOTS:
 	void onTaskProcessed();
 	void stop();
 
@@ -142,10 +110,10 @@ public:
 	TaskQueueWorker(TaskQueue *queue) : _queue(queue) {
 	}
 
-signals:
+Q_SIGNALS:
 	void taskProcessed();
 
-public slots:
+public Q_SLOTS:
 	void onTaskAdded();
 
 private:
@@ -156,16 +124,22 @@ private:
 
 struct SendingAlbum {
 	struct Item {
-		explicit Item(TaskId taskId) : taskId(taskId) {
-		}
+		explicit Item(TaskId taskId);
 
-		TaskId taskId;
+		TaskId taskId = kEmptyTaskId;
 		uint64 randomId = 0;
 		FullMsgId msgId;
 		std::optional<MTPInputSingleMedia> media;
+		std::shared_ptr<FilePrepareResult> prepared;
 	};
 
 	SendingAlbum();
+
+	[[nodiscard]] bool preparedMusicBatching() const;
+	[[nodiscard]] bool preparedMusicReady() const;
+	[[nodiscard]] std::shared_ptr<FilePrepareResult> preparedMusicSample() const;
+	[[nodiscard]] std::vector<std::shared_ptr<FilePrepareResult>>
+		takePreparedMusic();
 
 	void fillMedia(
 		not_null<HistoryItem*> item,
@@ -173,161 +147,206 @@ struct SendingAlbum {
 		uint64 randomId);
 	void refreshMediaCaption(not_null<HistoryItem*> item);
 	void removeItem(not_null<HistoryItem*> item);
+	void removeTask(TaskId taskId);
 
 	uint64 groupId = 0;
 	std::vector<Item> items;
 	Api::SendOptions options;
+	bool musicPreparedBatching = false;
+	bool sent = false;
 
 };
 
 struct FileLoadTo {
-	FileLoadTo(const PeerId &peer, Api::SendOptions options, MsgId replyTo)
+	FileLoadTo(
+		PeerId peer,
+		Api::SendOptions options,
+		FullReplyTo replyTo,
+		MsgId replaceMediaOf)
 	: peer(peer)
 	, options(options)
-	, replyTo(replyTo) {
+	, replyTo(replyTo)
+	, replaceMediaOf(replaceMediaOf) {
 	}
 	PeerId peer;
 	Api::SendOptions options;
-	MsgId replyTo;
+	FullReplyTo replyTo;
+	MsgId replaceMediaOf;
 };
 
-struct FileLoadResult {
-	FileLoadResult(
-		TaskId taskId,
-		uint64 id,
-		const FileLoadTo &to,
-		const TextWithTags &caption,
-		std::shared_ptr<SendingAlbum> album);
-
-	TaskId taskId;
-	uint64 id;
-	FileLoadTo to;
+using UploadFileParts = std::vector<QByteArray>;
+struct FilePrepareDescriptor {
+	TaskId taskId = kEmptyTaskId;
+	base::required<uint64> id;
+	SendMediaType type = SendMediaType::File;
+	FileLoadTo to = { PeerId(), Api::SendOptions(), FullReplyTo(), MsgId() };
+	TextWithTags caption;
+	bool spoiler = false;
 	std::shared_ptr<SendingAlbum> album;
+};
+struct FilePrepareResult {
+	explicit FilePrepareResult(FilePrepareDescriptor &&descriptor);
+	~FilePrepareResult();
+
+	TaskId taskId = kEmptyTaskId;
+	uint64 id = 0;
+	FileLoadTo to;
+	std::weak_ptr<SendingAlbum> album;
 	SendMediaType type = SendMediaType::File;
 	QString filepath;
 	QByteArray content;
 
 	QString filename;
 	QString filemime;
-	int32 filesize = 0;
+	int64 filesize = 0;
 	UploadFileParts fileparts;
 	QByteArray filemd5;
-	int32 partssize;
+	int64 partssize = 0;
 
 	uint64 thumbId = 0; // id is always file-id of media, thumbId is file-id of thumb ( == id for photos)
 	QString thumbname;
 	UploadFileParts thumbparts;
+	QByteArray thumbbytes;
 	QByteArray thumbmd5;
 	QImage thumb;
 
 	QImage goodThumbnail;
 	QByteArray goodThumbnailBytes;
 
-	MTPPhoto photo;
-	MTPDocument document;
+	MTPPhoto photo = MTP_photoEmpty(MTP_long(0));
+	MTPDocument document = MTP_documentEmpty(MTP_long(0));
 
 	PreparedPhotoThumbs photoThumbs;
 	TextWithTags caption;
+	bool spoiler = false;
+	bool forceFile = false;
+	std::shared_ptr<Media::Encode::VideoSource> videoSource;
+	crl::time videoCoverOffset = 0;
+	std::shared_ptr<Media::Encode::Job> animationJob;
+	std::shared_ptr<Ui::PreparedFileArchive> archive;
+	std::shared_ptr<Storage::ArchiveEntries> archiveEntries;
+	QString transcodedTempPath;
 
-	bool edit = false;
+	std::vector<MTPInputDocument> attachedStickers;
+
+	std::shared_ptr<FilePrepareResult> videoCover;
 
 	void setFileData(const QByteArray &filedata);
 	void setThumbData(const QByteArray &thumbdata);
 
 };
 
-struct FileMediaInformation {
-	struct Image {
-		QImage data;
-		bool animated = false;
-	};
-	struct Song {
-		int duration = -1;
-		QString title;
-		QString performer;
-		QImage cover;
-	};
-	struct Video {
-		bool isGifv = false;
-		bool supportsStreaming = false;
-		int duration = -1;
-		QImage thumbnail;
-	};
-
-	QString filemime;
-	base::optional_variant<Image, Song, Video> media;
-};
+[[nodiscard]] std::shared_ptr<FilePrepareResult> MakePreparedFile(
+	FilePrepareDescriptor &&descriptor);
 
 class FileLoadTask final : public Task {
 public:
-	static std::unique_ptr<FileMediaInformation> ReadMediaInformation(
+	static std::unique_ptr<Ui::PreparedFileInformation> ReadMediaInformation(
 		const QString &filepath,
 		const QByteArray &content,
+		const QString &filemime);
+	[[nodiscard]] static bool IsVideoFile(
+		const QString &filepath,
 		const QString &filemime);
 	static bool FillImageInformation(
 		QImage &&image,
 		bool animated,
-		std::unique_ptr<FileMediaInformation> &result);
+		std::unique_ptr<Ui::PreparedFileInformation> &result,
+		QByteArray content = {},
+		QByteArray format = {});
 
-	FileLoadTask(
-		const QString &filepath,
-		const QByteArray &content,
-		std::unique_ptr<FileMediaInformation> information,
-		SendMediaType type,
-		const FileLoadTo &to,
-		const TextWithTags &caption,
-		std::shared_ptr<SendingAlbum> album = nullptr,
-		MsgId msgIdToEdit = 0);
-	FileLoadTask(
-		const QByteArray &voice,
-		int32 duration,
-		const VoiceWaveform &waveform,
-		const FileLoadTo &to,
-		const TextWithTags &caption);
+	struct Args {
+		not_null<Main::Session*> session;
+		QString filepath;
+		QByteArray content;
+		std::unique_ptr<Ui::PreparedFileInformation> information;
+		std::unique_ptr<FileLoadTask> videoCover;
+		SendMediaType type;
+		FileLoadTo to;
+		TextWithTags caption;
+		bool spoiler = false;
+		std::shared_ptr<SendingAlbum> album;
+		bool forceFile = false;
+		bool sendLargePhotos = false;
+		std::shared_ptr<Media::Encode::Job> animationJob;
+		bool animationAsGif = true;
+		std::shared_ptr<Ui::PreparedFileArchive> archive;
+		uint64 idOverride = 0;
+		QString displayName;
+	};
+
+	struct VoiceArgs {
+		not_null<Main::Session*> session;
+		QByteArray voice;
+		crl::time duration = 0;
+		VoiceWaveform waveform;
+		bool video = false;
+		FileLoadTo to;
+		TextWithTags caption;
+	};
+
+	explicit FileLoadTask(Args &&args);
+	explicit FileLoadTask(VoiceArgs &&args);
+	~FileLoadTask();
 
 	uint64 fileid() const {
 		return _id;
 	}
 
-	void process();
-	void finish();
+	struct ProcessArgs {
+		bool generateGoodThumbnail = true;
+	};
+	void process(ProcessArgs &&args);
 
-	FileLoadResult *peekResult() const;
+	void process() override {
+		process({});
+	}
+	void finish() override;
+
+	[[nodiscard]] auto peekResult() const
+		-> const std::shared_ptr<FilePrepareResult> &;
 
 private:
 	static bool CheckForSong(
 		const QString &filepath,
 		const QByteArray &content,
-		std::unique_ptr<FileMediaInformation> &result);
+		std::unique_ptr<Ui::PreparedFileInformation> &result);
 	static bool CheckForVideo(
 		const QString &filepath,
 		const QByteArray &content,
-		std::unique_ptr<FileMediaInformation> &result);
+		std::unique_ptr<Ui::PreparedFileInformation> &result);
 	static bool CheckForImage(
 		const QString &filepath,
 		const QByteArray &content,
-		std::unique_ptr<FileMediaInformation> &result);
+		std::unique_ptr<Ui::PreparedFileInformation> &result);
 
 	template <typename Mimes, typename Extensions>
 	static bool CheckMimeOrExtensions(const QString &filepath, const QString &filemime, Mimes &mimes, Extensions &extensions);
 
-	std::unique_ptr<FileMediaInformation> readMediaInformation(const QString &filemime) const {
-		return ReadMediaInformation(_filepath, _content, filemime);
-	}
+	std::unique_ptr<Ui::PreparedFileInformation> readMediaInformation(const QString &filemime) const;
 	void removeFromAlbum();
 
-	uint64 _id;
+	uint64 _id = 0;
+	base::weak_ptr<Main::Session> _session;
+	MTP::DcId _dcId = 0;
 	FileLoadTo _to;
 	const std::shared_ptr<SendingAlbum> _album;
 	QString _filepath;
+	QString _displayName;
 	QByteArray _content;
-	std::unique_ptr<FileMediaInformation> _information;
-	int32 _duration = 0;
+	std::unique_ptr<FileLoadTask> _videoCover;
+	std::unique_ptr<Ui::PreparedFileInformation> _information;
+	crl::time _duration = 0;
 	VoiceWaveform _waveform;
 	SendMediaType _type;
 	TextWithTags _caption;
-	MsgId _msgIdToEdit = 0;
+	bool _spoiler = false;
+	bool _forceFile = false;
+	bool _sendLargePhotos = false;
+	std::shared_ptr<Media::Encode::Job> _animationJob;
+	bool _animationAsGif = true;
+	std::shared_ptr<Ui::PreparedFileArchive> _archive;
 
-	std::shared_ptr<FileLoadResult> _result;
+	std::shared_ptr<FilePrepareResult> _result;
 
 };

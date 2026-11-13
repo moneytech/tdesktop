@@ -14,6 +14,10 @@ template <typename ...>
 struct phrase;
 } // namespace tr
 
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace Storage::CloudBlob {
 
 constexpr auto kCloudLocationUsername = "tdhbcfiles"_cs;
@@ -21,12 +25,12 @@ constexpr auto kCloudLocationUsername = "tdhbcfiles"_cs;
 struct Blob {
 	int id = 0;
 	int postId = 0;
-	int size = 0;
+	int64 size = 0;
 	QString name;
 };
 
 struct Available {
-	int size = 0;
+	int64 size = 0;
 
 	inline bool operator<(const Available &other) const {
 		return size < other.size;
@@ -61,7 +65,7 @@ struct Failed {
 };
 
 using Loading = MTP::DedicatedLoader::Progress;
-using BlobState = base::variant<
+using BlobState = std::variant<
 	Available,
 	Ready,
 	Active,
@@ -79,10 +83,11 @@ class BlobLoader : public QObject {
 public:
 	BlobLoader(
 		QObject *parent,
+		not_null<Main::Session*> session,
 		int id,
 		MTP::DedicatedLoader::Location location,
 		const QString &folder,
-		int size);
+		int64 size);
 
 	int id() const;
 
@@ -102,6 +107,7 @@ private:
 	rpl::variable<BlobState> _state;
 
 	MTP::WeakInstance _mtproto;
+
 	std::unique_ptr<MTP::DedicatedLoader> _implementation;
 
 };

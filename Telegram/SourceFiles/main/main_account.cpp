@@ -7,38 +7,99 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "main/main_account.h"
 
+#include "base/platform/base_platform_info.h"
 #include "core/application.h"
-#include "core/launcher.h"
-#include "core/shortcuts.h"
+#include "storage/storage_account.h"
+#include "storage/storage_domain.h" // Storage::StartResult.
 #include "storage/serialize_common.h"
+#include "storage/serialize_peer.h"
 #include "storage/localstorage.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
+#include "data/data_changes.h"
 #include "window/window_controller.h"
 #include "media/audio/media_audio.h"
+#include "mtproto/mtproto_config.h"
 #include "mainwidget.h"
-#include "observer_peer.h"
+#include "api/api_updates.h"
+#include "ui/ui_utility.h"
 #include "main/main_app_config.h"
 #include "main/main_session.h"
-#include "facades.h"
+#include "main/main_domain.h"
+#include "main/main_session_settings.h"
+#include "tgw/tgw_storage.h"
 
 namespace Main {
+namespace {
 
-Account::Account(const QString &dataName) {
-	watchProxyChanges();
-	watchSessionChanges();
-	_appConfig = std::make_unique<AppConfig>(this);
+constexpr auto kWideIdsTag = ~uint64(0);
+
+[[nodiscard]] QString ComposeDataString(const QString &dataName, int index) {
+	auto result = dataName;
+	result.replace('#', QString());
+	if (index > 0) {
+		result += '#' + QString::number(index + 1);
+	}
+	return result;
 }
 
-Account::~Account() = default;
+} // namespace
+
+Account::Account(not_null<Domain*> domain, const QString &dataName, int index)
+: _domain(domain)
+, _local(std::make_unique<Storage::Account>(
+	this,
+	ComposeDataString(dataName, index))) {
+}
+
+Account::~Account() {
+	if (const auto session = maybeSession()) {
+		session->saveSettingsNowIfNeeded();
+		_local->writeSearchSuggestionsIfNeeded();
+	}
+	destroySession(DestroyReason::Quitting);
+}
+
+Storage::Domain &Account::domainLocal() const {
+	return _domain->local();
+}
+
+[[nodiscard]] Storage::StartResult Account::legacyStart(
+		const QByteArray &passcode) {
+	Expects(!_appConfig);
+
+	return _local->legacyStart(passcode);
+}
+
+std::unique_ptr<MTP::Config> Account::prepareToStart(
+		std::shared_ptr<MTP::AuthKey> localKey) {
+	return _local->start(std::move(localKey));
+}
+
+void Account::start(std::unique_ptr<MTP::Config> config) {
+	_appConfig = std::make_unique<AppConfig>(this);
+	startMtp(config
+		? std::move(config)
+		: std::make_unique<MTP::Config>(
+			Core::App().fallbackProductionConfig()));
+	_appConfig->start();
+	watchProxyChanges();
+	watchSessionChanges();
+}
+
+void Account::prepareToStartAdded(
+		std::shared_ptr<MTP::AuthKey> localKey) {
+	_local->startAdded(std::move(localKey));
+}
 
 void Account::watchProxyChanges() {
 	using ProxyChange = Core::Application::ProxyChange;
 
 	Core::App().proxyChanges(
-	) | rpl::start_with_next([=](const ProxyChange &change) {
+	) | rpl::on_next([=](const ProxyChange &change) {
 		const auto key = [&](const MTP::ProxyData &proxy) {
-			return (proxy.type == MTP::ProxyData::Type::Mtproto)
+			return (proxy.type == MTP::ProxyData::Type::Mtproto
+				|| proxy.type == MTP::ProxyData::Type::Web)
 				? std::make_pair(proxy.host, proxy.port)
 				: std::make_pair(QString(), uint32(0));
 		};
@@ -56,47 +117,48 @@ void Account::watchProxyChanges() {
 
 void Account::watchSessionChanges() {
 	sessionChanges(
-	) | rpl::start_with_next([=] {
-		crl::on_main(this, [=] {
-			const auto phone = sessionExists()
-				? session().user()->phone()
-				: QString();
-			const auto support = sessionExists() && session().supportMode();
-			if (cLoggedPhoneNumber() != phone) {
-				cSetLoggedPhoneNumber(phone);
-				if (_mtp) {
-					_mtp->setUserPhone(phone);
-				}
-				Local::writeSettings();
-			}
-			if (_mtp) {
-				_mtp->requestConfig();
-			}
-			Shortcuts::ToggleSupportShortcuts(support);
-			Platform::SetApplicationIcon(Window::CreateIcon(this));
-		});
+	) | rpl::on_next([=](Session *session) {
+		if (!session && _mtp) {
+			_mtp->setUserPhone(QString());
+		}
 	}, _lifetime);
 }
 
-void Account::createSession(const MTPUser &user) {
-	createSession(user, QByteArray(), 0, Settings());
+uint64 Account::willHaveSessionUniqueId(MTP::Config *config) const {
+	// See also Session::uniqueId.
+	if (!_sessionUserId) {
+		return 0;
+	}
+	return _sessionUserId.bare
+		| (config && config->isTestMode() ? 0x0100'0000'0000'0000ULL : 0ULL);
+}
+
+void Account::createSession(
+		const MTPUser &user,
+		std::unique_ptr<SessionSettings> settings) {
+	createSession(
+		user,
+		QByteArray(),
+		0,
+		settings ? std::move(settings) : std::make_unique<SessionSettings>());
 }
 
 void Account::createSession(
 		UserId id,
 		QByteArray serialized,
 		int streamVersion,
-		Settings &&settings) {
+		std::unique_ptr<SessionSettings> settings) {
 	DEBUG_LOG(("sessionUserSerialized.size: %1").arg(serialized.size()));
 	QDataStream peekStream(serialized);
 	const auto phone = Serialize::peekUserPhone(streamVersion, peekStream);
 	const auto flags = MTPDuser::Flag::f_self | (phone.isEmpty()
 		? MTPDuser::Flag()
 		: MTPDuser::Flag::f_phone);
+
 	createSession(
 		MTP_user(
 			MTP_flags(flags),
-			MTP_int(base::take(_sessionUserId)),
+			MTP_long(base::take(_sessionUserId).bare),
 			MTPlong(), // access_hash
 			MTPstring(), // first_name
 			MTPstring(), // last_name
@@ -107,7 +169,16 @@ void Account::createSession(
 			MTPint(), // bot_info_version
 			MTPVector<MTPRestrictionReason>(),
 			MTPstring(), // bot_inline_placeholder
-			MTPstring()), // lang_code
+			MTPstring(), // lang_code
+			MTPEmojiStatus(),
+			MTPVector<MTPUsername>(),
+			MTPRecentStory(),
+			MTPPeerColor(), // color
+			MTPPeerColor(), // profile_color
+			MTPint(), // bot_active_users
+			MTPlong(), // bot_verification_icon
+			MTPlong(), // send_paid_messages_stars
+			MTPlong()), // linked_community_id
 		serialized,
 		streamVersion,
 		std::move(settings));
@@ -117,49 +188,57 @@ void Account::createSession(
 		const MTPUser &user,
 		QByteArray serialized,
 		int streamVersion,
-		Settings &&settings) {
+		std::unique_ptr<SessionSettings> settings) {
 	Expects(_mtp != nullptr);
 	Expects(_session == nullptr);
 	Expects(_sessionValue.current() == nullptr);
 
 	_session = std::make_unique<Session>(this, user, std::move(settings));
+	if (!serialized.isEmpty()) {
+		local().readSelf(_session.get(), serialized, streamVersion);
+	}
 	_sessionValue = _session.get();
 
-	if (!serialized.isEmpty()) {
-		// For now it depends on Auth() which depends on _sessionValue.
-		Local::readSelf(serialized, streamVersion);
-	}
+	Ensures(_session != nullptr);
 }
 
-void Account::destroySession() {
-	_storedSettings.reset();
+void Account::destroySession(DestroyReason reason) {
+	_storedSessionSettings.reset();
 	_sessionUserId = 0;
 	_sessionUserSerialized = {};
 	if (!sessionExists()) {
 		return;
 	}
-	session().data().clear();
 
+	// Assigning _sessionValue fires sessionChanges() synchronously, and a
+	// listener may enter a nested event dispatch that drains crl::on_main.
+	// Nothing may delete this Account while we're still on the stack.
+	_destroyingSession = true;
 	_sessionValue = nullptr;
-	_session = nullptr;
 
-	Notify::unreadCounterUpdated();
+	if (reason == DestroyReason::LoggedOut) {
+		_session->finishLogout();
+	}
+	_session = nullptr;
+	_destroyingSession = false;
+}
+
+bool Account::destroyingSession() const {
+	return _destroyingSession;
 }
 
 bool Account::sessionExists() const {
 	return (_sessionValue.current() != nullptr);
 }
 
-Session &Account::session() {
+Session &Account::session() const {
 	Expects(sessionExists());
 
 	return *_sessionValue.current();
 }
 
-const Session &Account::session() const {
-	Expects(sessionExists());
-
-	return *_sessionValue.current();
+Session *Account::maybeSession() const {
+	return _sessionValue.current();
 }
 
 rpl::producer<Session*> Account::sessionValue() const {
@@ -170,12 +249,16 @@ rpl::producer<Session*> Account::sessionChanges() const {
 	return _sessionValue.changes();
 }
 
-rpl::producer<MTP::Instance*> Account::mtpValue() const {
-	return _mtpValue.value();
+rpl::producer<not_null<MTP::Instance*>> Account::mtpValue() const {
+	return _mtpValue.value() | rpl::map([](MTP::Instance *instance) {
+		return not_null{ instance };
+	});
 }
 
-rpl::producer<MTP::Instance*> Account::mtpChanges() const {
-	return _mtpValue.changes();
+rpl::producer<not_null<MTP::Instance*>> Account::mtpMainSessionValue() const {
+	return mtpValue() | rpl::map([=](not_null<MTP::Instance*> instance) {
+		return instance->mainDcIdValue() | rpl::map_to(instance);
+	}) | rpl::flatten_latest();
 }
 
 rpl::producer<MTPUpdates> Account::mtpUpdates() const {
@@ -189,16 +272,14 @@ rpl::producer<> Account::mtpNewSessionCreated() const {
 void Account::setMtpMainDcId(MTP::DcId mainDcId) {
 	Expects(!_mtp);
 
-	_mtpConfig.mainDcId = mainDcId;
+	_mtpFields.mainDcId = mainDcId;
 }
 
-void Account::setMtpKey(MTP::DcId dcId, const MTP::AuthKey::Data &keyData) {
+void Account::setLegacyMtpKey(std::shared_ptr<MTP::AuthKey> key) {
 	Expects(!_mtp);
+	Expects(key != nullptr);
 
-	_mtpConfig.keys.push_back(std::make_shared<MTP::AuthKey>(
-		MTP::AuthKey::Type::ReadFromFile,
-		dcId,
-		keyData));
+	_mtpFields.keys.push_back(std::move(key));
 }
 
 QByteArray Account::serializeMtpAuthorization() const {
@@ -222,7 +303,8 @@ QByteArray Account::serializeMtpAuthorization() const {
 		};
 
 		auto result = QByteArray();
-		auto size = sizeof(qint32) + sizeof(qint32); // userId + mainDcId
+		// wide tag + userId + mainDcId
+		auto size = 2 * sizeof(quint64) + sizeof(qint32);
 		size += keysSize(keys) + keysSize(keysToDestroy);
 		result.reserve(size);
 		{
@@ -231,12 +313,17 @@ QByteArray Account::serializeMtpAuthorization() const {
 
 			const auto currentUserId = sessionExists()
 				? session().userId()
-				: 0;
-			stream << qint32(currentUserId) << qint32(mainDcId);
+				: UserId();
+			stream
+				<< quint64(kWideIdsTag)
+				<< quint64(currentUserId.bare)
+				<< qint32(mainDcId);
 			writeKeys(stream, keys);
 			writeKeys(stream, keysToDestroy);
 
-			DEBUG_LOG(("MTP Info: Keys written, userId: %1, dcId: %2").arg(currentUserId).arg(mainDcId));
+			DEBUG_LOG(("MTP Info: Keys written, userId: %1, dcId: %2"
+				).arg(currentUserId.bare
+				).arg(mainDcId));
 		}
 		return result;
 	};
@@ -247,9 +334,9 @@ QByteArray Account::serializeMtpAuthorization() const {
 			: MTP::AuthKeysList();
 		return serialize(_mtp->mainDcId(), keys, keysToDestroy);
 	}
-	const auto &keys = _mtpConfig.keys;
+	const auto &keys = _mtpFields.keys;
 	const auto &keysToDestroy = _mtpKeysToDestroy;
-	return serialize(_mtpConfig.mainDcId, keys, keysToDestroy);
+	return serialize(_mtpFields.mainDcId, keys, keysToDestroy);
 }
 
 void Account::setSessionUserId(UserId userId) {
@@ -259,7 +346,7 @@ void Account::setSessionUserId(UserId userId) {
 }
 
 void Account::setSessionFromStorage(
-		std::unique_ptr<Settings> data,
+		std::unique_ptr<SessionSettings> data,
 		QByteArray &&selfSerialized,
 		int32 selfStreamVersion) {
 	Expects(!sessionExists());
@@ -267,16 +354,18 @@ void Account::setSessionFromStorage(
 	DEBUG_LOG(("sessionUserSerialized set: %1"
 		).arg(selfSerialized.size()));
 
-	_storedSettings = std::move(data);
+	_storedSessionSettings = std::move(data);
 	_sessionUserSerialized = std::move(selfSerialized);
 	_sessionUserStreamVersion = selfStreamVersion;
 }
 
-Settings *Account::getSessionSettings() {
+SessionSettings *Account::getSessionSettings() {
 	if (_sessionUserId) {
-		return _storedSettings ? _storedSettings.get() : nullptr;
-	} else if (sessionExists()) {
-		return &session().settings();
+		return _storedSessionSettings
+			? _storedSessionSettings.get()
+			: nullptr;
+	} else if (const auto session = maybeSession()) {
+		return &session->settings();
 	}
 	return nullptr;
 }
@@ -287,8 +376,18 @@ void Account::setMtpAuthorization(const QByteArray &serialized) {
 	QDataStream stream(serialized);
 	stream.setVersion(QDataStream::Qt_5_1);
 
-	auto userId = Serialize::read<qint32>(stream);
-	auto mainDcId = Serialize::read<qint32>(stream);
+	auto legacyUserId = Serialize::read<qint32>(stream);
+	auto legacyMainDcId = Serialize::read<qint32>(stream);
+	auto userId = quint64();
+	auto mainDcId = qint32();
+	if (((uint64(legacyUserId) << 32) | uint64(legacyMainDcId))
+		== kWideIdsTag) {
+		userId = Serialize::read<quint64>(stream);
+		mainDcId = Serialize::read<qint32>(stream);
+	} else {
+		userId = legacyUserId;
+		mainDcId = legacyMainDcId;
+	}
 	if (stream.status() != QDataStream::Ok) {
 		LOG(("MTP Error: "
 			"Could not read main fields from mtp authorization."));
@@ -296,9 +395,9 @@ void Account::setMtpAuthorization(const QByteArray &serialized) {
 	}
 
 	setSessionUserId(userId);
-	_mtpConfig.mainDcId = mainDcId;
+	_mtpFields.mainDcId = mainDcId;
 
-	const auto readKeys = [&stream](auto &keys) {
+	const auto readKeys = [&](auto &keys) {
 		const auto count = Serialize::read<qint32>(stream);
 		if (stream.status() != QDataStream::Ok) {
 			LOG(("MTP Error: "
@@ -317,47 +416,72 @@ void Account::setMtpAuthorization(const QByteArray &serialized) {
 			keys.push_back(std::make_shared<MTP::AuthKey>(MTP::AuthKey::Type::ReadFromFile, dcId, keyData));
 		}
 	};
-	readKeys(_mtpConfig.keys);
+	readKeys(_mtpFields.keys);
 	readKeys(_mtpKeysToDestroy);
 	LOG(("MTP Info: "
 		"read keys, current: %1, to destroy: %2"
-		).arg(_mtpConfig.keys.size()
+		).arg(_mtpFields.keys.size()
 		).arg(_mtpKeysToDestroy.size()));
 }
 
-void Account::startMtp() {
+void Account::startMtp(std::unique_ptr<MTP::Config> config) {
 	Expects(!_mtp);
 
-	auto config = base::take(_mtpConfig);
-	config.deviceModel = Core::App().launcher()->deviceModel();
-	config.systemVersion = Core::App().launcher()->systemVersion();
+	auto fields = base::take(_mtpFields);
+	fields.config = std::move(config);
+	fields.deviceModel = Platform::DeviceModelPretty();
+	fields.systemVersion = Platform::SystemVersionPretty();
 	_mtp = std::make_unique<MTP::Instance>(
-		Core::App().dcOptions(),
 		MTP::Instance::Mode::Normal,
-		std::move(config));
-	_mtp->setUserPhone(cLoggedPhoneNumber());
-	_mtpConfig.mainDcId = _mtp->mainDcId();
+		std::move(fields));
 
-	_mtp->setUpdatesHandler(::rpcDone([=](
-			const mtpPrime *from,
-			const mtpPrime *end) {
-		return checkForUpdates(from, end)
-			|| checkForNewSession(from, end);
-	}));
-	_mtp->setGlobalFailHandler(::rpcFail([=](const RPCError &error) {
-		if (sessionExists()) {
-			crl::on_main(&session(), [=] { logOut(); });
-		}
-		return true;
-	}));
-	_mtp->setStateChangedHandler([](MTP::ShiftedDcId dc, int32 state) {
-		if (dc == MTP::maindc()) {
-			Global::RefConnectionTypeChanged().notify();
+	const auto writingKeys = _mtp->lifetime().make_state<bool>(false);
+	_mtp->writeKeysRequests(
+	) | rpl::filter([=] {
+		return !*writingKeys;
+	}) | rpl::on_next([=] {
+		*writingKeys = true;
+		Ui::PostponeCall(_mtp.get(), [=] {
+			local().writeMtpData();
+			*writingKeys = false;
+		});
+	}, _mtp->lifetime());
+
+	const auto writingConfig = _lifetime.make_state<bool>(false);
+	rpl::merge(
+		_mtp->config().updates(),
+		_mtp->dcOptions().changed() | rpl::to_empty
+	) | rpl::filter([=] {
+		return !*writingConfig;
+	}) | rpl::on_next([=] {
+		*writingConfig = true;
+		Ui::PostponeCall(_mtp.get(), [=] {
+			local().writeMtpConfig();
+			*writingConfig = false;
+		});
+	}, _lifetime);
+
+	_mtpFields.mainDcId = _mtp->mainDcId();
+
+	_mtp->setUpdatesHandler([=](const MTP::Response &message) {
+		checkForUpdates(message) || checkForNewSession(message);
+	});
+	_mtp->setGlobalFailHandler([=](const MTP::Error &, const MTP::Response &) {
+		if (const auto session = maybeSession()) {
+			crl::on_main(session, [=] { logOut(); });
 		}
 	});
-	_mtp->setSessionResetHandler([](MTP::ShiftedDcId shiftedDcId) {
-		if (App::main() && shiftedDcId == MTP::maindc()) {
-			App::main()->getDifference();
+	_mtp->setStateChangedHandler([=](MTP::ShiftedDcId dc, int32 state) {
+		if (dc == _mtp->mainDcId()) {
+			Core::App().settings().proxy().connectionTypeChangesNotify();
+			Core::App().checkProxyRotation(this, state);
+		}
+	});
+	_mtp->setSessionResetHandler([=](MTP::ShiftedDcId shiftedDcId) {
+		if (const auto session = maybeSession()) {
+			if (shiftedDcId == _mtp->mainDcId()) {
+				session->updates().getDifference();
+			}
 		}
 	});
 
@@ -370,30 +494,34 @@ void Account::startMtp() {
 			_sessionUserId,
 			base::take(_sessionUserSerialized),
 			base::take(_sessionUserStreamVersion),
-			_storedSettings ? std::move(*_storedSettings) : Settings());
+			(_storedSessionSettings
+				? std::move(_storedSessionSettings)
+				: std::make_unique<SessionSettings>()));
 	}
-	_storedSettings = nullptr;
+	_storedSessionSettings = nullptr;
 
-	if (sessionExists()) {
-		// Skip all pending self updates so that we won't Local::writeSelf.
-		Notify::peerUpdatedSendDelayed();
+	if (const auto session = maybeSession()) {
+		// Skip all pending self updates so that we won't local().writeSelf.
+		session->changes().sendNotifications();
 	}
 
 	_mtpValue = _mtp.get();
 }
 
-bool Account::checkForUpdates(const mtpPrime *from, const mtpPrime *end) {
+bool Account::checkForUpdates(const MTP::Response &message) {
 	auto updates = MTPUpdates();
-	if (!updates.read(from, end)) {
+	auto from = message.reply.constData();
+	if (!updates.read(from, from + message.reply.size())) {
 		return false;
 	}
 	_mtpUpdates.fire(std::move(updates));
 	return true;
 }
 
-bool Account::checkForNewSession(const mtpPrime *from, const mtpPrime *end) {
+bool Account::checkForNewSession(const MTP::Response &message) {
 	auto newSession = MTPNewSession();
-	if (!newSession.read(from, end)) {
+	auto from = message.reply.constData();
+	if (!newSession.read(from, from + message.reply.size())) {
 		return false;
 	}
 	_mtpNewSessionCreated.fire({});
@@ -413,71 +541,67 @@ void Account::logOut() {
 	}
 }
 
+bool Account::loggingOut() const {
+	return _loggingOut;
+}
+
 void Account::forcedLogOut() {
 	if (sessionExists()) {
-		resetAuthorizationKeys();
 		loggedOut();
+		resetAuthorizationKeys();
 	}
 }
 
 void Account::loggedOut() {
 	_loggingOut = false;
-	if (Global::LocalPasscode()) {
-		Global::SetLocalPasscode(false);
-		Global::RefLocalPasscodeChanged().notify();
-	}
-	Core::App().unlockPasscode();
-	Core::App().unlockTerms();
 	Media::Player::mixer()->stopAndClear();
-	Global::SetVoiceMsgPlaybackDoubled(false);
-	if (const auto window = Core::App().activeWindow()) {
-		window->tempDirDelete(Local::ClearManagerAll);
-		window->setupIntro();
-	}
-	if (sessionExists()) {
-		session().data().clearLocalStorage();
-	}
-	destroySession();
-	Local::reset();
-
+	destroySession(DestroyReason::LoggedOut);
+	Tgw::EraseStorage(this);
+	local().reset();
 	cSetOtherOnline(0);
-	Images::ClearRemote();
 }
 
 void Account::destroyMtpKeys(MTP::AuthKeysList &&keys) {
+	Expects(_mtp != nullptr);
+
 	if (keys.empty()) {
 		return;
 	}
 	if (_mtpForKeysDestroy) {
 		_mtpForKeysDestroy->addKeysForDestroy(std::move(keys));
-		Local::writeMtpData();
+		local().writeMtpData();
 		return;
 	}
-	auto destroyConfig = MTP::Instance::Config();
-	destroyConfig.mainDcId = MTP::Instance::Config::kNoneMainDc;
-	destroyConfig.keys = std::move(keys);
-	destroyConfig.deviceModel = Core::App().launcher()->deviceModel();
-	destroyConfig.systemVersion = Core::App().launcher()->systemVersion();
+	auto destroyFields = MTP::Instance::Fields();
+
+	destroyFields.mainDcId = MTP::Instance::Fields::kNoneMainDc;
+	destroyFields.config = std::make_unique<MTP::Config>(_mtp->config());
+	destroyFields.keys = std::move(keys);
+	destroyFields.deviceModel = Platform::DeviceModelPretty();
+	destroyFields.systemVersion = Platform::SystemVersionPretty();
 	_mtpForKeysDestroy = std::make_unique<MTP::Instance>(
-		Core::App().dcOptions(),
 		MTP::Instance::Mode::KeysDestroyer,
-		std::move(destroyConfig));
+		std::move(destroyFields));
+	_mtpForKeysDestroy->writeKeysRequests(
+	) | rpl::on_next([=] {
+		local().writeMtpData();
+	}, _mtpForKeysDestroy->lifetime());
 	_mtpForKeysDestroy->allKeysDestroyed(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		LOG(("MTP Info: all keys scheduled for destroy are destroyed."));
 		crl::on_main(this, [=] {
 			_mtpForKeysDestroy = nullptr;
-			Local::writeMtpData();
+			local().writeMtpData();
 		});
-	}, _lifetime);
+	}, _mtpForKeysDestroy->lifetime());
 }
 
 void Account::suggestMainDcId(MTP::DcId mainDcId) {
 	Expects(_mtp != nullptr);
 
 	_mtp->suggestMainDcId(mainDcId);
-	if (_mtpConfig.mainDcId != MTP::Instance::Config::kNotSetMainDc) {
-		_mtpConfig.mainDcId = mainDcId;
+	if (_mtpFields.mainDcId != MTP::Instance::Fields::kNotSetMainDc) {
+		_mtpFields.mainDcId = mainDcId;
 	}
 }
 
@@ -496,25 +620,25 @@ void Account::destroyStaleAuthorizationKeys() {
 	}
 }
 
-void Account::configUpdated() {
-	_configUpdates.fire({});
+void Account::setHandleLoginCode(Fn<void(QString)> callback) {
+	_handleLoginCode = std::move(callback);
 }
 
-rpl::producer<> Account::configUpdates() const {
-	return _configUpdates.events();
+void Account::handleLoginCode(const QString &code) const {
+	if (_handleLoginCode) {
+		_handleLoginCode(code);
+	}
 }
 
 void Account::resetAuthorizationKeys() {
-	_mtpValue = nullptr;
-	_mtp = nullptr;
-	startMtp();
-	Local::writeMtpData();
-}
+	Expects(_mtp != nullptr);
 
-void Account::clearMtp() {
-	_mtpValue = nullptr;
-	_mtp = nullptr;
-	_mtpForKeysDestroy = nullptr;
+	{
+		const auto old = base::take(_mtp);
+		auto config = std::make_unique<MTP::Config>(old->config());
+		startMtp(std::move(config));
+	}
+	local().writeMtpData();
 }
 
 } // namespace Main

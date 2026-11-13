@@ -8,142 +8,118 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "data/data_peer.h"
+#include "data/data_chat_participant_status.h"
+#include "data/data_peer_bot_commands.h"
 
-class ChatData : public PeerData {
+enum class ChatAdminRight;
+
+enum class ChatDataFlag {
+	Left = (1 << 0),
+	//Kicked = (1 << 1),
+	Creator = (1 << 2),
+	Deactivated = (1 << 3),
+	Forbidden = (1 << 4),
+	CallActive = (1 << 5),
+	CallNotEmpty = (1 << 6),
+	CanSetUsername = (1 << 7),
+	NoForwards = (1 << 8),
+	HasWelcomeMessages = (1 << 9),
+};
+inline constexpr bool is_flag_type(ChatDataFlag) { return true; };
+using ChatDataFlags = base::flags<ChatDataFlag>;
+
+class ChatData final : public PeerData {
 public:
-	static constexpr auto kEssentialFlags = 0
-		| MTPDchat::Flag::f_creator
-		| MTPDchat::Flag::f_kicked
-		| MTPDchat::Flag::f_left
-		| MTPDchat::Flag::f_deactivated
-		| MTPDchat::Flag::f_migrated_to
-		| MTPDchat::Flag::f_admin_rights
-		| MTPDchat::Flag::f_default_banned_rights;
-	using Flags = Data::Flags<
-		MTPDchat::Flags,
-		kEssentialFlags>;
-
-	static constexpr auto kEssentialFullFlags = 0
-		| MTPDchatFull::Flag::f_can_set_username;
-	using FullFlags = Data::Flags<
-		MTPDchatFull::Flags,
-		kEssentialFullFlags>;
-
-	using AdminRight = ChatAdminRight;
-	using Restriction = ChatRestriction;
-	using AdminRights = ChatAdminRights;
-	using Restrictions = ChatRestrictions;
-	using AdminRightFlags = Data::Flags<AdminRights>;
-	using RestrictionFlags = Data::Flags<Restrictions>;
+	using Flag = ChatDataFlag;
+	using Flags = Data::Flags<ChatDataFlags>;
 
 	ChatData(not_null<Data::Session*> owner, PeerId id);
 
-	void setPhoto(const MTPChatPhoto &photo);
-	void setPhoto(PhotoId photoId, const MTPChatPhoto &photo);
-
 	void setName(const QString &newName);
+	void setPhoto(const MTPChatPhoto &photo);
 
 	void invalidateParticipants();
-	bool noParticipantInfo() const {
+	[[nodiscard]] bool noParticipantInfo() const {
 		return (count > 0 || amIn()) && participants.empty();
 	}
 
-	void setFlags(MTPDchat::Flags which) {
-		_flags.set(which);
-	}
-	void addFlags(MTPDchat::Flags which) {
+	void setFlags(ChatDataFlags which);
+	void addFlags(ChatDataFlags which) {
 		_flags.add(which);
 	}
-	void removeFlags(MTPDchat::Flags which) {
+	void removeFlags(ChatDataFlags which) {
 		_flags.remove(which);
 	}
-	auto flags() const {
+	[[nodiscard]] auto flags() const {
 		return _flags.current();
 	}
-	auto flagsValue() const {
+	[[nodiscard]] auto flagsValue() const {
 		return _flags.value();
 	}
 
-	void setFullFlags(MTPDchatFull::Flags which) {
-		_fullFlags.set(which);
-	}
-	void addFullFlags(MTPDchatFull::Flags which) {
-		_fullFlags.add(which);
-	}
-	void removeFullFlags(MTPDchatFull::Flags which) {
-		_fullFlags.remove(which);
-	}
-	auto fullFlags() const {
-		return _fullFlags.current();
-	}
-	auto fullFlagsValue() const {
-		return _fullFlags.value();
-	}
-
-	auto adminRights() const {
+	[[nodiscard]] auto adminRights() const {
 		return _adminRights.current();
 	}
-	auto adminRightsValue() const {
+	[[nodiscard]] auto adminRightsValue() const {
 		return _adminRights.value();
 	}
-	void setAdminRights(const MTPChatAdminRights &rights);
-	bool hasAdminRights() const {
+	void setAdminRights(ChatAdminRights rights);
+	[[nodiscard]] bool hasAdminRights() const {
 		return (adminRights() != 0);
 	}
 
-	auto defaultRestrictions() const {
+	[[nodiscard]] auto defaultRestrictions() const {
 		return _defaultRestrictions.current();
 	}
-	auto defaultRestrictionsValue() const {
+	[[nodiscard]] auto defaultRestrictionsValue() const {
 		return _defaultRestrictions.value();
 	}
-	void setDefaultRestrictions(const MTPChatBannedRights &rights);
+	void setDefaultRestrictions(ChatRestrictions rights);
 
-	bool isForbidden() const {
-		return flags() & MTPDchat_ClientFlag::f_forbidden;
+	[[nodiscard]] bool isForbidden() const {
+		return flags() & Flag::Forbidden;
 	}
-	bool amIn() const {
-		return !isForbidden()
-			&& !isDeactivated()
-			&& !haveLeft()
-			&& !wasKicked();
+	[[nodiscard]] bool amIn() const {
+		return !isForbidden() && !isDeactivated() && !haveLeft();
 	}
-	bool haveLeft() const {
-		return flags() & MTPDchat::Flag::f_left;
+	[[nodiscard]] bool haveLeft() const {
+		return flags() & ChatDataFlag::Left;
 	}
-	bool wasKicked() const {
-		return flags() & MTPDchat::Flag::f_kicked;
+	[[nodiscard]] bool amCreator() const {
+		return flags() & ChatDataFlag::Creator;
 	}
-	bool amCreator() const {
-		return flags() & MTPDchat::Flag::f_creator;
+	[[nodiscard]] bool isDeactivated() const {
+		return flags() & ChatDataFlag::Deactivated;
 	}
-	bool isDeactivated() const {
-		return flags() & MTPDchat::Flag::f_deactivated;
+	[[nodiscard]] bool isMigrated() const {
+		return (_migratedTo != nullptr);
 	}
-	bool isMigrated() const {
-		return flags() & MTPDchat::Flag::f_migrated_to;
+	[[nodiscard]] bool hasWelcomeMessages() const {
+		return flags() & ChatDataFlag::HasWelcomeMessages;
 	}
 
-	static AdminRights DefaultAdminRights();
+	[[nodiscard]] ChatAdminRightsInfo defaultAdminRights(
+		not_null<UserData*> user);
 
 	// Like in ChannelData.
-	bool canWrite() const;
-	bool canEditInformation() const;
-	bool canEditPermissions() const;
-	bool canEditUsername() const;
-	bool canEditPreHistoryHidden() const;
-	bool canAddMembers() const;
-	bool canAddAdmins() const;
-	bool canBanMembers() const;
-	bool canSendPolls() const;
-	bool anyoneCanAddMembers() const;
+	[[nodiscard]] bool allowsForwarding() const;
+	[[nodiscard]] bool canEditInformation() const;
+	[[nodiscard]] bool canEditPermissions() const;
+	[[nodiscard]] bool canEditUsername() const;
+	[[nodiscard]] bool canEditPreHistoryHidden() const;
+	[[nodiscard]] bool canDeleteMessages() const;
+	[[nodiscard]] bool canAddMembers() const;
+	[[nodiscard]] bool canAddAdmins() const;
+	[[nodiscard]] bool canBanMembers() const;
+	[[nodiscard]] bool anyoneCanAddMembers() const;
 
 	void applyEditAdmin(not_null<UserData*> user, bool isAdmin);
 
 	void setInviteLink(const QString &newInviteLink);
-	QString inviteLink() const {
+	[[nodiscard]] QString inviteLink() const {
 		return _inviteLink;
 	}
+	[[nodiscard]] bool canHaveInviteLink() const;
 	void refreshBotStatus();
 
 	enum class UpdateStatus {
@@ -162,9 +138,41 @@ public:
 	ChannelData *getMigrateToChannel() const;
 	void setMigrateToChannel(ChannelData *channel);
 
-	// Still public data members.
-	MTPint inputChat;
+	[[nodiscard]] Data::GroupCall *groupCall() const {
+		return _call.get();
+	}
+	void setGroupCall(
+		const MTPInputGroupCall &call,
+		TimeId scheduleDate = 0,
+		bool rtmp = false);
+	void clearGroupCall();
+	void setGroupCallDefaultJoinAs(PeerId peerId);
+	[[nodiscard]] PeerId groupCallDefaultJoinAs() const;
 
+	void setBotCommands(const std::vector<Data::BotCommands> &commands);
+	[[nodiscard]] const Data::ChatBotCommands &botCommands() const {
+		return _botCommands;
+	}
+
+	[[nodiscard]] int pendingRequestsCount() const {
+		return _pendingRequestsCount;
+	}
+	[[nodiscard]] const std::vector<UserId> &recentRequesters() const {
+		return _recentRequesters;
+	}
+	void setPendingRequestsCount(
+		int count,
+		const QVector<MTPlong> &recentRequesters);
+	void setPendingRequestsCount(
+		int count,
+		std::vector<UserId> recentRequesters);
+
+	void setAllowedReactions(Data::AllowedReactions value);
+	[[nodiscard]] const Data::AllowedReactions &allowedReactions() const;
+
+	[[nodiscard]] MTPlong inputChat() const;
+
+	// Still public data members.
 	int count = 0;
 	TimeId date = 0;
 	UserId creator = 0;
@@ -174,19 +182,27 @@ public:
 	base::flat_set<not_null<UserData*>> admins;
 	std::deque<not_null<UserData*>> lastAuthors;
 	base::flat_set<not_null<PeerData*>> markupSenders;
-	int botStatus = 0; // -1 - no bots, 0 - unknown, 1 - one bot, that sees all history, 2 - other
-//	ImagePtr photoFull;
+	base::flat_map<UserId, QString> memberRanks;
+	Data::BotStatus botStatus = Data::BotStatus::Unknown;
 
 private:
 	Flags _flags;
-	FullFlags _fullFlags;
 	QString _inviteLink;
 
-	RestrictionFlags _defaultRestrictions;
-	AdminRightFlags _adminRights;
+	Data::Flags<ChatRestrictions> _defaultRestrictions;
+	Data::Flags<ChatAdminRights> _adminRights;
 	int _version = 0;
+	int _pendingRequestsCount = 0;
+	std::vector<UserId> _recentRequesters;
+
+	Data::AllowedReactions _allowedReactions;
+
+	std::unique_ptr<Data::GroupCall> _call;
+	PeerId _callDefaultJoinAs = 0;
+	Data::ChatBotCommands _botCommands;
 
 	ChannelData *_migratedTo = nullptr;
+	rpl::lifetime _lifetime;
 
 };
 
@@ -204,6 +220,9 @@ void ApplyChatUpdate(
 void ApplyChatUpdate(
 	not_null<ChatData*> chat,
 	const MTPDupdateChatParticipantAdmin &update);
+void ApplyChatUpdate(
+	not_null<ChatData*> chat,
+	const MTPDupdateChatParticipantRank &update);
 void ApplyChatUpdate(
 	not_null<ChatData*> chat,
 	const MTPDupdateChatDefaultBannedRights &update);

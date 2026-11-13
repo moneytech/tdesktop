@@ -9,18 +9,22 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "export/view/export_view_settings.h"
 #include "export/view/export_view_progress.h"
+#include "export/export_manager.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/separate_panel.h"
 #include "ui/wrap/padding_wrap.h"
-#include "boxes/confirm_box.h"
+#include "mtproto/mtproto_config.h"
+#include "ui/boxes/confirm_box.h"
 #include "lang/lang_keys.h"
-#include "storage/localstorage.h"
+#include "storage/storage_account.h"
+#include "core/application.h"
 #include "core/file_utilities.h"
 #include "main/main_session.h"
 #include "data/data_session.h"
 #include "base/platform/base_platform_info.h"
 #include "base/unixtime.h"
-#include "facades.h"
+#include "base/qt/qt_common_adapters.h"
+#include "boxes/abstract_box.h" // Ui::show().
 #include "styles/style_export.h"
 #include "styles/style_layers.h"
 
@@ -32,22 +36,29 @@ constexpr auto kSaveSettingsTimeout = crl::time(1000);
 
 class SuggestBox : public Ui::BoxContent {
 public:
-	SuggestBox(QWidget*);
+	SuggestBox(QWidget*, not_null<Main::Session*> session);
 
 protected:
 	void prepare() override;
 
+private:
+	const not_null<Main::Session*> _session;
+
 };
 
-SuggestBox::SuggestBox(QWidget*) {
+SuggestBox::SuggestBox(QWidget*, not_null<Main::Session*> session)
+: _session(session) {
 }
 
 void SuggestBox::prepare() {
 	setTitle(tr::lng_export_suggest_title());
 
 	addButton(tr::lng_box_ok(), [=] {
+		const auto session = _session;
 		closeBox();
-		Auth().data().startExport(Local::ReadExportSettings().singlePeer);
+		Core::App().exportManager().start(
+			session,
+			session->local().readExportSettings().singlePeer);
 	});
 	addButton(tr::lng_export_suggest_cancel(), [=] { closeBox(); });
 	setCloseByOutsideClick(false);
@@ -57,7 +68,7 @@ void SuggestBox::prepare() {
 		tr::lng_export_suggest_text(tr::now),
 		st::boxLabel);
 	widthValue(
-	) | rpl::start_with_next([=](int width) {
+	) | rpl::on_next([=](int width) {
 		const auto contentWidth = width
 			- st::boxPadding.left()
 			- st::boxPadding.right();
@@ -65,16 +76,16 @@ void SuggestBox::prepare() {
 		content->moveToLeft(st::boxPadding.left(), 0);
 	}, content->lifetime());
 	content->heightValue(
-	) | rpl::start_with_next([=](int height) {
+	) | rpl::on_next([=](int height) {
 		setDimensions(st::boxWidth, height + st::boxPadding.bottom());
 	}, content->lifetime());
 }
 
 } // namespace
 
-Environment PrepareEnvironment() {
+Environment PrepareEnvironment(not_null<Main::Session*> session) {
 	auto result = Environment();
-	result.internalLinksDomain = Global::InternalLinksDomain();
+	result.internalLinksDomain = session->serverConfig().internalLinksDomain;
 	result.aboutTelegram = tr::lng_export_about_telegram(tr::now).toUtf8();
 	result.aboutContacts = tr::lng_export_about_contacts(tr::now).toUtf8();
 	result.aboutFrequent = tr::lng_export_about_frequent(tr::now).toUtf8();
@@ -85,51 +96,60 @@ Environment PrepareEnvironment() {
 	return result;
 }
 
-QPointer<Ui::BoxContent> SuggestStart() {
-	ClearSuggestStart();
-	return Ui::show(Box<SuggestBox>(), Ui::LayerOption::KeepOther).data();
+base::weak_qptr<Ui::BoxContent> SuggestStart(not_null<Main::Session*> session) {
+	if (Core::App().passcodeLocked()) {
+		return {};
+	}
+	ClearSuggestStart(session);
+	return Ui::show(
+		Box<SuggestBox>(session),
+		Ui::LayerOption::KeepOther).get();
 }
 
-void ClearSuggestStart() {
-	Auth().data().clearExportSuggestion();
+void ClearSuggestStart(not_null<Main::Session*> session) {
+	session->data().clearExportSuggestion();
 
-	auto settings = Local::ReadExportSettings();
+	auto settings = session->local().readExportSettings();
 	if (settings.availableAt) {
 		settings.availableAt = 0;
-		Local::WriteExportSettings(settings);
+		session->local().writeExportSettings(settings);
 	}
 }
 
-bool IsDefaultPath(const QString &path) {
+bool IsDefaultPath(not_null<Main::Session*> session, const QString &path) {
 	const auto check = [](const QString &value) {
 		const auto result = value.endsWith('/')
 			? value.mid(0, value.size() - 1)
 			: value;
 		return Platform::IsWindows() ? result.toLower() : result;
 	};
-	return (check(path) == check(File::DefaultDownloadPath()));
+	return (check(path) == check(File::DefaultDownloadPath(session)));
 }
 
-void ResolveSettings(Settings &settings) {
+void ResolveSettings(not_null<Main::Session*> session, Settings &settings) {
 	if (settings.path.isEmpty()) {
-		settings.path = File::DefaultDownloadPath();
+		settings.path = File::DefaultDownloadPath(session);
 		settings.forceSubPath = true;
 	} else {
-		settings.forceSubPath = IsDefaultPath(settings.path);
+		settings.forceSubPath = IsDefaultPath(session, settings.path);
 	}
 	if (!settings.onlySinglePeer()) {
 		settings.singlePeerFrom = settings.singlePeerTill = 0;
 	}
 }
 
-PanelController::PanelController(not_null<Controller*> process)
-: _process(process)
-, _settings(std::make_unique<Settings>(Local::ReadExportSettings()))
+PanelController::PanelController(
+	not_null<Main::Session*> session,
+	not_null<Controller*> process)
+: _session(session)
+, _process(process)
+, _settings(
+	std::make_unique<Settings>(_session->local().readExportSettings()))
 , _saveSettingsTimer([=] { saveSettings(); }) {
-	ResolveSettings(*_settings);
+	ResolveSettings(session, *_settings);
 
 	_process->state(
-	) | rpl::start_with_next([=](State &&state) {
+	) | rpl::on_next([=](State &&state) {
 		updateState(std::move(state));
 	}, _lifetime);
 }
@@ -138,22 +158,30 @@ PanelController::~PanelController() {
 	if (_saveSettingsTimer.isActive()) {
 		saveSettings();
 	}
-	_panel->destroyLayer();
+	if (_panel) {
+		_panel->hideLayer(anim::type::instant);
+	}
 }
 
 void PanelController::activatePanel() {
-	_panel->showAndActivate();
+	if (_panel) {
+		_panel->showAndActivate();
+	}
 }
 
 void PanelController::createPanel() {
 	const auto singlePeer = _settings->onlySinglePeer();
-	_panel = base::make_unique_q<Ui::SeparatePanel>();
-	_panel->setTitle((singlePeer
+	const auto singleTopic = _settings->onlySingleTopic();
+	_panel = base::make_unique_q<Ui::SeparatePanel>(Ui::SeparatePanelArgs{
+		.onAllSpaces = true,
+	});
+	_panel->setTitle((singleTopic
+		? tr::lng_export_header_topic
+		: singlePeer
 		? tr::lng_export_header_chats
 		: tr::lng_export_title)());
-	_panel->setInnerSize(st::exportPanelSize);
 	_panel->closeRequests(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		LOG(("Export Info: Panel Hide By Close."));
 		_panel->hideGetDuration();
 	}, _panel->lifetime());
@@ -165,6 +193,7 @@ void PanelController::createPanel() {
 void PanelController::showSettings() {
 	auto settings = base::make_unique_q<SettingsWidget>(
 		_panel,
+		_session,
 		*_settings);
 	settings->setShowBoxCallback([=](object_ptr<Ui::BoxContent> box) {
 		_panel->showBox(
@@ -174,21 +203,25 @@ void PanelController::showSettings() {
 	});
 
 	settings->startClicks(
-	) | rpl::start_with_next([=]() {
+	) | rpl::on_next([=]() {
 		showProgress();
-		_process->startExport(*_settings, PrepareEnvironment());
+		_process->startExport(*_settings, PrepareEnvironment(_session));
 	}, settings->lifetime());
 
 	settings->cancelClicks(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		LOG(("Export Info: Panel Hide By Cancel."));
 		_panel->hideGetDuration();
 	}, settings->lifetime());
 
 	settings->changes(
-	) | rpl::start_with_next([=](Settings &&settings) {
+	) | rpl::on_next([=](Settings &&settings) {
 		*_settings = std::move(settings);
 	}, settings->lifetime());
+
+	auto size = st::exportPanelSize;
+	size.setHeight(size.height() + settings->sizeLimitExtraHeight());
+	_panel->setInnerSize(size);
 
 	_panel->showInner(std::move(settings));
 }
@@ -196,11 +229,12 @@ void PanelController::showSettings() {
 void PanelController::showError(const ApiErrorState &error) {
 	LOG(("Export Info: API Error '%1'.").arg(error.data.type()));
 
-	if (error.data.type() == qstr("TAKEOUT_INVALID")) {
+	if (error.data.type() == u"TAKEOUT_INVALID"_q) {
 		showError(tr::lng_export_invalid(tr::now));
-	} else if (error.data.type().startsWith(qstr("TAKEOUT_INIT_DELAY_"))) {
-		const auto seconds = std::max(error.data.type().mid(
-			qstr("TAKEOUT_INIT_DELAY_").size()).toInt(), 1);
+	} else if (error.data.type().startsWith(u"TAKEOUT_INIT_DELAY_"_q)) {
+		const auto seconds = std::max(base::StringViewMid(
+			error.data.type(),
+			u"TAKEOUT_INIT_DELAY_"_q.size()).toInt(), 1);
 		const auto now = QDateTime::currentDateTime();
 		const auto when = now.addSecs(seconds);
 		const auto hours = seconds / 3600;
@@ -208,7 +242,7 @@ void PanelController::showError(const ApiErrorState &error) {
 			if (hours <= 0) {
 				return tr::lng_export_delay_less_than_hour(tr::now);
 			}
-			return tr::lng_export_delay_hours(tr::now, lt_count, hours);
+			return tr::lng_hours(tr::now, lt_count, hours);
 		}();
 		showError(tr::lng_export_delay(
 			tr::now,
@@ -220,7 +254,7 @@ void PanelController::showError(const ApiErrorState &error) {
 		_settings->availableAt = base::unixtime::now() + seconds;
 		_saveSettingsTimer.callOnce(kSaveSettingsTimeout);
 
-		Auth().data().suggestStartExport(_settings->availableAt);
+		_session->data().suggestStartExport(_settings->availableAt);
 	} else {
 		showCriticalError("API Error happened :(\n"
 			+ QString::number(error.data.code()) + ": " + error.data.type()
@@ -242,7 +276,7 @@ void PanelController::showCriticalError(const QString &text) {
 			st::exportErrorLabel),
 		style::margins(0, st::exportPanelSize.height() / 4, 0, 0));
 	container->widthValue(
-	) | rpl::start_with_next([label = container->entity()](int width) {
+	) | rpl::on_next([label = container->entity()](int width) {
 		label->resize(width, label->height());
 	}, container->lifetime());
 
@@ -251,8 +285,8 @@ void PanelController::showCriticalError(const QString &text) {
 }
 
 void PanelController::showError(const QString &text) {
-	auto box = Box<InformBox>(text);
-	const auto weak = Ui::MakeWeak(box.data());
+	auto box = Ui::MakeInformBox(text);
+	const auto weak = base::make_weak(box.data());
 	const auto hidden = _panel->isHidden();
 	_panel->showBox(
 		std::move(box),
@@ -261,7 +295,7 @@ void PanelController::showError(const QString &text) {
 	weak->setCloseByEscape(false);
 	weak->setCloseByOutsideClick(false);
 	weak->boxClosing(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		LOG(("Export Info: Panel Hide By Error: %1.").arg(text));
 		_panel->hideGetDuration();
 	}, weak->lifetime());
@@ -273,24 +307,29 @@ void PanelController::showError(const QString &text) {
 
 void PanelController::showProgress() {
 	_settings->availableAt = 0;
-	ClearSuggestStart();
+	ClearSuggestStart(_session);
 
 	_panel->setTitle(tr::lng_export_progress_title());
 
 	auto progress = base::make_unique_q<ProgressWidget>(
 		_panel.get(),
 		rpl::single(
-			ContentFromState(ProcessingState())
+			ContentFromState(_settings.get(), ProcessingState())
 		) | rpl::then(progressState()));
 
+	progress->skipFileClicks(
+	) | rpl::on_next([=](uint64 randomId) {
+		_process->skipFile(randomId);
+	}, progress->lifetime());
+
 	progress->cancelClicks(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		stopWithConfirmation();
 	}, progress->lifetime());
 
 	progress->doneClicks(
-	) | rpl::start_with_next([=] {
-		if (const auto finished = base::get_if<FinishedState>(&_state)) {
+	) | rpl::on_next([=] {
+		if (const auto finished = std::get_if<FinishedState>(&_state)) {
 			File::ShowInFolder(finished->path);
 			LOG(("Export Info: Panel Hide By Done: %1."
 				).arg(finished->path));
@@ -302,8 +341,8 @@ void PanelController::showProgress() {
 	_panel->setHideOnDeactivate(true);
 }
 
-void PanelController::stopWithConfirmation(FnMut<void()> callback) {
-	if (!_state.is<ProcessingState>()) {
+void PanelController::stopWithConfirmation(Fn<void()> callback) {
+	if (!v::is<ProcessingState>(_state)) {
 		LOG(("Export Info: Stop Panel Without Confirmation."));
 		stopExport();
 		if (callback) {
@@ -322,11 +361,12 @@ void PanelController::stopWithConfirmation(FnMut<void()> callback) {
 	};
 	const auto hidden = _panel->isHidden();
 	const auto old = _confirmStopBox;
-	auto box = Box<ConfirmBox>(
-		tr::lng_export_sure_stop(tr::now),
-		tr::lng_export_stop(tr::now),
-		st::attentionBoxButton,
-		std::move(stop));
+	auto box = Ui::MakeConfirmBox({
+		.text = tr::lng_export_sure_stop(),
+		.confirmed = std::move(stop),
+		.confirmText = tr::lng_export_stop(),
+		.confirmStyle = &st::attentionBoxButton,
+	});
 	_confirmStopBox = box.data();
 	_panel->showBox(
 		std::move(box),
@@ -351,7 +391,7 @@ rpl::producer<> PanelController::stopRequests() const {
 	return _panelCloseEvents.events(
 	) | rpl::flatten_latest(
 	) | rpl::filter([=] {
-		return !_state.is<ProcessingState>() || _stopRequested;
+		return !v::is<ProcessingState>(_state) || _stopRequested;
 	});
 }
 
@@ -360,21 +400,21 @@ void PanelController::fillParams(const PasswordCheckState &state) {
 }
 
 void PanelController::updateState(State &&state) {
-	if (const auto start = base::get_if<PasswordCheckState>(&state)) {
+	if (const auto start = std::get_if<PasswordCheckState>(&state)) {
 		fillParams(*start);
 	}
 	if (!_panel) {
 		createPanel();
 	}
 	_state = std::move(state);
-	if (const auto apiError = base::get_if<ApiErrorState>(&_state)) {
+	if (const auto apiError = std::get_if<ApiErrorState>(&_state)) {
 		showError(*apiError);
-	} else if (const auto error = base::get_if<OutputErrorState>(&_state)) {
+	} else if (const auto error = std::get_if<OutputErrorState>(&_state)) {
 		showError(*error);
-	} else if (_state.is<FinishedState>()) {
+	} else if (v::is<FinishedState>(_state)) {
 		_panel->setTitle(tr::lng_export_title());
 		_panel->setHideOnDeactivate(false);
-	} else if (_state.is<CancelledState>()) {
+	} else if (v::is<CancelledState>(_state)) {
 		LOG(("Export Info: Stop Panel After Cancel."));
 		stopExport();
 	}
@@ -388,10 +428,10 @@ void PanelController::saveSettings() const {
 		return Platform::IsWindows() ? result.toLower() : result;
 	};
 	auto settings = *_settings;
-	if (check(settings.path) == check(File::DefaultDownloadPath())) {
+	if (check(settings.path) == check(File::DefaultDownloadPath(_session))) {
 		settings.path = QString();
 	}
-	Local::WriteExportSettings(settings);
+	_session->local().writeExportSettings(settings);
 }
 
 } // namespace View

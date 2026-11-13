@@ -23,16 +23,18 @@ namespace Storage {
 class StreamedFileDownloader final : public FileLoader {
 public:
 	StreamedFileDownloader(
+		not_null<Main::Session*> session,
+
 		uint64 objectId,
 		MTP::DcId dcId,
 		Data::FileOrigin origin,
 		Cache::Key cacheKey,
-		MediaKey fileLocationKey,
+		std::optional<MediaKey> fileLocationKey,
 		std::shared_ptr<Media::Streaming::Reader> reader,
 
 		// For FileLoader
 		const QString &toFile,
-		int32 size,
+		int64 size,
 		LocationType locationType,
 		LoadToCacheSetting toCache,
 		LoadFromCloudSetting fromCloud,
@@ -43,7 +45,7 @@ public:
 	uint64 objId() const override;
 	Data::FileOrigin fileOrigin() const override;
 
-	QByteArray readLoadedPart(int offset);
+	QByteArray readLoadedPart(int64 offset);
 
 private:
 	void startLoading() override;
@@ -58,7 +60,7 @@ private:
 	uint64 _objectId = 0;
 	Data::FileOrigin _origin;
 	Cache::Key _cacheKey;
-	MediaKey _fileLocationKey;
+	std::optional<MediaKey> _fileLocationKey;
 	std::shared_ptr<Media::Streaming::Reader> _reader;
 
 	std::vector<bool> _partIsSaved; // vector<bool> :D

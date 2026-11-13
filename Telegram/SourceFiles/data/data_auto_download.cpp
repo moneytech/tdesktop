@@ -10,8 +10,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_peer.h"
 #include "data/data_photo.h"
 #include "data/data_document.h"
-#include "ui/image/image_source.h"
-#include "ui/image/image.h"
 
 #include <QtCore/QBuffer>
 
@@ -19,14 +17,15 @@ namespace Data {
 namespace AutoDownload {
 namespace {
 
-constexpr auto kDefaultMaxSize = 8 * 1024 * 1024;
-constexpr auto kDefaultAutoPlaySize = 50 * 1024 * 1024;
+constexpr auto kDefaultMaxSize = 8 * int64(1024 * 1024);
+constexpr auto kDefaultAutoPlaySize = 50 * int64(1024 * 1024);
 constexpr auto kVersion1 = char(1);
-constexpr auto kVersion = char(2);
+constexpr auto kVersion2 = char(2);
+constexpr auto kVersion = char(3);
 
 template <typename Enum>
 auto enums_view(int from, int till) {
-	using namespace ranges::view;
+	using namespace ranges::views;
 	return ints(from, till) | transform([](int index) {
 		return static_cast<Enum>(index);
 	});
@@ -35,22 +34,6 @@ auto enums_view(int from, int till) {
 template <typename Enum>
 auto enums_view(int till) {
 	return enums_view<Enum>(0, till);
-}
-
-void SetDefaultsForSource(Full &data, Source source) {
-	data.setBytesLimit(source, Type::Photo, kDefaultMaxSize);
-	data.setBytesLimit(source, Type::VoiceMessage, kDefaultMaxSize);
-	data.setBytesLimit(
-		source,
-		Type::AutoPlayVideoMessage,
-		kDefaultAutoPlaySize);
-	data.setBytesLimit(source, Type::AutoPlayGIF, kDefaultAutoPlaySize);
-	const auto channelsFileLimit = (source == Source::Channel)
-		? 0
-		: kDefaultMaxSize;
-	data.setBytesLimit(source, Type::File, channelsFileLimit);
-	data.setBytesLimit(source, Type::AutoPlayVideo, kDefaultAutoPlaySize);
-	data.setBytesLimit(source, Type::Music, channelsFileLimit);
 }
 
 const Full &Defaults() {
@@ -82,28 +65,80 @@ Type AutoPlayTypeFromDocument(not_null<DocumentData*> document) {
 		: Type::AutoPlayGIF;
 }
 
+[[nodiscard]] int64 ForceAllowLimit(
+		const Full &data,
+		Source source,
+		Type type) {
+	const auto user = data.bytesLimit(source, type);
+	return (user > 0) ? user : Defaults().bytesLimit(source, type);
+}
+
+[[nodiscard]] bool ForceAllowed(
+		const Full &data,
+		Source source,
+		Type type,
+		int64 fileSize) {
+	if (ranges::find(kStreamedTypes, type) != end(kStreamedTypes)) {
+		return false;
+	}
+	const auto limit = ForceAllowLimit(data, source, type);
+	return (limit > 0) && (fileSize <= limit);
+}
+
 } // namespace
 
-void Single::setBytesLimit(int bytesLimit) {
+void SetDefaultsForSource(Full &data, Source source) {
+	data.setBytesLimit(source, Type::Photo, kDefaultMaxSize);
+	data.setBytesLimit(source, Type::VoiceMessage, kDefaultMaxSize);
+	data.setBytesLimit(
+		source,
+		Type::AutoPlayVideoMessage,
+		kDefaultAutoPlaySize);
+	data.setBytesLimit(source, Type::AutoPlayGIF, kDefaultAutoPlaySize);
+	const auto channelsFileLimit = (source == Source::Channel)
+		? 0
+		: kDefaultMaxSize;
+	data.setBytesLimit(source, Type::File, channelsFileLimit);
+	data.setBytesLimit(source, Type::AutoPlayVideo, kDefaultAutoPlaySize);
+	data.setBytesLimit(source, Type::Music, channelsFileLimit);
+}
+
+void SetDisabledForSource(Full &data, Source source) {
+	for (const auto type : enums_view<Type>(kTypesCount)) {
+		data.setBytesLimit(source, type, 0);
+	}
+}
+
+bool HasEnabledTypes(const Full &data, Source source) {
+	return ranges::any_of(enums_view<Type>(kTypesCount), [&](Type type) {
+		return (ranges::find(kStreamedTypes, type) == end(kStreamedTypes))
+			&& (data.bytesLimit(source, type) > 0);
+	});
+}
+
+void Single::setBytesLimit(int64 bytesLimit) {
 	Expects(bytesLimit >= 0 && bytesLimit <= kMaxBytesLimit);
 
-	_limit = bytesLimit;
+	_limit = int32(uint32(bytesLimit));
+
+	Ensures(hasValue());
 }
 
 bool Single::hasValue() const {
-	return (_limit >= 0);
+	return (_limit != -1);
 }
 
-bool Single::shouldDownload(int fileSize) const {
+bool Single::shouldDownload(int64 fileSize) const {
 	Expects(hasValue());
 
-	return (_limit > 0) && (fileSize <= _limit);
+	const auto realLimit = bytesLimit();
+	return (realLimit > 0) && (fileSize <= realLimit);
 }
 
-int Single::bytesLimit() const {
+int64 Single::bytesLimit() const {
 	Expects(hasValue());
 
-	return _limit;
+	return uint32(_limit);
 }
 
 qint32 Single::serialize() const {
@@ -111,7 +146,8 @@ qint32 Single::serialize() const {
 }
 
 bool Single::setFromSerialized(qint32 serialized) {
-	if (serialized < -1 || serialized > kMaxBytesLimit) {
+	auto realLimit = quint32(serialized);
+	if (serialized != -1 && int64(realLimit) > kMaxBytesLimit) {
 		return false;
 	}
 	_limit = serialized;
@@ -129,7 +165,7 @@ Single &Set::single(Type type) {
 	return const_cast<Single&>(static_cast<const Set*>(this)->single(type));
 }
 
-void Set::setBytesLimit(Type type, int bytesLimit) {
+void Set::setBytesLimit(Type type, int64 bytesLimit) {
 	single(type).setBytesLimit(bytesLimit);
 }
 
@@ -137,11 +173,11 @@ bool Set::hasValue(Type type) const {
 	return single(type).hasValue();
 }
 
-bool Set::shouldDownload(Type type, int fileSize) const {
+bool Set::shouldDownload(Type type, int64 fileSize) const {
 	return single(type).shouldDownload(fileSize);
 }
 
-int Set::bytesLimit(Type type) const {
+int64 Set::bytesLimit(Type type) const {
 	return single(type).bytesLimit();
 }
 
@@ -176,11 +212,11 @@ const Set &Full::setOrDefault(Source source, Type type) const {
 	return result;
 }
 
-void Full::setBytesLimit(Source source, Type type, int bytesLimit) {
+void Full::setBytesLimit(Source source, Type type, int64 bytesLimit) {
 	set(source).setBytesLimit(type, bytesLimit);
 }
 
-bool Full::shouldDownload(Source source, Type type, int fileSize) const {
+bool Full::shouldDownload(Source source, Type type, int64 fileSize) const {
 	if (ranges::find(kStreamedTypes, type) != end(kStreamedTypes)) {
 		// With streaming we disable autodownload and hide them in Settings.
 		return false;
@@ -188,14 +224,36 @@ bool Full::shouldDownload(Source source, Type type, int fileSize) const {
 	return setOrDefault(source, type).shouldDownload(type, fileSize);
 }
 
-int Full::bytesLimit(Source source, Type type) const {
+int64 Full::bytesLimit(Source source, Type type) const {
 	return setOrDefault(source, type).bytesLimit(type);
+}
+
+void Full::setPeerOverride(PeerId peerId, Override value) {
+	if (value == Override::Default) {
+		_peerOverrides.remove(peerId);
+	} else {
+		_peerOverrides[peerId] = value;
+	}
+}
+
+Override Full::peerOverride(PeerId peerId) const {
+	const auto i = _peerOverrides.find(peerId);
+	return (i != end(_peerOverrides)) ? i->second : Override::Default;
+}
+
+void Full::enumeratePeerOverrides(
+		Fn<void(PeerId, Override)> callback) const {
+	for (const auto &[peerId, value] : _peerOverrides) {
+		callback(peerId, value);
+	}
 }
 
 QByteArray Full::serialize() const {
 	auto result = QByteArray();
 	auto size = sizeof(qint8);
 	size += kSourcesCount * kTypesCount * sizeof(qint32);
+	size += sizeof(qint32);
+	size += _peerOverrides.size() * (sizeof(quint64) + sizeof(qint8));
 	result.reserve(size);
 	{
 		auto buffer = QBuffer(&result);
@@ -206,6 +264,12 @@ QByteArray Full::serialize() const {
 			for (const auto type : enums_view<Type>(kTypesCount)) {
 				stream << set(source).serialize(type);
 			}
+		}
+		stream << qint32(_peerOverrides.size());
+		for (const auto &[peerId, override] : _peerOverrides) {
+			stream
+				<< SerializePeerId(peerId)
+				<< qint8(static_cast<char>(override));
 		}
 	}
 	return result;
@@ -221,7 +285,9 @@ bool Full::setFromSerialized(const QByteArray &serialized) {
 	stream >> version;
 	if (stream.status() != QDataStream::Ok) {
 		return false;
-	} else if (version != kVersion && version != kVersion1) {
+	} else if (version != kVersion
+		&& version != kVersion2
+		&& version != kVersion1) {
 		return false;
 	}
 	auto temp = Full();
@@ -243,7 +309,33 @@ bool Full::setFromSerialized(const QByteArray &serialized) {
 			}
 		}
 	}
+	if (version >= kVersion && !stream.atEnd()) {
+		auto count = qint32();
+		stream >> count;
+		if (stream.status() != QDataStream::Ok || count < 0) {
+			return false;
+		}
+		for (auto i = 0; i != count; ++i) {
+			auto serializedPeerId = quint64();
+			auto rawOverride = qint8();
+			stream >> serializedPeerId >> rawOverride;
+			if (stream.status() != QDataStream::Ok) {
+				return false;
+			}
+			const auto value = (rawOverride == qint8(Override::ForceAllow))
+				? Override::ForceAllow
+				: (rawOverride == qint8(Override::ForceDeny))
+				? Override::ForceDeny
+				: Override::Default;
+			if (value != Override::Default) {
+				temp.setPeerOverride(
+					DeserializePeerId(serializedPeerId),
+					value);
+			}
+		}
+	}
 	_data = temp._data;
+	_peerOverrides = std::move(temp._peerOverrides);
 	return true;
 }
 
@@ -261,7 +353,7 @@ bool Should(
 		const Full &data,
 		Source source,
 		not_null<DocumentData*> document) {
-	if (document->sticker()) {
+	if (document->sticker() || document->isGifv()) {
 		return true;
 	} else if (document->isVoiceMessage()
 		|| document->isVideoMessage()
@@ -276,6 +368,27 @@ bool Should(
 		const Full &data,
 		not_null<PeerData*> peer,
 		not_null<DocumentData*> document) {
+	if (document->sticker()) {
+		return true;
+	}
+	const auto override = data.peerOverride(peer->id);
+	if (override == Override::ForceDeny) {
+		return false;
+	} else if (document->isGifv()) {
+		return true;
+	} else if (override == Override::ForceAllow) {
+		if (document->isVoiceMessage()
+			|| document->isVideoMessage()
+			|| document->isSong()
+			|| document->isVideoFile()) {
+			return false;
+		}
+		return ForceAllowed(
+			data,
+			SourceFromPeer(peer),
+			Type::File,
+			document->size);
+	}
 	return Should(data, SourceFromPeer(peer), document);
 }
 
@@ -285,7 +398,6 @@ bool Should(
 	if (document->sticker()) {
 		return true;
 	}
-	const auto size = document->size;
 	return Should(data, Source::User, document)
 		|| Should(data, Source::Group, document)
 		|| Should(data, Source::Channel, document);
@@ -294,21 +406,67 @@ bool Should(
 bool Should(
 		const Full &data,
 		not_null<PeerData*> peer,
-		not_null<Images::Source*> image) {
+		not_null<PhotoData*> photo) {
+	const auto override = data.peerOverride(peer->id);
+	if (override == Override::ForceDeny) {
+		return false;
+	} else if (override == Override::ForceAllow) {
+		return ForceAllowed(
+			data,
+			SourceFromPeer(peer),
+			Type::Photo,
+			photo->imageByteSize(PhotoSize::Large));
+	}
 	return data.shouldDownload(
 		SourceFromPeer(peer),
 		Type::Photo,
-		image->bytesSize());
+		photo->imageByteSize(PhotoSize::Large));
 }
 
 bool ShouldAutoPlay(
 		const Full &data,
 		not_null<PeerData*> peer,
 		not_null<DocumentData*> document) {
+	if (document->sticker()) {
+		return true;
+	}
+	const auto override = data.peerOverride(peer->id);
+	if (override == Override::ForceDeny) {
+		return false;
+	} else if (override == Override::ForceAllow) {
+		return ForceAllowed(
+			data,
+			SourceFromPeer(peer),
+			AutoPlayTypeFromDocument(document),
+			document->size);
+	}
 	return data.shouldDownload(
 		SourceFromPeer(peer),
 		AutoPlayTypeFromDocument(document),
 		document->size);
+}
+
+bool ShouldAutoPlay(
+		const Full &data,
+		not_null<PeerData*> peer,
+		not_null<PhotoData*> photo) {
+	if (!photo->hasVideo()) {
+		return false;
+	}
+	const auto override = data.peerOverride(peer->id);
+	if (override == Override::ForceDeny) {
+		return false;
+	}
+	const auto source = SourceFromPeer(peer);
+	const auto size = photo->videoByteSize(PhotoSize::Large);
+	if (override == Override::ForceAllow) {
+		return ForceAllowed(data, source, Type::AutoPlayGIF, size)
+			|| ForceAllowed(data, source, Type::AutoPlayVideo, size)
+			|| ForceAllowed(data, source, Type::AutoPlayVideoMessage, size);
+	}
+	return data.shouldDownload(source, Type::AutoPlayGIF, size)
+		|| data.shouldDownload(source, Type::AutoPlayVideo, size)
+		|| data.shouldDownload(source, Type::AutoPlayVideoMessage, size);
 }
 
 Full WithDisabledAutoPlay(const Full &data) {
@@ -317,6 +475,15 @@ Full WithDisabledAutoPlay(const Full &data) {
 		for (const auto type : kAutoPlayTypes) {
 			result.setBytesLimit(source, type, 0);
 		}
+	}
+	auto toClear = std::vector<PeerId>();
+	data.enumeratePeerOverrides([&](PeerId id, Override value) {
+		if (value == Override::ForceAllow) {
+			toClear.push_back(id);
+		}
+	});
+	for (const auto id : toClear) {
+		result.setPeerOverride(id, Override::Default);
 	}
 	return result;
 }

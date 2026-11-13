@@ -7,12 +7,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "media/player/media_player_float.h"
 
-#include <rpl/merge.h>
 #include "data/data_document.h"
 #include "data/data_session.h"
-#include "data/data_media_types.h"
 #include "history/view/media/history_view_media.h"
 #include "history/history_item.h"
+#include "history/history.h"
 #include "history/view/history_view_element.h"
 #include "media/audio/media_audio.h"
 #include "media/streaming/media_streaming_instance.h"
@@ -20,28 +19,82 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "media/player/media_player_instance.h"
 #include "window/window_session_controller.h"
 #include "window/section_widget.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 #include "main/main_session.h"
-#include "facades.h"
-#include "app.h"
+#include "main/main_account.h"
+#include "ui/painter.h"
+#include "ui/ui_utility.h"
 #include "styles/style_media_player.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 #include <QtWidgets/QApplication>
 
 namespace Media {
 namespace Player {
 
+using DoubleClickedCallback = Fn<void(not_null<const HistoryItem*>)>;
+
+RoundPainter::RoundPainter(not_null<HistoryItem*> item)
+: _item(item) {
+}
+
+bool RoundPainter::fillFrame(const QSize &size) {
+	auto creating = _frame.isNull();
+	const auto ratio = style::DevicePixelRatio();
+	if (creating) {
+		_frame = QImage(
+			size * ratio,
+			QImage::Format_ARGB32_Premultiplied);
+		_frame.setDevicePixelRatio(ratio);
+	}
+	auto frameInner = [&] {
+		return QRect(QPoint(), _frame.size() / ratio);
+	};
+	if (const auto streamed = instance()->roundVideoStreamed(_item)) {
+		auto request = Streaming::FrameRequest::NonStrict();
+		request.outer = request.resize = _frame.size();
+		if (_roundingMask.size() != request.outer) {
+			_roundingMask = Images::EllipseMask(frameInner().size());
+		}
+		request.mask = _roundingMask;
+		auto frame = streamed->frame(request);
+		if (!frame.isNull()) {
+			_frame.fill(Qt::transparent);
+
+			auto p = QPainter(&_frame);
+			PainterHighQualityEnabler hq(p);
+			p.drawImage(frameInner(), frame);
+			return true;
+		}
+	}
+	if (creating) {
+		_frame.fill(Qt::transparent);
+
+		auto p = QPainter(&_frame);
+		PainterHighQualityEnabler hq(p);
+		p.setPen(Qt::NoPen);
+		p.setBrush(st::imageBg);
+		p.drawEllipse(frameInner());
+	}
+	return false;
+}
+
+const QImage &RoundPainter::frame() const {
+	return _frame;
+}
+
 Float::Float(
 	QWidget *parent,
-	not_null<Window::SessionController*> controller,
 	not_null<HistoryItem*> item,
 	Fn<void(bool visible)> toggleCallback,
-	Fn<void(bool closed)> draggedCallback)
+	Fn<void(bool closed)> draggedCallback,
+	DoubleClickedCallback doubleClickedCallback)
 : RpWidget(parent)
-, _controller(controller)
 , _item(item)
 , _toggleCallback(std::move(toggleCallback))
-, _draggedCallback(std::move(draggedCallback)) {
+, _draggedCallback(std::move(draggedCallback))
+, _doubleClickedCallback(std::move(doubleClickedCallback)) {
 	auto media = _item->media();
 	Assert(media != nullptr);
 
@@ -53,20 +106,26 @@ Float::Float(
 	auto size = 2 * margin + st::mediaPlayerFloatSize;
 	resize(size, size);
 
+	_roundPainter = std::make_unique<RoundPainter>(item);
 	prepareShadow();
 
-	_controller->session().data().itemRepaintRequest(
-	) | rpl::start_with_next([this](auto item) {
+	document->session().data().itemRepaintRequest(
+	) | rpl::on_next([this](auto item) {
 		if (_item == item) {
 			repaintItem();
 		}
 	}, lifetime());
 
-	_controller->session().data().itemRemoved(
-	) | rpl::start_with_next([this](auto item) {
+	document->session().data().itemRemoved(
+	) | rpl::on_next([this](auto item) {
 		if (_item == item) {
 			detach();
 		}
+	}, lifetime());
+
+	document->session().account().sessionChanges(
+	) | rpl::on_next([=] {
+		detach();
 	}, lifetime());
 
 	setCursor(style::cur_pointer);
@@ -104,7 +163,7 @@ float64 Float::outRatio() const {
 	if (y() + height() > parent.y() + parent.height()) {
 		accumulate_min(min, 1. - (y() + height() - parent.y() - parent.height()) / float64(height()));
 	}
-	return snap(min, 0., 1.);
+	return std::clamp(min, 0., 1.);
 }
 
 void Float::mouseReleaseEvent(QMouseEvent *e) {
@@ -124,10 +183,10 @@ void Float::finishDrag(bool closed) {
 }
 
 void Float::mouseDoubleClickEvent(QMouseEvent *e) {
-	if (_item) {
+	if (_item && _doubleClickedCallback) {
 		// Handle second click.
 		pauseResume();
-		Ui::showPeerHistoryAtItem(_item);
+		_doubleClickedCallback(_item);
 	}
 }
 
@@ -144,6 +203,7 @@ void Float::pauseResume() {
 void Float::detach() {
 	if (_item) {
 		_item = nullptr;
+		_roundPainter = nullptr;
 		if (_toggleCallback) {
 			_toggleCallback(false);
 		}
@@ -151,18 +211,21 @@ void Float::detach() {
 }
 
 void Float::prepareShadow() {
-	auto shadow = QImage(size() * cIntRetinaFactor(), QImage::Format_ARGB32_Premultiplied);
+	const auto ratio = style::DevicePixelRatio();
+	auto shadow = QImage(
+		size() * ratio,
+		QImage::Format_ARGB32_Premultiplied);
 	shadow.fill(Qt::transparent);
-	shadow.setDevicePixelRatio(cRetinaFactor());
+	shadow.setDevicePixelRatio(ratio);
 	{
-		Painter p(&shadow);
+		auto p = QPainter(&shadow);
 		PainterHighQualityEnabler hq(p);
 		p.setPen(Qt::NoPen);
 		p.setBrush(st::shadowFg);
 		auto extend = 2 * st::lineWidth;
 		p.drawEllipse(getInnerRect().marginsAdded(QMargins(extend, extend, extend, extend)));
 	}
-	_shadow = App::pixmapFromImageInPlace(Images::prepareBlur(std::move(shadow)));
+	_shadow = Ui::PixmapFromImage(Images::Blur(std::move(shadow)));
 }
 
 QRect Float::getInnerRect() const {
@@ -171,30 +234,33 @@ QRect Float::getInnerRect() const {
 }
 
 void Float::paintEvent(QPaintEvent *e) {
-	Painter p(this);
+	auto p = QPainter(this);
 
 	p.setOpacity(_opacity);
 	p.drawPixmap(0, 0, _shadow);
 
-	if (!fillFrame() && _toggleCallback) {
+	const auto inner = getInnerRect();
+	if (!(_roundPainter && _roundPainter->fillFrame(inner.size()))
+		&& _toggleCallback) {
 		_toggleCallback(false);
 	}
 
-	auto inner = getInnerRect();
-	p.drawImage(inner.topLeft(), _frame);
+	if (_roundPainter) {
+		p.drawImage(inner.topLeft(), _roundPainter->frame());
+	}
 
 	const auto playback = getPlayback();
 	const auto progress = playback ? playback->value() : 1.;
 	if (progress > 0.) {
 		auto pen = st::historyVideoMessageProgressFg->p;
-		auto was = p.pen();
+		//auto was = p.pen();
 		pen.setWidth(st::radialLine);
 		pen.setCapStyle(Qt::RoundCap);
 		p.setPen(pen);
 		p.setOpacity(_opacity * st::historyVideoMessageProgressOpacity);
 
-		auto from = QuarterArcLength;
-		auto len = -qRound(FullArcLength * progress);
+		auto from = arc::kQuarterLength;
+		auto len = -int(base::SafeRound(arc::kFullLength * progress));
 		auto stepInside = st::radialLine / 2;
 		{
 			PainterHighQualityEnabler hq(p);
@@ -218,43 +284,6 @@ bool Float::hasFrame() const {
 	return (getStreamed() != nullptr);
 }
 
-bool Float::fillFrame() {
-	auto creating = _frame.isNull();
-	if (creating) {
-		_frame = QImage(
-			getInnerRect().size() * cIntRetinaFactor(),
-			QImage::Format_ARGB32_Premultiplied);
-		_frame.setDevicePixelRatio(cRetinaFactor());
-	}
-	auto frameInner = [&] {
-		return QRect(QPoint(), _frame.size() / cIntRetinaFactor());
-	};
-	if (const auto streamed = getStreamed()) {
-		auto request = Streaming::FrameRequest::NonStrict();
-		request.outer = request.resize = _frame.size();
-		request.radius = ImageRoundRadius::Ellipse;
-		auto frame = streamed->frame(request);
-		if (!frame.isNull()) {
-			_frame.fill(Qt::transparent);
-
-			Painter p(&_frame);
-			PainterHighQualityEnabler hq(p);
-			p.drawImage(frameInner(), frame);
-			return true;
-		}
-	}
-	if (creating) {
-		_frame.fill(Qt::transparent);
-
-		Painter p(&_frame);
-		PainterHighQualityEnabler hq(p);
-		p.setPen(Qt::NoPen);
-		p.setBrush(st::imageBg);
-		p.drawEllipse(frameInner());
-	}
-	return false;
-}
-
 void Float::repaintItem() {
 	update();
 	if (hasFrame() && _toggleCallback) {
@@ -266,39 +295,34 @@ void Float::repaintItem() {
 template <typename ToggleCallback, typename DraggedCallback>
 FloatController::Item::Item(
 	not_null<QWidget*> parent,
-	not_null<Window::SessionController*> controller,
 	not_null<HistoryItem*> item,
 	ToggleCallback toggle,
-	DraggedCallback dragged)
+	DraggedCallback dragged,
+	DoubleClickedCallback doubleClicked)
 : animationSide(RectPart::Right)
 , column(Window::Column::Second)
 , corner(RectPart::TopRight)
 , widget(
 	parent,
-	controller,
 	item,
 	[=, toggle = std::move(toggle)](bool visible) {
 		toggle(this, visible);
 	},
 	[=, dragged = std::move(dragged)](bool closed) {
 		dragged(this, closed);
-	}) {
+	},
+	std::move(doubleClicked)) {
 }
 
 FloatController::FloatController(not_null<FloatDelegate*> delegate)
 : _delegate(delegate)
-, _parent(_delegate->floatPlayerWidget())
-, _controller(_delegate->floatPlayerController()) {
-	subscribe(_controller->floatPlayerAreaUpdated(), [=] {
-		checkVisibility();
-	});
-
-	subscribe(Media::Player::instance()->trackChangedNotifier(), [=](
-			AudioMsgId::Type type) {
-		if (type == AudioMsgId::Type::Voice) {
-			checkCurrent();
-		}
-	});
+, _parent(_delegate->floatPlayerWidget()) {
+	Media::Player::instance()->trackChanged(
+	) | rpl::filter([=](AudioMsgId::Type type) {
+		return (type == AudioMsgId::Type::Voice);
+	}) | rpl::on_next([=] {
+		checkCurrent();
+	}, _lifetime);
 
 	startDelegateHandling();
 }
@@ -308,9 +332,6 @@ void FloatController::replaceDelegate(not_null<FloatDelegate*> delegate) {
 
 	_delegate = delegate;
 	_parent = _delegate->floatPlayerWidget();
-
-	// Currently moving floats between windows is not supported.
-	Assert(_controller == _delegate->floatPlayerController());
 
 	startDelegateHandling();
 
@@ -322,50 +343,61 @@ void FloatController::replaceDelegate(not_null<FloatDelegate*> delegate) {
 
 void FloatController::startDelegateHandling() {
 	_delegate->floatPlayerCheckVisibilityRequests(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		checkVisibility();
 	}, _delegateLifetime);
 
 	_delegate->floatPlayerHideAllRequests(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		hideAll();
 	}, _delegateLifetime);
 
 	_delegate->floatPlayerShowVisibleRequests(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		showVisible();
 	}, _delegateLifetime);
 
 	_delegate->floatPlayerRaiseAllRequests(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		raiseAll();
 	}, _delegateLifetime);
 
 	_delegate->floatPlayerUpdatePositionsRequests(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		updatePositions();
 	}, _delegateLifetime);
 
 	_delegate->floatPlayerFilterWheelEventRequests(
-	) | rpl::start_with_next([=](
+	) | rpl::on_next([=](
 			const FloatDelegate::FloatPlayerFilterWheelEventRequest &request) {
 		*request.result = filterWheelEvent(request.object, request.event);
+	}, _delegateLifetime);
+
+	_delegate->floatPlayerAreaUpdates(
+	) | rpl::on_next([=] {
+		checkVisibility();
 	}, _delegateLifetime);
 }
 
 void FloatController::checkCurrent() {
 	const auto state = Media::Player::instance()->current(AudioMsgId::Type::Voice);
+	const auto audio = state.audio();
 	const auto fullId = state.contextId();
 	const auto last = current();
 	if (last
+		&& audio
 		&& !last->widget->detached()
-		&& last->widget->item()->fullId() == fullId) {
+		&& (&last->widget->item()->history()->session() == &audio->session())
+		&& (last->widget->item()->fullId() == fullId)) {
 		return;
 	}
 	if (last) {
 		last->widget->detach();
 	}
-	if (const auto item = _controller->session().data().message(fullId)) {
+	if (!audio) {
+		return;
+	}
+	if (const auto item = audio->session().data().message(fullId)) {
 		if (const auto media = item->media()) {
 			if (const auto document = media->document()) {
 				if (document->isVideoMessage()) {
@@ -379,7 +411,6 @@ void FloatController::checkCurrent() {
 void FloatController::create(not_null<HistoryItem*> item) {
 	_items.push_back(std::make_unique<Item>(
 		_parent,
-		_controller,
 		item,
 		[=](not_null<Item*> instance, bool visible) {
 			instance->hiddenByWidget = !visible;
@@ -387,9 +418,12 @@ void FloatController::create(not_null<HistoryItem*> item) {
 		},
 		[=](not_null<Item*> instance, bool closed) {
 			finishDrag(instance, closed);
+		},
+		[=](not_null<const HistoryItem*> item) {
+			_delegate->floatPlayerDoubleClickEvent(item);
 		}));
-	current()->column = _controller->session().settings().floatPlayerColumn();
-	current()->corner = _controller->session().settings().floatPlayerCorner();
+	current()->column = Core::App().settings().floatPlayerColumn();
+	current()->corner = Core::App().settings().floatPlayerCorner();
 	checkVisibility();
 }
 
@@ -456,7 +490,7 @@ std::optional<bool> FloatController::filterWheelEvent(
 		if (instance->widget == object) {
 			const auto section = _delegate->floatPlayerGetSection(
 				instance->column);
-			return section->wheelEventFromFloatPlayer(event);
+			return section->floatPlayerHandleWheelEvent(event);
 		}
 	}
 	return std::nullopt;
@@ -516,7 +550,7 @@ QPoint FloatController::getHiddenPosition(
 
 QPoint FloatController::getPosition(not_null<Item*> instance) const {
 	const auto section = _delegate->floatPlayerGetSection(instance->column);
-	const auto rect = section->rectForFloatPlayer();
+	const auto rect = section->floatPlayerAvailableRect();
 	auto position = rect.topLeft();
 	if (IsBottomCorner(instance->corner)) {
 		position.setY(position.y() + rect.height() - instance->widget->height());
@@ -562,12 +596,13 @@ void FloatController::updateColumnCorner(QPoint center) {
 
 	auto size = _items.back()->widget->size();
 	auto min = INT_MAX;
-	auto column = _controller->session().settings().floatPlayerColumn();
-	auto corner = _controller->session().settings().floatPlayerCorner();
+	auto column = Core::App().settings().floatPlayerColumn();
+	auto corner = Core::App().settings().floatPlayerCorner();
 	auto checkSection = [&](
-			not_null<Window::AbstractSectionWidget*> widget,
+			not_null<FloatSectionDelegate*> widget,
 			Window::Column widgetColumn) {
-		auto rect = _parent->mapFromGlobal(widget->rectForFloatPlayer());
+		auto rect = _parent->mapFromGlobal(
+			widget->floatPlayerAvailableRect());
 		auto left = rect.x() + (size.width() / 2);
 		auto right = rect.x() + rect.width() - (size.width() / 2);
 		auto top = rect.y() + (size.height() / 2);
@@ -588,13 +623,14 @@ void FloatController::updateColumnCorner(QPoint center) {
 
 	_delegate->floatPlayerEnumerateSections(checkSection);
 
-	if (_controller->session().settings().floatPlayerColumn() != column) {
-		_controller->session().settings().setFloatPlayerColumn(column);
-		_controller->session().saveSettingsDelayed();
+	auto &settings = Core::App().settings();
+	if (settings.floatPlayerColumn() != column) {
+		settings.setFloatPlayerColumn(column);
+		Core::App().saveSettingsDelayed();
 	}
-	if (_controller->session().settings().floatPlayerCorner() != corner) {
-		_controller->session().settings().setFloatPlayerCorner(corner);
-		_controller->session().saveSettingsDelayed();
+	if (settings.floatPlayerCorner() != corner) {
+		settings.setFloatPlayerCorner(corner);
+		Core::App().saveSettingsDelayed();
 	}
 }
 
@@ -606,8 +642,8 @@ void FloatController::finishDrag(not_null<Item*> instance, bool closed) {
 		instance->animationSide = getSide(center);
 	}
 	updateColumnCorner(center);
-	instance->column = _controller->session().settings().floatPlayerColumn();
-	instance->corner = _controller->session().settings().floatPlayerCorner();
+	instance->column = Core::App().settings().floatPlayerColumn();
+	instance->corner = Core::App().settings().floatPlayerCorner();
 
 	instance->draggedAnimation.stop();
 	instance->draggedAnimation.start(
@@ -623,6 +659,7 @@ void FloatController::finishDrag(not_null<Item*> instance, bool closed) {
 			_closeEvents.fire(item->fullId());
 		}
 		instance->widget->detach();
+		Media::Player::instance()->stop(AudioMsgId::Type::Voice);
 	}
 }
 

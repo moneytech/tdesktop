@@ -9,29 +9,33 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "info/common_groups/info_common_groups_inner_widget.h"
 #include "info/info_controller.h"
-#include "ui/search_field_controller.h"
 #include "ui/widgets/scroll_area.h"
 #include "ui/ui_utility.h"
+#include "lang/lang_keys.h"
 #include "data/data_user.h"
 #include "data/data_session.h"
 #include "main/main_session.h"
-#include "styles/style_info.h"
 
 namespace Info {
 namespace CommonGroups {
 
+Memento::Memento(not_null<UserData*> user)
+: ContentMemento(user, nullptr, nullptr, PeerId()) {
+}
+
 Section Memento::section() const {
 	return Section(Section::Type::CommonGroups);
+}
+
+not_null<UserData*> Memento::user() const {
+	return peer()->asUser();
 }
 
 object_ptr<ContentWidget> Memento::createWidget(
 		QWidget *parent,
 		not_null<Controller*> controller,
 		const QRect &geometry) {
-	auto result = object_ptr<Widget>(
-		parent,
-		controller,
-		Auth().data().user(userId()));
+	auto result = object_ptr<Widget>(parent, controller, user());
 	result->setInternalState(geometry, this);
 	return result;
 }
@@ -57,6 +61,10 @@ Widget::Widget(
 		user));
 }
 
+rpl::producer<QString> Widget::title() {
+	return tr::lng_profile_common_groups_section();
+}
+
 not_null<UserData*> Widget::user() const {
 	return _inner->user();
 }
@@ -66,7 +74,7 @@ bool Widget::showInternal(not_null<ContentMemento*> memento) {
 		return false;
 	}
 	if (auto groupsMemento = dynamic_cast<Memento*>(memento.get())) {
-		if (groupsMemento->userId() == user()->bareId()) {
+		if (groupsMemento->user() == user()) {
 			restoreState(groupsMemento);
 			return true;
 		}
@@ -82,8 +90,8 @@ void Widget::setInternalState(
 	restoreState(memento);
 }
 
-std::unique_ptr<ContentMemento> Widget::doCreateMemento() {
-	auto result = std::make_unique<Memento>(user()->bareId());
+std::shared_ptr<ContentMemento> Widget::doCreateMemento() {
+	auto result = std::make_shared<Memento>(user());
 	saveState(result.get());
 	return result;
 }
@@ -95,7 +103,6 @@ void Widget::saveState(not_null<Memento*> memento) {
 
 void Widget::restoreState(not_null<Memento*> memento) {
 	_inner->restoreState(memento);
-	auto scrollTop = memento->scrollTop();
 	scrollTopRestore(memento->scrollTop());
 }
 

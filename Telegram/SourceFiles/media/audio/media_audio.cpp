@@ -11,19 +11,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "media/audio/media_child_ffmpeg_loader.h"
 #include "media/audio/media_audio_loaders.h"
 #include "media/audio/media_audio_track.h"
+#include "media/media_common.h"
 #include "media/streaming/media_streaming_utility.h"
+#include "webrtc/webrtc_environment.h"
 #include "data/data_document.h"
 #include "data/data_file_origin.h"
 #include "data/data_session.h"
-#include "platform/platform_audio.h"
 #include "core/application.h"
+#include "core/core_settings.h"
 #include "main/main_session.h"
-#include "facades.h"
-#include "app.h"
+#include "ui/chat/attach/attach_prepare.h"
 
-#include <AL/al.h>
-#include <AL/alc.h>
-#include <AL/alext.h>
+#include <al.h>
+#include <alc.h>
 
 #include <numeric>
 
@@ -37,20 +37,14 @@ constexpr auto kSuppressRatioSong = 0.05;
 constexpr auto kWaveformCounterBufferSize = 256 * 1024;
 
 QMutex AudioMutex;
-ALCdevice *AudioDevice = nullptr;
-ALCcontext *AudioContext = nullptr;
+auto AudioDevice = (ALCdevice*)nullptr;
+auto AudioContext = (ALCcontext*)nullptr;
+Webrtc::DeviceResolvedId AudioDeviceLastUsedId{
+	.type = Webrtc::DeviceType::Playback
+};
 
 auto VolumeMultiplierAll = 1.;
 auto VolumeMultiplierSong = 1.;
-
-// Value for AL_PITCH_SHIFTER_COARSE_TUNE effect, 0.5 <= speed <= 2.
-int CoarseTuneForSpeed(float64 speed) {
-	Expects(speed >= 0.5 && speed <= 2.);
-
-	constexpr auto kTuneSteps = 12;
-	const auto tuneRatio = std::log(speed) / std::log(2.);
-	return -int(std::round(kTuneSteps * tuneRatio));
-}
 
 } // namespace
 
@@ -58,7 +52,7 @@ namespace Media {
 namespace Audio {
 namespace {
 
-Player::Mixer *MixerInstance = nullptr;
+auto MixerInstance = (Player::Mixer*)nullptr;
 
 // Thread: Any.
 bool ContextErrorHappened() {
@@ -80,44 +74,6 @@ bool PlaybackErrorHappened() {
 	return false;
 }
 
-void EnumeratePlaybackDevices() {
-	auto deviceNames = QStringList();
-	auto devices = alcGetString(nullptr, ALC_ALL_DEVICES_SPECIFIER);
-	Assert(devices != nullptr);
-	while (*devices != 0) {
-		auto deviceName8Bit = QByteArray(devices);
-		auto deviceName = QString::fromLocal8Bit(deviceName8Bit);
-		deviceNames.append(deviceName);
-		devices += deviceName8Bit.size() + 1;
-	}
-	LOG(("Audio Playback Devices: %1").arg(deviceNames.join(';')));
-
-	if (auto device = alcGetString(nullptr, ALC_DEFAULT_ALL_DEVICES_SPECIFIER)) {
-		LOG(("Audio Playback Default Device: %1").arg(QString::fromLocal8Bit(device)));
-	} else {
-		LOG(("Audio Playback Default Device: (null)"));
-	}
-}
-
-void EnumerateCaptureDevices() {
-	auto deviceNames = QStringList();
-	auto devices = alcGetString(nullptr, ALC_CAPTURE_DEVICE_SPECIFIER);
-	Assert(devices != nullptr);
-	while (*devices != 0) {
-		auto deviceName8Bit = QByteArray(devices);
-		auto deviceName = QString::fromLocal8Bit(deviceName8Bit);
-		deviceNames.append(deviceName);
-		devices += deviceName8Bit.size() + 1;
-	}
-	LOG(("Audio Capture Devices: %1").arg(deviceNames.join(';')));
-
-	if (auto device = alcGetString(nullptr, ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER)) {
-		LOG(("Audio Capture Default Device: %1").arg(QString::fromLocal8Bit(device)));
-	} else {
-		LOG(("Audio Capture Default Device: (null)"));
-	}
-}
-
 // Thread: Any. Must be locked: AudioMutex.
 void DestroyPlaybackDevice() {
 	if (AudioContext) {
@@ -136,19 +92,22 @@ void DestroyPlaybackDevice() {
 bool CreatePlaybackDevice() {
 	if (AudioDevice) return true;
 
-	AudioDevice = alcOpenDevice(nullptr);
+	AudioDeviceLastUsedId = Current().playbackDeviceId();
+
+	const auto id = AudioDeviceLastUsedId.isDefault()
+		? std::string()
+		: AudioDeviceLastUsedId.value.toStdString();
+	AudioDevice = alcOpenDevice(id.empty() ? nullptr : id.c_str());
 	if (!AudioDevice) {
-		LOG(("Audio Error: Could not create default playback device, enumerating.."));
-		EnumeratePlaybackDevices();
+		LOG(("Audio Error: Could not create default playback device, refreshing.."));
+		crl::on_main([] {
+			const auto type = Webrtc::DeviceType::Playback;
+			Core::App().mediaDevices().forceRefresh(type);
+		});
 		return false;
 	}
 
-	ALCint attributes[] = {
-		ALC_STEREO_SOURCES, 128,
-		ALC_FREQUENCY, Media::Player::kDefaultFrequency,
-		0
-	};
-	AudioContext = alcCreateContext(AudioDevice, attributes);
+	AudioContext = alcCreateContext(AudioDevice, nullptr);
 	alcMakeContextCurrent(AudioContext);
 	if (ContextErrorHappened()) {
 		DestroyPlaybackDevice();
@@ -172,7 +131,7 @@ void ClosePlaybackDevice(not_null<Instance*> instance) {
 	LOG(("Audio Info: Closing audio playback device."));
 
 	if (Player::mixer()) {
-		Player::mixer()->detachTracks();
+		Player::mixer()->prepareToCloseDevice();
 	}
 	instance->detachTracks();
 
@@ -181,28 +140,21 @@ void ClosePlaybackDevice(not_null<Instance*> instance) {
 
 } // namespace
 
-  // Thread: Main.
+// Thread: Main.
 void Start(not_null<Instance*> instance) {
 	Assert(AudioDevice == nullptr);
 
 	qRegisterMetaType<AudioMsgId>();
 	qRegisterMetaType<VoiceWaveform>();
 
-	auto loglevel = getenv("ALSOFT_LOGLEVEL");
+	const auto loglevel = getenv("ALSOFT_LOGLEVEL");
 	LOG(("OpenAL Logging Level: %1").arg(loglevel ? loglevel : "(not set)"));
 
-	EnumeratePlaybackDevices();
-	EnumerateCaptureDevices();
-
 	MixerInstance = new Player::Mixer(instance);
-
-	Platform::Audio::Init();
 }
 
 // Thread: Main.
 void Finish(not_null<Instance*> instance) {
-	Platform::Audio::DeInit();
-
 	// MixerInstance variable should be modified under AudioMutex protection.
 	// So it is modified in the ~Mixer() destructor after all tracks are cleared.
 	delete MixerInstance;
@@ -229,13 +181,13 @@ bool AttachToDevice() {
 		return false;
 	}
 
-	if (auto m = Player::mixer()) {
+	if (const auto m = Player::mixer()) {
 		m->reattachTracks();
-		emit m->faderOnTimer();
+		m->scheduleFaderCallback();
 	}
 
 	crl::on_main([] {
-		if (!App::quitting()) {
+		if (!Core::Quitting()) {
 			Current().reattachTracks();
 		}
 	});
@@ -244,7 +196,7 @@ bool AttachToDevice() {
 
 void ScheduleDetachFromDeviceSafe() {
 	crl::on_main([] {
-		if (!App::quitting()) {
+		if (!Core::Quitting()) {
 			Current().scheduleDetachFromDevice();
 		}
 	});
@@ -252,7 +204,7 @@ void ScheduleDetachFromDeviceSafe() {
 
 void ScheduleDetachIfNotUsedSafe() {
 	crl::on_main([] {
-		if (!App::quitting()) {
+		if (!Core::Quitting()) {
 			Current().scheduleDetachIfNotUsed();
 		}
 	});
@@ -260,18 +212,19 @@ void ScheduleDetachIfNotUsedSafe() {
 
 void StopDetachIfNotUsedSafe() {
 	crl::on_main([] {
-		if (!App::quitting()) {
+		if (!Core::Quitting()) {
 			Current().stopDetachIfNotUsed();
 		}
 	});
 }
 
 bool SupportsSpeedControl() {
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-	return true;
-#else // TDESKTOP_DISABLE_OPENAL_EFFECTS
-	return false;
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
+	static const auto result = [] {
+		return avfilter_get_by_name("abuffer")
+			&& avfilter_get_by_name("abuffersink")
+			&& avfilter_get_by_name("atempo");
+	}();
+	return result;
 }
 
 } // namespace Audio
@@ -280,28 +233,33 @@ namespace Player {
 namespace {
 
 constexpr auto kVolumeRound = 10000;
-constexpr auto kPreloadSamples = 2LL * kDefaultFrequency; // preload next part if less than 2 seconds remains
+constexpr auto kPreloadSeconds = 2LL; // preload next part if less than 2 seconds remains
 constexpr auto kFadeDuration = crl::time(500);
 constexpr auto kCheckPlaybackPositionTimeout = crl::time(100); // 100ms per check audio position
 constexpr auto kCheckPlaybackPositionDelta = 2400LL; // update position called each 2400 samples
 constexpr auto kCheckFadingTimeout = crl::time(7); // 7ms
 
-base::Observable<AudioMsgId> UpdatedObservable;
+rpl::event_stream<AudioMsgId> UpdatedStream;
 
 } // namespace
 
-base::Observable<AudioMsgId> &Updated() {
-	return UpdatedObservable;
+rpl::producer<AudioMsgId> Updated() {
+	return UpdatedStream.events();
 }
 
 // Thread: Any. Must be locked: AudioMutex.
 float64 ComputeVolume(AudioMsgId::Type type) {
-	switch (type) {
-	case AudioMsgId::Type::Voice: return VolumeMultiplierAll;
-	case AudioMsgId::Type::Song: return VolumeMultiplierSong * mixer()->getSongVolume();
-	case AudioMsgId::Type::Video: return mixer()->getVideoVolume();
-	}
-	return 1.;
+	const auto gain = [&] {
+		switch (type) {
+		case AudioMsgId::Type::Voice:
+			return VolumeMultiplierAll * mixer()->getSongVolume();
+		case AudioMsgId::Type::Song:
+			return VolumeMultiplierSong * mixer()->getSongVolume();
+		case AudioMsgId::Type::Video: return mixer()->getVideoVolume();
+		}
+		return 1.;
+	}();
+	return gain * gain * gain;
 }
 
 Mixer *mixer() {
@@ -316,41 +274,14 @@ void Mixer::Track::createStream(AudioMsgId::Type type) {
 	alSourcei(stream.source, AL_LOOPING, 0);
 	alSourcei(stream.source, AL_SOURCE_RELATIVE, 1);
 	alSourcei(stream.source, AL_ROLLOFF_FACTOR, 0);
+	if (alIsExtensionPresent("AL_SOFT_direct_channels_remix")) {
+		alSourcei(
+			stream.source,
+			alGetEnumValue("AL_DIRECT_CHANNELS_SOFT"),
+			alGetEnumValue("AL_REMIX_UNMATCHED_SOFT"));
+	}
 	alGenBuffers(3, stream.buffers);
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-	if (speedEffect) {
-		applySourceSpeedEffect();
-	} else {
-		removeSourceSpeedEffect();
-	}
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
 }
-
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-void Mixer::Track::removeSourceSpeedEffect() {
-	alSource3i(stream.source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, 0, 0);
-	alSourcei(stream.source, AL_DIRECT_FILTER, AL_FILTER_NULL);
-	alSourcef(stream.source, AL_PITCH, 1.f);
-}
-
-void Mixer::Track::applySourceSpeedEffect() {
-	Expects(speedEffect != nullptr);
-
-	if (!speedEffect->effect || !alIsEffect(speedEffect->effect)) {
-		alGenAuxiliaryEffectSlots(1, &speedEffect->effectSlot);
-		alGenEffects(1, &speedEffect->effect);
-		alGenFilters(1, &speedEffect->filter);
-		alEffecti(speedEffect->effect, AL_EFFECT_TYPE, AL_EFFECT_PITCH_SHIFTER);
-		alFilteri(speedEffect->filter, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
-		alFilterf(speedEffect->filter, AL_LOWPASS_GAIN, 0.f);
-	}
-	alEffecti(speedEffect->effect, AL_PITCH_SHIFTER_COARSE_TUNE, speedEffect->coarseTune);
-	alAuxiliaryEffectSloti(speedEffect->effectSlot, AL_EFFECTSLOT_EFFECT, speedEffect->effect);
-	alSourcef(stream.source, AL_PITCH, speedEffect->speed);
-	alSource3i(stream.source, AL_AUXILIARY_SEND_FILTER, speedEffect->effectSlot, 0, 0);
-	alSourcei(stream.source, AL_DIRECT_FILTER, speedEffect->filter);
-}
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
 
 void Mixer::Track::destroyStream() {
 	if (isStreamCreated()) {
@@ -361,47 +292,36 @@ void Mixer::Track::destroyStream() {
 	for (auto i = 0; i != 3; ++i) {
 		stream.buffers[i] = 0;
 	}
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-	resetSpeedEffect();
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
 }
-
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-void Mixer::Track::resetSpeedEffect() {
-	if (!speedEffect) {
-		return;
-	} else if (speedEffect->effect && alIsEffect(speedEffect->effect)) {
-		if (isStreamCreated()) {
-			removeSourceSpeedEffect();
-		}
-		alDeleteEffects(1, &speedEffect->effect);
-		alDeleteAuxiliaryEffectSlots(1, &speedEffect->effectSlot);
-		alDeleteFilters(1, &speedEffect->filter);
-	}
-	speedEffect->effect = speedEffect->effectSlot = speedEffect->filter = 0;
-}
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
 
 void Mixer::Track::reattach(AudioMsgId::Type type) {
 	if (isStreamCreated()
-		|| (!samplesCount[0] && !state.id.externalPlayId())) {
+		|| (!withSpeed.samples[0] && !state.id.externalPlayId())) {
 		return;
 	}
 
 	createStream(type);
 	for (auto i = 0; i != kBuffersCount; ++i) {
-		if (!samplesCount[i]) {
+		if (!withSpeed.samples[i]) {
 			break;
 		}
-		alBufferData(stream.buffers[i], format, bufferSamples[i].constData(), bufferSamples[i].size(), frequency);
+		alBufferData(
+			stream.buffers[i],
+			format,
+			withSpeed.buffered[i].constData(),
+			withSpeed.buffered[i].size(),
+			state.frequency);
 		alSourceQueueBuffers(stream.source, 1, stream.buffers + i);
 	}
 
-	alSourcei(stream.source, AL_SAMPLE_OFFSET, qMax(state.position - bufferedPosition, 0LL));
+	alSourcei(
+		stream.source,
+		AL_SAMPLE_OFFSET,
+		std::max(withSpeed.position - withSpeed.bufferedPosition, 0LL));
 	if (!IsStopped(state.state)
 		&& (state.state != State::PausedAtEnd)
 		&& !state.waitingForData) {
-		alSourcef(stream.source, AL_GAIN, ComputeVolume(type));
+		alSourcef(stream.source, AL_GAIN, ComputeVolume(type) * volume);
 		alSourcePlay(stream.source);
 		if (IsPaused(state.state)) {
 			// We must always start the source if we want the AL_SAMPLE_OFFSET to be applied.
@@ -422,20 +342,14 @@ void Mixer::Track::clear() {
 	detach();
 
 	state = TrackState();
-	file = FileLocation();
+	file = Core::FileLocation();
 	data = QByteArray();
-	bufferedPosition = 0;
-	bufferedLength = 0;
+	format = 0;
 	loading = false;
 	loaded = false;
-	fadeStartPosition = 0;
-
-	format = 0;
-	frequency = kDefaultFrequency;
-	for (int i = 0; i != kBuffersCount; ++i) {
-		samplesCount[i] = 0;
-		bufferSamples[i] = QByteArray();
-	}
+	waitingForBuffer = false;
+	withSpeed = WithSpeed();
+	speed = 1.;
 
 	setExternalData(nullptr);
 	lastUpdateWhen = 0;
@@ -445,17 +359,9 @@ void Mixer::Track::clear() {
 void Mixer::Track::started() {
 	resetStream();
 
-	bufferedPosition = 0;
-	bufferedLength = 0;
-	loaded = false;
-	fadeStartPosition = 0;
-
 	format = 0;
-	frequency = kDefaultFrequency;
-	for (auto i = 0; i != kBuffersCount; ++i) {
-		samplesCount[i] = 0;
-		bufferSamples[i] = QByteArray();
-	}
+	loaded = false;
+	withSpeed = WithSpeed();
 }
 
 bool Mixer::Track::isStreamCreated() const {
@@ -470,7 +376,7 @@ void Mixer::Track::ensureStreamCreated(AudioMsgId::Type type) {
 
 int Mixer::Track::getNotQueuedBufferIndex() {
 	// See if there are no free buffers right now.
-	while (samplesCount[kBuffersCount - 1] != 0) {
+	while (withSpeed.samples[kBuffersCount - 1] != 0) {
 		// Try to unqueue some buffer.
 		ALint processed = 0;
 		alGetSourcei(stream.source, AL_BUFFERS_PROCESSED, &processed);
@@ -486,17 +392,17 @@ int Mixer::Track::getNotQueuedBufferIndex() {
 		bool found = false;
 		for (auto i = 0; i != kBuffersCount; ++i) {
 			if (stream.buffers[i] == buffer) {
-				auto samplesInBuffer = samplesCount[i];
-				bufferedPosition += samplesInBuffer;
-				bufferedLength -= samplesInBuffer;
+				const auto samplesInBuffer = withSpeed.samples[i];
+				withSpeed.bufferedPosition += samplesInBuffer;
+				withSpeed.bufferedLength -= samplesInBuffer;
 				for (auto j = i + 1; j != kBuffersCount; ++j) {
-					samplesCount[j - 1] = samplesCount[j];
+					withSpeed.samples[j - 1] = withSpeed.samples[j];
 					stream.buffers[j - 1] = stream.buffers[j];
-					bufferSamples[j - 1] = bufferSamples[j];
+					withSpeed.buffered[j - 1] = withSpeed.buffered[j];
 				}
-				samplesCount[kBuffersCount - 1] = 0;
+				withSpeed.samples[kBuffersCount - 1] = 0;
 				stream.buffers[kBuffersCount - 1] = buffer;
-				bufferSamples[kBuffersCount - 1] = QByteArray();
+				withSpeed.buffered[kBuffersCount - 1] = QByteArray();
 				found = true;
 				break;
 			}
@@ -508,7 +414,7 @@ int Mixer::Track::getNotQueuedBufferIndex() {
 	}
 
 	for (auto i = 0; i != kBuffersCount; ++i) {
-		if (!samplesCount[i]) {
+		if (!withSpeed.samples[i]) {
 			return i;
 		}
 	}
@@ -517,29 +423,35 @@ int Mixer::Track::getNotQueuedBufferIndex() {
 
 void Mixer::Track::setExternalData(
 		std::unique_ptr<ExternalSoundData> data) {
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-	changeSpeedEffect(data ? data->speed : 1.);
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
+	nextSpeed = speed = data ? data->speed : 1.;
+	volume = data ? data->volume : 1.;
 	externalData = std::move(data);
 }
 
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
-void Mixer::Track::changeSpeedEffect(float64 speed) {
-	if (speed != 1.) {
-		if (!speedEffect) {
-			speedEffect = std::make_unique<SpeedEffect>();
-		}
-		speedEffect->speed = speed;
-		speedEffect->coarseTune = CoarseTuneForSpeed(speed);
-		if (isStreamCreated()) {
-			applySourceSpeedEffect();
-		}
-	} else if (speedEffect) {
-		resetSpeedEffect();
-		speedEffect = nullptr;
-	}
+void Mixer::Track::updateStatePosition() {
+	state.position = SpeedIndependentPosition(withSpeed.position, speed);
 }
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
+
+void Mixer::Track::updateWithSpeedPosition() {
+	withSpeed.position = SpeedDependentPosition(state.position, speed);
+	withSpeed.fineTunedPosition = withSpeed.position;
+}
+
+int64 Mixer::Track::SpeedIndependentPosition(
+		int64 position,
+		float64 speed) {
+	Expects(speed <= kSpeedMax);
+
+	return int64(base::SafeRound(position * speed));
+}
+
+int64 Mixer::Track::SpeedDependentPosition(
+		int64 position,
+		float64 speed) {
+	Expects(speed >= kSpeedMin);
+
+	return int64(base::SafeRound(position / speed));
+}
 
 void Mixer::Track::resetStream() {
 	if (isStreamCreated()) {
@@ -556,26 +468,34 @@ Mixer::Mixer(not_null<Audio::Instance*> instance)
 , _volumeSong(kVolumeRound)
 , _fader(new Fader(&_faderThread))
 , _loader(new Loaders(&_loaderThread)) {
-	connect(this, SIGNAL(faderOnTimer()), _fader, SLOT(onTimer()), Qt::QueuedConnection);
 	connect(this, SIGNAL(suppressSong()), _fader, SLOT(onSuppressSong()));
 	connect(this, SIGNAL(unsuppressSong()), _fader, SLOT(onUnsuppressSong()));
 	connect(this, SIGNAL(suppressAll(qint64)), _fader, SLOT(onSuppressAll(qint64)));
-	subscribe(Global::RefSongVolumeChanged(), [this] {
-		QMetaObject::invokeMethod(_fader, "onSongVolumeChanged");
-	});
-	subscribe(Global::RefVideoVolumeChanged(), [this] {
-		QMetaObject::invokeMethod(_fader, "onVideoVolumeChanged");
-	});
-	connect(this, SIGNAL(loaderOnStart(const AudioMsgId&, qint64)), _loader, SLOT(onStart(const AudioMsgId&, qint64)));
-	connect(this, SIGNAL(loaderOnCancel(const AudioMsgId&)), _loader, SLOT(onCancel(const AudioMsgId&)));
+
+	Core::App().settings().songVolumeChanges(
+	) | rpl::on_next([=] {
+		InvokeQueued(_fader, [fader = _fader] {
+			fader->songVolumeChanged();
+		});
+	}, _lifetime);
+
+	Core::App().settings().videoVolumeChanges(
+	) | rpl::on_next([=] {
+		InvokeQueued(_fader, [fader = _fader] {
+			fader->videoVolumeChanged();
+		});
+	}, _lifetime);
+
+	connect(this, SIGNAL(loaderOnStart(AudioMsgId,qint64)), _loader, SLOT(onStart(AudioMsgId,qint64)));
+	connect(this, SIGNAL(loaderOnCancel(AudioMsgId)), _loader, SLOT(onCancel(AudioMsgId)), Qt::QueuedConnection);
 	connect(_loader, SIGNAL(needToCheck()), _fader, SLOT(onTimer()));
-	connect(_loader, SIGNAL(error(const AudioMsgId&)), this, SLOT(onError(const AudioMsgId&)));
-	connect(_fader, SIGNAL(needToPreload(const AudioMsgId&)), _loader, SLOT(onLoad(const AudioMsgId&)));
-	connect(_fader, SIGNAL(playPositionUpdated(const AudioMsgId&)), this, SIGNAL(updated(const AudioMsgId&)));
-	connect(_fader, SIGNAL(audioStopped(const AudioMsgId&)), this, SLOT(onStopped(const AudioMsgId&)));
-	connect(_fader, SIGNAL(error(const AudioMsgId&)), this, SLOT(onError(const AudioMsgId&)));
-	connect(this, SIGNAL(stoppedOnError(const AudioMsgId&)), this, SIGNAL(updated(const AudioMsgId&)), Qt::QueuedConnection);
-	connect(this, SIGNAL(updated(const AudioMsgId&)), this, SLOT(onUpdated(const AudioMsgId&)));
+	connect(_loader, SIGNAL(error(AudioMsgId)), this, SLOT(onError(AudioMsgId)));
+	connect(_fader, SIGNAL(needToPreload(AudioMsgId)), _loader, SLOT(onLoad(AudioMsgId)));
+	connect(_fader, SIGNAL(playPositionUpdated(AudioMsgId)), this, SIGNAL(updated(AudioMsgId)));
+	connect(_fader, SIGNAL(audioStopped(AudioMsgId)), this, SLOT(onStopped(AudioMsgId)));
+	connect(_fader, SIGNAL(error(AudioMsgId)), this, SLOT(onError(AudioMsgId)));
+	connect(this, SIGNAL(stoppedOnError(AudioMsgId)), this, SIGNAL(updated(AudioMsgId)), Qt::QueuedConnection);
+	connect(this, SIGNAL(updated(AudioMsgId)), this, SLOT(onUpdated(AudioMsgId)));
 
 	_loaderThread.start();
 	_faderThread.start();
@@ -602,36 +522,46 @@ Mixer::~Mixer() {
 	_loaderThread.wait();
 }
 
+void Mixer::scheduleFaderCallback() {
+	InvokeQueued(_fader, [fader = _fader] {
+		fader->onTimer();
+	});
+}
+
 void Mixer::onUpdated(const AudioMsgId &audio) {
 	if (audio.externalPlayId()) {
 		externalSoundProgress(audio);
 	}
-	Media::Player::Updated().notify(audio);
+	crl::on_main([=] {
+		// We've replaced base::Observable with on_main, because
+		// base::Observable::notify is not syncronous by default.
+		UpdatedStream.fire_copy(audio);
+	});
 }
 
 void Mixer::onError(const AudioMsgId &audio) {
-	emit stoppedOnError(audio);
+	stoppedOnError(audio);
 
 	QMutexLocker lock(&AudioMutex);
 	auto type = audio.type();
 	if (type == AudioMsgId::Type::Voice) {
 		if (auto current = trackForType(type)) {
 			if (current->state.id == audio) {
-				emit unsuppressSong();
+				unsuppressSong();
 			}
 		}
 	}
 }
 
 void Mixer::onStopped(const AudioMsgId &audio) {
-	emit updated(audio);
+	updated(audio);
 
 	QMutexLocker lock(&AudioMutex);
 	auto type = audio.type();
 	if (type == AudioMsgId::Type::Voice) {
 		if (auto current = trackForType(type)) {
 			if (current->state.id == audio) {
-				emit unsuppressSong();
+				unsuppressSong();
 			}
 		}
 	}
@@ -688,7 +618,7 @@ void Mixer::resetFadeStartPosition(AudioMsgId::Type type, int positionInBuffered
 			} else if ((alState == AL_STOPPED)
 				&& (alSampleOffset == 0)
 				&& !internal::CheckAudioDeviceConnected()) {
-				track->fadeStartPosition = track->state.position;
+				track->withSpeed.fadeStartPosition = track->withSpeed.position;
 				return;
 			}
 
@@ -697,17 +627,19 @@ void Mixer::resetFadeStartPosition(AudioMsgId::Type type, int positionInBuffered
 					&& (!IsStopped(track->state.state)
 						|| IsStoppedAtEnd(track->state.state)));
 			positionInBuffered = stoppedAtEnd
-				? track->bufferedLength
+				? track->withSpeed.bufferedLength
 				: alSampleOffset;
 		} else {
 			positionInBuffered = 0;
 		}
 	}
-	auto fullPosition = track->samplesCount[0]
-		? (track->bufferedPosition + positionInBuffered)
-		: track->state.position;
-	track->state.position = fullPosition;
-	track->fadeStartPosition = fullPosition;
+	const auto withSpeedPosition = track->withSpeed.samples[0]
+		? (track->withSpeed.bufferedPosition + positionInBuffered)
+		: track->withSpeed.position;
+	track->withSpeed.fineTunedPosition = withSpeedPosition;
+	track->withSpeed.position = withSpeedPosition;
+	track->withSpeed.fadeStartPosition = withSpeedPosition;
+	track->updateStatePosition();
 }
 
 bool Mixer::fadedStop(AudioMsgId::Type type, bool *fadedStart) {
@@ -741,12 +673,11 @@ void Mixer::play(
 	Expects(externalData != nullptr);
 	Expects(audio.externalPlayId() != 0);
 
-	setSongVolume(Global::SongVolume());
-	setVideoVolume(Global::VideoVolume());
+	setSongVolume(Core::App().settings().songVolume());
+	setVideoVolume(Core::App().settings().videoVolume());
 
 	auto type = audio.type();
 	AudioMsgId stopped;
-	auto notLoadedYet = false;
 	{
 		QMutexLocker lock(&AudioMutex);
 		Audio::AttachToDevice();
@@ -761,8 +692,8 @@ void Mixer::play(
 				stopped = current->state.id;
 			}
 			if (current->state.id) {
-				emit loaderOnCancel(current->state.id);
-				emit faderOnTimer();
+				loaderOnCancel(current->state.id);
+				scheduleFaderCallback();
 			}
 			if (type != AudioMsgId::Type::Video) {
 				auto foundCurrent = currentIndex(type);
@@ -784,46 +715,23 @@ void Mixer::play(
 		current->state.id = audio;
 		current->lastUpdateWhen = 0;
 		current->lastUpdatePosition = 0;
-		if (externalData) {
-			current->setExternalData(std::move(externalData));
-		} else {
-			current->setExternalData(nullptr);
-			current->file = audio.audio()->location(true);
-			current->data = audio.audio()->data();
-			notLoadedYet = (current->file.isEmpty() && current->data.isEmpty());
-		}
-		if (notLoadedYet) {
-			auto newState = (type == AudioMsgId::Type::Song)
-				? State::Stopped
-				: State::StoppedAtError;
-			setStoppedState(current, newState);
-		} else {
-			current->state.position = (positionMs * current->state.frequency)
-				/ 1000LL;
-			current->state.state = current->externalData
-				? State::Paused
-				: fadedStart
-				? State::Starting
-				: State::Playing;
-			current->loading = true;
-			emit loaderOnStart(current->state.id, positionMs);
-			if (type == AudioMsgId::Type::Voice) {
-				emit suppressSong();
-			}
-		}
-	}
-	if (notLoadedYet) {
-		if (type == AudioMsgId::Type::Song || type == AudioMsgId::Type::Video) {
-			DocumentOpenClickHandler::Open(
-				audio.contextId(),
-				audio.audio(),
-				Auth().data().message(audio.contextId()));
-		} else {
-			onError(audio);
+		current->setExternalData(std::move(externalData));
+		current->state.position = (positionMs * current->state.frequency)
+			/ 1000LL;
+		current->updateWithSpeedPosition();
+		current->state.state = current->externalData
+			? State::Paused
+			: fadedStart
+			? State::Starting
+			: State::Playing;
+		current->loading = true;
+		loaderOnStart(current->state.id, positionMs);
+		if (type == AudioMsgId::Type::Voice) {
+			suppressSong();
 		}
 	}
 	if (stopped) {
-		emit updated(stopped);
+		updated(stopped);
 	}
 }
 
@@ -835,14 +743,41 @@ void Mixer::forceToBufferExternal(const AudioMsgId &audioId) {
 	_loader->forceToBufferExternal(audioId);
 }
 
+// Thread: Main. Locks: AudioMutex.
 void Mixer::setSpeedFromExternal(const AudioMsgId &audioId, float64 speed) {
-#ifndef TDESKTOP_DISABLE_OPENAL_EFFECTS
 	QMutexLocker lock(&AudioMutex);
 	const auto track = trackForType(audioId.type());
 	if (track->state.id == audioId) {
-		track->changeSpeedEffect(speed);
+		track->nextSpeed = speed;
+		if (!EqualSpeeds(track->speed, track->nextSpeed)
+			&& !IsStoppedOrStopping(track->state.state)) {
+			track->loading = true;
+			track->loaded = false;
+			InvokeQueued(_loader, [loader = _loader, id = audioId] {
+				loader->onLoad(id);
+			});
+		}
 	}
-#endif // TDESKTOP_DISABLE_OPENAL_EFFECTS
+}
+
+// Thread: Main. Locks: AudioMutex.
+void Mixer::setVolumeFromExternal(
+		const AudioMsgId &audioId,
+		float64 volume) {
+	QMutexLocker lock(&AudioMutex);
+	const auto type = audioId.type();
+	const auto track = trackForType(type);
+	if (!track || track->state.id != audioId || track->volume == volume) {
+		return;
+	}
+	track->volume = volume;
+	if (track->isStreamCreated() && track->state.state == State::Playing) {
+		alSourcef(
+			track->stream.source,
+			AL_GAIN,
+			ComputeVolume(type) * volume);
+		checkCurrentALError(type);
+	}
 }
 
 Streaming::TimePoint Mixer::getExternalSyncTimePoint(
@@ -861,39 +796,25 @@ Streaming::TimePoint Mixer::getExternalSyncTimePoint(
 	return result;
 }
 
-crl::time Mixer::getExternalCorrectedTime(const AudioMsgId &audio, crl::time frameMs, crl::time systemMs) {
-	auto result = frameMs;
-	const auto type = audio.type();
-
-	QMutexLocker lock(&AudioMutex);
-	const auto track = trackForType(type);
-	if (track && track->state.id == audio && track->lastUpdateWhen > 0) {
-		result = static_cast<crl::time>(track->lastUpdatePosition);
-		if (systemMs > track->lastUpdateWhen) {
-			result += (systemMs - track->lastUpdateWhen);
-		}
-	}
-	return result;
-}
-
 void Mixer::externalSoundProgress(const AudioMsgId &audio) {
 	const auto type = audio.type();
 
 	QMutexLocker lock(&AudioMutex);
 	const auto current = trackForType(type);
 	if (current && current->state.length && current->state.frequency) {
-		if (current->state.id == audio && current->state.state == State::Playing) {
+		if (current->state.id == audio
+			&& current->state.state == State::Playing) {
 			current->lastUpdateWhen = crl::now();
-			current->lastUpdatePosition = (current->state.position * 1000ULL) / current->state.frequency;
+			current->lastUpdatePosition = (current->state.position * 1000LL)
+				/ current->state.frequency;
 		}
 	}
 }
 
 bool Mixer::checkCurrentALError(AudioMsgId::Type type) {
-	if (!Audio::PlaybackErrorHappened()) return true;
-
-	const auto data = trackForType(type);
-	if (!data) {
+	if (!Audio::PlaybackErrorHappened()) {
+		return true;
+	} else if (const auto data = trackForType(type)) {
 		setStoppedState(data, State::StoppedAtError);
 		onError(data->state.id);
 	}
@@ -918,7 +839,7 @@ void Mixer::pause(const AudioMsgId &audio, bool fast) {
 			track->state.state = fast ? State::Paused : State::Pausing;
 			resetFadeStartPosition(type);
 			if (type == AudioMsgId::Type::Voice) {
-				emit unsuppressSong();
+				unsuppressSong();
 			}
 		} break;
 
@@ -939,12 +860,12 @@ void Mixer::pause(const AudioMsgId &audio, bool fast) {
 			}
 		}
 
-		emit faderOnTimer();
+		scheduleFaderCallback();
 
 		track->lastUpdateWhen = 0;
 		track->lastUpdatePosition = 0;
 	}
-	if (current) emit updated(current);
+	if (current) updated(current);
 }
 
 void Mixer::resume(const AudioMsgId &audio, bool fast) {
@@ -982,94 +903,35 @@ void Mixer::resume(const AudioMsgId &audio, bool fast) {
 						return;
 					}
 
-					alSourcef(track->stream.source, AL_GAIN, ComputeVolume(type));
+					alSourcef(
+						track->stream.source,
+						AL_GAIN,
+						ComputeVolume(type) * track->volume);
 					if (!checkCurrentALError(type)) return;
 
 					if (state == AL_STOPPED) {
-						alSourcei(track->stream.source, AL_SAMPLE_OFFSET, qMax(track->state.position - track->bufferedPosition, 0LL));
+						alSourcei(
+							track->stream.source,
+							AL_SAMPLE_OFFSET,
+							std::max(
+								track->withSpeed.position
+									- track->withSpeed.bufferedPosition,
+								0LL));
 						if (!checkCurrentALError(type)) return;
 					}
 					alSourcePlay(track->stream.source);
 					if (!checkCurrentALError(type)) return;
 				}
 				if (type == AudioMsgId::Type::Voice) {
-					emit suppressSong();
+					suppressSong();
 				}
 			}
 		} break;
 		}
-		emit faderOnTimer();
+		scheduleFaderCallback();
 	}
-	if (current) emit updated(current);
+	if (current) updated(current);
 }
-//
-// Right now all the music is played in the streaming player.
-//
-//void Mixer::seek(AudioMsgId::Type type, crl::time positionMs) {
-//	QMutexLocker lock(&AudioMutex);
-//
-//	const auto current = trackForType(type);
-//	const auto audio = current->state.id;
-//
-//	Audio::AttachToDevice();
-//	const auto streamCreated = current->isStreamCreated();
-//	const auto position = (positionMs * current->frequency) / 1000LL;
-//	const auto fastSeek = [&] {
-//		const auto loadedStart = current->bufferedPosition;
-//		const auto loadedLength = current->bufferedLength;
-//		const auto skipBack = (current->loaded ? 0 : kDefaultFrequency);
-//		const auto availableEnd = loadedStart + loadedLength - skipBack;
-//		if (position < loadedStart) {
-//			return false;
-//		} else if (position >= availableEnd) {
-//			return false;
-//		} else if (!streamCreated) {
-//			return false;
-//		} else if (IsStoppedOrStopping(current->state.state)) {
-//			return false;
-//		}
-//		return true;
-//	}();
-//	if (fastSeek) {
-//		alSourcei(current->stream.source, AL_SAMPLE_OFFSET, position - current->bufferedPosition);
-//		if (!checkCurrentALError(type)) return;
-//
-//		alSourcef(current->stream.source, AL_GAIN, ComputeVolume(type));
-//		if (!checkCurrentALError(type)) return;
-//
-//		resetFadeStartPosition(type, position - current->bufferedPosition);
-//	} else {
-//		setStoppedState(current);
-//	}
-//	switch (current->state.state) {
-//	case State::Pausing:
-//	case State::Paused:
-//	case State::PausedAtEnd: {
-//		if (current->state.state == State::PausedAtEnd) {
-//			current->state.state = State::Paused;
-//		}
-//		lock.unlock();
-//		return resume(audio, true);
-//	} break;
-//	case State::Starting:
-//	case State::Resuming:
-//	case State::Playing: {
-//		current->state.state = State::Pausing;
-//		resetFadeStartPosition(type);
-//		if (type == AudioMsgId::Type::Voice) {
-//			emit unsuppressSong();
-//		}
-//	} break;
-//	case State::Stopping:
-//	case State::Stopped:
-//	case State::StoppedAtEnd:
-//	case State::StoppedAtError:
-//	case State::StoppedAtStart: {
-//		lock.unlock();
-//	} return play(audio, positionMs);
-//	}
-//	emit faderOnTimer();
-//}
 
 void Mixer::stop(const AudioMsgId &audio) {
 	AudioMsgId current;
@@ -1084,13 +946,13 @@ void Mixer::stop(const AudioMsgId &audio) {
 		current = audio;
 		fadedStop(type);
 		if (type == AudioMsgId::Type::Voice) {
-			emit unsuppressSong();
+			unsuppressSong();
 		} else if (type == AudioMsgId::Type::Video) {
 			track->clear();
-			emit loaderOnCancel(audio);
+			loaderOnCancel(audio);
 		}
 	}
-	if (current) emit updated(current);
+	if (current) updated(current);
 }
 
 void Mixer::stop(const AudioMsgId &audio, State state) {
@@ -1110,12 +972,12 @@ void Mixer::stop(const AudioMsgId &audio, State state) {
 		current = audio;
 		setStoppedState(track, state);
 		if (type == AudioMsgId::Type::Voice) {
-			emit unsuppressSong();
+			unsuppressSong();
 		} else if (type == AudioMsgId::Type::Video) {
 			track->clear();
 		}
 	}
-	if (current) emit updated(current);
+	if (current) updated(current);
 }
 
 void Mixer::stopAndClear() {
@@ -1130,17 +992,17 @@ void Mixer::stopAndClear() {
 		}
 	}
 	if (current_song) {
-		emit updated(current_song->state.id);
+		updated(current_song->state.id);
 	}
 	if (current_audio) {
-		emit updated(current_audio->state.id);
+		updated(current_audio->state.id);
 	}
 	{
 		QMutexLocker lock(&AudioMutex);
 		auto clearAndCancel = [this](AudioMsgId::Type type, int index) {
 			auto track = trackForType(type, index);
 			if (track->state.id) {
-				emit loaderOnCancel(track->state.id);
+				loaderOnCancel(track->state.id);
 			}
 			track->clear();
 		};
@@ -1164,17 +1026,19 @@ TrackState Mixer::currentState(AudioMsgId::Type type) {
 void Mixer::setStoppedState(Track *current, State state) {
 	current->state.state = state;
 	current->state.position = 0;
+	current->withSpeed.position = 0;
+	current->withSpeed.fineTunedPosition = 0;
 	if (current->isStreamCreated()) {
 		alSourceStop(current->stream.source);
 		alSourcef(current->stream.source, AL_GAIN, 1);
 	}
 	if (current->state.id) {
-		emit loaderOnCancel(current->state.id);
+		loaderOnCancel(current->state.id);
 	}
 }
 
 // Thread: Main. Must be locked: AudioMutex.
-void Mixer::detachTracks() {
+void Mixer::prepareToCloseDevice() {
 	for (auto i = 0; i != kTogetherLimit; ++i) {
 		trackForType(AudioMsgId::Type::Voice, i)->detach();
 		trackForType(AudioMsgId::Type::Song, i)->detach();
@@ -1215,7 +1079,7 @@ void Mixer::reattachTracks() {
 }
 
 void Mixer::setSongVolume(float64 volume) {
-	_volumeSong.storeRelease(qRound(volume * kVolumeRound));
+	_volumeSong.storeRelease(int(base::SafeRound(volume * kVolumeRound)));
 }
 
 float64 Mixer::getSongVolume() const {
@@ -1223,7 +1087,7 @@ float64 Mixer::getSongVolume() const {
 }
 
 void Mixer::setVideoVolume(float64 volume) {
-	_volumeVideo.storeRelease(qRound(volume * kVolumeRound));
+	_volumeVideo.storeRelease(int(base::SafeRound(volume * kVolumeRound)));
 }
 
 float64 Mixer::getVideoVolume() const {
@@ -1250,6 +1114,8 @@ void Fader::onTimer() {
 	QMutexLocker lock(&AudioMutex);
 	if (!mixer()) return;
 
+	constexpr auto kMediaPlayerSuppressDuration = crl::time(150);
+
 	auto volumeChangedAll = false;
 	auto volumeChangedSong = false;
 	if (_suppressAll || _suppressSongAnim) {
@@ -1261,13 +1127,13 @@ void Fader::onTimer() {
 			} else if (ms > _suppressAllEnd - kFadeDuration) {
 				if (_suppressVolumeAll.to() != 1.) _suppressVolumeAll.start(1.);
 				_suppressVolumeAll.update(1. - ((_suppressAllEnd - ms) / float64(kFadeDuration)), anim::linear);
-			} else if (ms >= _suppressAllStart + st::mediaPlayerSuppressDuration) {
+			} else if (ms >= _suppressAllStart + kMediaPlayerSuppressDuration) {
 				if (_suppressAllAnim) {
 					_suppressVolumeAll.finish();
 					_suppressAllAnim = false;
 				}
 			} else if (ms > _suppressAllStart) {
-				_suppressVolumeAll.update((ms - _suppressAllStart) / float64(st::mediaPlayerSuppressDuration), anim::linear);
+				_suppressVolumeAll.update((ms - _suppressAllStart) / float64(kMediaPlayerSuppressDuration), anim::linear);
 			}
 			auto wasVolumeMultiplierAll = VolumeMultiplierAll;
 			VolumeMultiplierAll = _suppressVolumeAll.current();
@@ -1293,16 +1159,22 @@ void Fader::onTimer() {
 		auto track = mixer()->trackForType(type, index);
 		if (IsStopped(track->state.state) || track->state.state == State::Paused || !track->isStreamCreated()) return;
 
-		auto emitSignals = updateOnePlayback(track, hasPlaying, hasFading, volumeMultiplier, suppressGainChanged);
-		if (emitSignals & EmitError) emit error(track->state.id);
-		if (emitSignals & EmitStopped) emit audioStopped(track->state.id);
-		if (emitSignals & EmitPositionUpdated) emit playPositionUpdated(track->state.id);
-		if (emitSignals & EmitNeedToPreload) emit needToPreload(track->state.id);
+		auto emitSignals = updateOnePlayback(
+			track,
+			hasPlaying,
+			hasFading,
+			volumeMultiplier * track->volume,
+			suppressGainChanged);
+		if (emitSignals & EmitError) error(track->state.id);
+		if (emitSignals & EmitStopped) audioStopped(track->state.id);
+		if (emitSignals & EmitPositionUpdated) playPositionUpdated(track->state.id);
+		if (emitSignals & EmitNeedToPreload) needToPreload(track->state.id);
 	};
 	auto suppressGainForMusic = ComputeVolume(AudioMsgId::Type::Song);
 	auto suppressGainForMusicChanged = volumeChangedSong || _volumeChangedSong;
+	auto suppressGainForVoice = ComputeVolume(AudioMsgId::Type::Voice);
 	for (auto i = 0; i != kTogetherLimit; ++i) {
-		updatePlayback(AudioMsgId::Type::Voice, i, VolumeMultiplierAll, volumeChangedAll);
+		updatePlayback(AudioMsgId::Type::Voice, i, suppressGainForVoice, suppressGainForMusicChanged);
 		updatePlayback(AudioMsgId::Type::Song, i, suppressGainForMusic, suppressGainForMusicChanged);
 	}
 	auto suppressGainForVideo = ComputeVolume(AudioMsgId::Type::Video);
@@ -1349,12 +1221,13 @@ int32 Fader::updateOnePlayback(Mixer::Track *track, bool &hasPlaying, bool &hasF
 			&& (!IsStopped(track->state.state)
 				|| IsStoppedAtEnd(track->state.state)));
 	const auto positionInBuffered = stoppedAtEnd
-		? track->bufferedLength
+		? track->withSpeed.bufferedLength
 		: alSampleOffset;
 	const auto waitingForDataOld = track->state.waitingForData;
 	track->state.waitingForData = stoppedAtEnd
 		&& (track->state.state != State::Stopping);
-	const auto fullPosition = track->bufferedPosition + positionInBuffered;
+	const auto withSpeedPosition = track->withSpeed.bufferedPosition
+		+ positionInBuffered;
 
 	auto playing = (track->state.state == State::Playing);
 	auto fading = IsFading(track->state.state);
@@ -1373,7 +1246,8 @@ int32 Fader::updateOnePlayback(Mixer::Track *track, bool &hasPlaying, bool &hasF
 			emitSignals |= EmitStopped;
 		}
 	} else if (fading && alState == AL_PLAYING) {
-		auto fadingForSamplesCount = (fullPosition - track->fadeStartPosition);
+		const auto fadingForSamplesCount = withSpeedPosition
+			- track->withSpeed.fadeStartPosition;
 		if (crl::time(1000) * fadingForSamplesCount >= kFadeDuration * track->state.frequency) {
 			fading = false;
 			alSourcef(track->stream.source, AL_GAIN, 1. * volumeMultiplier);
@@ -1410,20 +1284,22 @@ int32 Fader::updateOnePlayback(Mixer::Track *track, bool &hasPlaying, bool &hasF
 			if (errorHappened()) return EmitError;
 		}
 	}
-	if (alState == AL_PLAYING && fullPosition >= track->state.position + kCheckPlaybackPositionDelta) {
-		track->state.position = fullPosition;
+	track->withSpeed.fineTunedPosition = withSpeedPosition;
+	if (alState == AL_PLAYING && withSpeedPosition >= track->withSpeed.position + kCheckPlaybackPositionDelta) {
+		track->withSpeed.position = withSpeedPosition;
+		track->updateStatePosition();
 		emitSignals |= EmitPositionUpdated;
 	} else if (track->state.waitingForData && !waitingForDataOld) {
-		if (fullPosition > track->state.position) {
-			track->state.position = fullPosition;
+		if (withSpeedPosition > track->withSpeed.position) {
+			track->withSpeed.position = withSpeedPosition;
 		}
 		// When stopped because of insufficient data while streaming,
 		// inform the player about the last position we were at.
 		emitSignals |= EmitPositionUpdated;
 	}
 	if (playing || track->state.state == State::Starting || track->state.state == State::Resuming) {
-		if (!track->loaded && !track->loading) {
-			auto needPreload = (track->state.position + kPreloadSamples > track->bufferedPosition + track->bufferedLength);
+		if ((!track->loaded && !track->loading) || track->waitingForBuffer) {
+			auto needPreload = (track->withSpeed.position + kPreloadSeconds * track->state.frequency > track->withSpeed.bufferedPosition + track->withSpeed.bufferedLength);
 			if (needPreload) {
 				track->loading = true;
 				emitSignals |= EmitNeedToPreload;
@@ -1471,12 +1347,12 @@ void Fader::onSuppressAll(qint64 duration) {
 	onTimer();
 }
 
-void Fader::onSongVolumeChanged() {
+void Fader::songVolumeChanged() {
 	_volumeChangedSong = true;
 	onTimer();
 }
 
-void Fader::onVideoVolumeChanged() {
+void Fader::videoVolumeChanged() {
 	_volumeChangedVideo = true;
 	onTimer();
 }
@@ -1498,8 +1374,11 @@ bool audioDeviceIsConnected() {
 	if (!AudioDevice) {
 		return false;
 	}
-	auto isConnected = ALint(0);
-	alcGetIntegerv(AudioDevice, ALC_CONNECTED, 1, &isConnected);
+	// always connected in the basic OpenAL, disconnect status is an extension
+	auto isConnected = ALint(1);
+	if (alcIsExtensionPresent(nullptr, "ALC_EXT_disconnect")) {
+		alcGetIntegerv(AudioDevice, alcGetEnumValue(nullptr, "ALC_CONNECTED"), 1, &isConnected);
+	}
 	if (Audio::ContextErrorHappened()) {
 		return false;
 	}
@@ -1524,51 +1403,62 @@ void DetachFromDevice(not_null<Audio::Instance*> instance) {
 	}
 }
 
+bool DetachIfDeviceChanged(
+		not_null<Audio::Instance*> instance,
+		const Webrtc::DeviceResolvedId &nowDeviceId) {
+	QMutexLocker lock(&AudioMutex);
+	if (AudioDeviceLastUsedId == nowDeviceId) {
+		return false;
+	}
+	Audio::ClosePlaybackDevice(instance);
+	if (mixer()) {
+		mixer()->reattachIfNeeded();
+	}
+	return true;
+}
+
 } // namespace internal
 
 } // namespace Player
 
 class FFMpegAttributesReader : public AbstractFFMpegLoader {
 public:
-	FFMpegAttributesReader(const FileLocation &file, const QByteArray &data)
+	FFMpegAttributesReader(const Core::FileLocation &file, const QByteArray &data)
 	: AbstractFFMpegLoader(file, data, bytes::vector()) {
 	}
 
-	bool open(crl::time positionMs) override {
-		if (!AbstractFFMpegLoader::open(positionMs)) {
-			return false;
-		}
-
-		int res = 0;
-		char err[AV_ERROR_MAX_STRING_SIZE] = { 0 };
-
-		int videoStreamId = av_find_best_stream(fmtContext, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
-		if (videoStreamId >= 0) {
-			DEBUG_LOG(("Audio Read Error: Found video stream in file '%1', data size '%2', error %3, %4").arg(_file.name()).arg(_data.size()).arg(videoStreamId).arg(av_make_error_string(err, sizeof(err), streamId)));
+	bool open(crl::time positionMs, float64 speed = 1.) override {
+		if (!AbstractFFMpegLoader::open(positionMs, speed)) {
 			return false;
 		}
 
 		for (int32 i = 0, l = fmtContext->nb_streams; i < l; ++i) {
 			const auto stream = fmtContext->streams[i];
 			if (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) {
+				if (!_cover.isNull()) {
+					continue;
+				}
 				const auto &packet = stream->attached_pic;
 				if (packet.size) {
 					const auto coverBytes = QByteArray(
 						(const char*)packet.data,
 						packet.size);
-					auto format = QByteArray();
-					auto animated = false;
-					_cover = App::readImage(
-						coverBytes,
-						&format,
-						true,
-						&animated);
-					if (!_cover.isNull()) {
+					auto read = Images::Read({
+						.content = coverBytes,
+						.forceOpaque = true,
+					});
+					if (!read.image.isNull()) {
+						_cover = std::move(read.image);
 						_coverBytes = coverBytes;
-						_coverFormat = format;
-						break;
+						_coverFormat = read.format;
 					}
 				}
+			} else if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+				DEBUG_LOG(("Audio Read Error: Found video stream in file '%1', data size '%2', stream %3.")
+					.arg(_file.name())
+					.arg(_data.size())
+					.arg(i));
+				return false;
 			}
 		}
 
@@ -1596,6 +1486,10 @@ public:
 		//}
 	}
 
+	int sampleSize() override {
+		Unexpected("We shouldn't try to read sample size here.");
+	}
+
 	int format() override {
 		return 0;
 	}
@@ -1620,9 +1514,9 @@ public:
 		return _coverFormat;
 	}
 
-	ReadResult readMore(QByteArray &result, int64 &samplesAdded) override {
+	ReadResult readMore() override {
 		DEBUG_LOG(("Audio Read Error: should not call this"));
-		return ReadResult::Error;
+		return ReadError::Other;
 	}
 
 	~FFMpegAttributesReader() {
@@ -1638,37 +1532,40 @@ private:
 
 namespace Player {
 
-FileMediaInformation::Song PrepareForSending(const QString &fname, const QByteArray &data) {
-	auto result = FileMediaInformation::Song();
-	FFMpegAttributesReader reader(FileLocation(fname), data);
+Ui::PreparedFileInformation PrepareForSending(
+		const QString &fname,
+		const QByteArray &data) {
+	auto result = Ui::PreparedFileInformation::Song();
+	FFMpegAttributesReader reader(Core::FileLocation(fname), data);
 	const auto positionMs = crl::time(0);
-	if (reader.open(positionMs) && reader.samplesCount() > 0) {
-		result.duration = reader.samplesCount() / reader.samplesFrequency();
+	if (reader.open(positionMs) && reader.duration() > 0) {
+		result.duration = reader.duration();
 		result.title = reader.title();
 		result.performer = reader.performer();
 		result.cover = reader.cover();
 	}
-	return result;
+	return { .media = result };
 }
 
 } // namespace Player
 
 class FFMpegWaveformCounter : public FFMpegLoader {
 public:
-	FFMpegWaveformCounter(const FileLocation &file, const QByteArray &data) : FFMpegLoader(file, data, bytes::vector()) {
+	FFMpegWaveformCounter(const Core::FileLocation &file, const QByteArray &data) : FFMpegLoader(file, data, bytes::vector()) {
 	}
 
-	bool open(crl::time positionMs) override {
-		if (!FFMpegLoader::open(positionMs)) {
+	bool open(crl::time positionMs, float64 speed = 1.) override {
+		if (!FFMpegLoader::open(positionMs, speed)) {
 			return false;
 		}
 
 		QByteArray buffer;
 		buffer.reserve(kWaveformCounterBufferSize);
-		int64 countbytes = sampleSize() * samplesCount();
+		const auto samplesCount = samplesFrequency() * duration() / 1000;
+		int64 countbytes = sampleSize() * samplesCount;
 		int64 processed = 0;
 		int64 sumbytes = 0;
-		if (samplesCount() < Media::Player::kWaveformSamplesCount) {
+		if (samplesCount < Media::Player::kWaveformSamplesCount) {
 			return false;
 		}
 
@@ -1687,24 +1584,23 @@ public:
 			}
 		};
 		while (processed < countbytes) {
-			buffer.resize(0);
-
-			int64 samples = 0;
-			auto res = readMore(buffer, samples);
-			if (res == ReadResult::Error || res == ReadResult::EndOfFile) {
+			const auto result = readMore();
+			Assert(result != ReadError::Wait); // Not a child loader.
+			if (result == ReadError::Retry) {
+				continue;
+			} else if (result == ReadError::Other
+				|| result == ReadError::EndOfFile) {
 				break;
 			}
-			if (buffer.isEmpty()) {
-				continue;
-			}
-
-			auto sampleBytes = bytes::make_span(buffer);
+			Assert(v::is<bytes::const_span>(result));
+			const auto sampleBytes = v::get<bytes::const_span>(result);
+			Assert(!sampleBytes.empty());
 			if (fmt == AL_FORMAT_MONO8 || fmt == AL_FORMAT_STEREO8) {
 				Media::Audio::IterateSamples<uchar>(sampleBytes, callback);
 			} else if (fmt == AL_FORMAT_MONO16 || fmt == AL_FORMAT_STEREO16) {
 				Media::Audio::IterateSamples<int16>(sampleBytes, callback);
 			}
-			processed += sampleSize() * samples;
+			processed += sampleBytes.size();
 		}
 		if (sumbytes > 0 && peaks.size() < Media::Player::kWaveformSamplesCount) {
 			peaks.push_back(peak);
@@ -1715,11 +1611,13 @@ public:
 		}
 
 		auto sum = std::accumulate(peaks.cbegin(), peaks.cend(), 0LL);
-		peak = qMax(int32(sum * 1.8 / peaks.size()), 2500);
+		peak = std::max(int32(sum * 1.8 / peaks.size()), 2500);
 
 		result.resize(peaks.size());
 		for (int32 i = 0, l = peaks.size(); i != l; ++i) {
-			result[i] = char(qMin(31U, uint32(qMin(peaks.at(i), peak)) * 31 / peak));
+			result[i] = char(std::min(
+				31U,
+				uint32(std::min(peaks.at(i), peak)) * 31 / peak));
 		}
 
 		return true;
@@ -1740,7 +1638,7 @@ private:
 } // namespace Media
 
 VoiceWaveform audioCountWaveform(
-		const FileLocation &file,
+		const Core::FileLocation &file,
 		const QByteArray &data) {
 	Media::FFMpegWaveformCounter counter(file, data);
 	const auto positionMs = crl::time(0);

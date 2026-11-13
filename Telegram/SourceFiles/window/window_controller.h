@@ -8,78 +8,203 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "mainwindow.h"
-#include "ui/layers/layer_widget.h"
+#include "window/window_adaptive.h"
+#include "window/window_separate_id.h"
 
 namespace Main {
 class Account;
+class Session;
 } // namespace Main
+
+namespace Ui {
+class Show;
+} // namespace Ui
+
+namespace Ui::Toast {
+struct Config;
+} // namespace Ui::Toast
+
+namespace Media::View {
+struct OpenRequest;
+} // namespace Media::View
+
+namespace Media::Player {
+class FloatDelegate;
+} // namespace Media::Player
+
+namespace Settings {
+struct HighlightArgs;
+} // namespace Settings
 
 namespace Window {
 
-class Controller final {
+class Columns;
+
+class Controller final : public base::has_weak_ptr {
 public:
-	explicit Controller(not_null<Main::Account*> account);
+	Controller();
+	Controller(SeparateId id, MsgId showAtMsgId);
 	~Controller();
 
 	Controller(const Controller &other) = delete;
 	Controller &operator=(const Controller &other) = delete;
 
-	Main::Account &account() const {
-		return *_account;
-	}
-	not_null<::MainWindow*> widget() {
+	void showAccount(not_null<Main::Account*> account);
+	[[nodiscard]] SeparateId id() const;
+	[[nodiscard]] bool isPrimary() const;
+
+	[[nodiscard]] not_null<::MainWindow*> widget() {
 		return &_widget;
 	}
-	SessionController *sessionController() const {
+	[[nodiscard]] Main::Account &account() const;
+	[[nodiscard]] Main::Session *maybeSession() const;
+	[[nodiscard]] SessionController *sessionController() const {
 		return _sessionController.get();
 	}
+	[[nodiscard]] auto sessionControllerValue() const
+		-> rpl::producer<SessionController*>;
+	[[nodiscard]] bool locked() const;
 
+	[[nodiscard]] Adaptive &adaptive() const;
+	[[nodiscard]] Columns &columns() const;
+
+	void firstShow();
 	void finishFirstShow();
 
 	void setupPasscodeLock();
 	void clearPasscodeLock();
-	void setupIntro();
-	void setupMain();
+	void setupSetupEmailLock();
+	void clearSetupEmailLock();
+
+	void showLogoutConfirmation();
+	void showPasscodeClearFailed(Fn<bool()> retry);
 
 	void showSettings();
 
-	template <typename BoxType>
-	QPointer<BoxType> show(
-			object_ptr<BoxType> content,
-			Ui::LayerOptions options = Ui::LayerOption::KeepOther,
-			anim::type animated = anim::type::normal) {
-		const auto result = QPointer<BoxType>(content.data());
-		showBox(std::move(content), options, animated);
-		return result;
-	}
-	void showToast(const QString &text);
+	[[nodiscard]] int verticalShadowTop() const;
 
-	void showRightColumn(object_ptr<TWidget> widget);
-	void sideBarChanged();
+	void showToast(Ui::Toast::Config &&config);
+	void showToast(TextWithEntities &&text, crl::time duration = 0);
+	void showToast(const QString &text, crl::time duration = 0);
 
-	void activate();
-	void reActivate();
-	void updateIsActive(int timeout);
-	void minimize();
-	void close();
+	void showRightColumn(object_ptr<Ui::RpWidget> widget);
 
-	QPoint getPointForCallPanelCenter() const;
-
-	void tempDirDelete(int task);
-
-private:
 	void showBox(
 		object_ptr<Ui::BoxContent> content,
 		Ui::LayerOptions options,
 		anim::type animated);
+	void showLayer(
+		std::unique_ptr<Ui::LayerWidget> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated = anim::type::normal);
+
+	void hideLayer(anim::type animated = anim::type::normal);
+	void hideSettingsAndLayer(anim::type animated = anim::type::normal);
+	bool closeLayerByBackButton();
+	[[nodiscard]] bool isLayerShown() const;
+	[[nodiscard]] rpl::producer<bool> layerShownValue() const;
+	[[nodiscard]] rpl::producer<bool> boxShownValue() const;
+
+	template <
+		typename BoxType,
+		typename = std::enable_if_t<
+			std::is_base_of_v<Ui::BoxContent, BoxType>>>
+		base::weak_qptr<BoxType> show(
+			object_ptr<BoxType> content,
+			Ui::LayerOptions options = Ui::LayerOption::KeepOther,
+			anim::type animated = anim::type()) {
+		auto result = base::weak_qptr<BoxType>(content.data());
+		showBox(std::move(content), options, animated);
+		return result;
+	}
+
+	void activate();
+	void updateIsActiveFocus();
+	void updateIsActiveBlur();
+	void updateIsActive();
+	void minimize();
+	void close();
+
+	void preventOrInvoke(Fn<void()> &&callback);
+
+	void invokeForSessionController(
+		not_null<Main::Account*> account,
+		PeerData *singlePeer,
+		Fn<void(not_null<SessionController*>)> &&callback);
+
+	void openInMediaView(Media::View::OpenRequest &&request);
+	[[nodiscard]] auto openInMediaViewRequests() const
+	-> rpl::producer<Media::View::OpenRequest>;
+
+	[[nodiscard]] QPoint getPointForCallPanelCenter() const;
+
+	using FloatDelegate = Media::Player::FloatDelegate;
+	void setDefaultFloatPlayerDelegate(
+		not_null<Media::Player::FloatDelegate*> delegate);
+	void replaceFloatPlayerDelegate(
+		not_null<Media::Player::FloatDelegate*> replacement);
+	void restoreFloatPlayerDelegate(
+		not_null<Media::Player::FloatDelegate*> replacement);
+	[[nodiscard]] FloatDelegate *floatPlayerDelegate() const;
+	[[nodiscard]] auto floatPlayerDelegateValue() const
+		-> rpl::producer<FloatDelegate*>;
+
+	[[nodiscard]] std::shared_ptr<Ui::Show> uiShow();
+
+	void setHighlightControlId(const QString &id);
+	[[nodiscard]] QString highlightControlId() const;
+	[[nodiscard]] bool takeHighlightControlId(const QString &id);
+	void checkHighlightControl(
+		const QString &id,
+		QWidget *widget,
+		Settings::HighlightArgs &&args);
+	void checkHighlightControl(const QString &id, QWidget *widget);
+
+	[[nodiscard]] rpl::lifetime &lifetime();
+
+private:
+	struct CreateArgs {
+		SeparateId id;
+	};
+	explicit Controller(CreateArgs &&args);
+
+	void setupIntro(Main::Account *accountBeforeIntro, QPixmap oldContentCache);
+	void setupMain(MsgId singlePeerShowAtMsgId, QPixmap oldContentCache);
+
+	void showAccount(
+		not_null<Main::Account*> account,
+		MsgId singlePeerShowAtMsgId);
+	void setupSideBar();
+	void sideBarChanged();
+
 	void checkThemeEditor();
+	void checkLockByTerms();
+	void showTermsDecline();
+	void showTermsDelete();
 
-	not_null<Main::Account*> _account;
+	SeparateId _id;
+	base::Timer _isActiveTimer;
 	::MainWindow _widget;
+	const std::unique_ptr<Adaptive> _adaptive;
+	const std::unique_ptr<Columns> _columns;
 	std::unique_ptr<SessionController> _sessionController;
+	rpl::variable<SessionController*> _sessionControllerValue;
+	base::weak_qptr<Ui::BoxContent> _termsBox;
+	base::weak_qptr<Ui::BoxContent> _passcodeClearFailedBox;
 
+	rpl::event_stream<Media::View::OpenRequest> _openInMediaViewRequests;
+
+	FloatDelegate *_defaultFloatPlayerDelegate = nullptr;
+	FloatDelegate *_replacementFloatPlayerDelegate = nullptr;
+	rpl::variable<FloatDelegate*> _floatPlayerDelegate = nullptr;
+
+	QString _highlightControlId;
+
+	rpl::lifetime _accountLifetime;
 	rpl::lifetime _lifetime;
 
 };
+
+[[nodiscard]] QString LogoutConfirmationText(Main::Account *account);
 
 } // namespace Window

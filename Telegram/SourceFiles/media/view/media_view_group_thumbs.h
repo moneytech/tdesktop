@@ -15,6 +15,14 @@ class SharedMediaWithLastSlice;
 class UserPhotosSlice;
 struct WebPageCollage;
 
+namespace Data {
+struct Invoice;
+} // namespace Data
+
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace Media {
 namespace View {
 
@@ -27,27 +35,50 @@ public:
 			return index < other.index;
 		}
 	};
+	struct InstantViewKey {
+		int index = 0;
+
+		inline bool operator<(const InstantViewKey &other) const {
+			return index < other.index;
+		}
+	};
 	struct CollageSlice {
 		FullMsgId context;
 		not_null<const WebPageCollage*> data;
 
 		int size() const;
 	};
-	using Key = base::variant<PhotoId, FullMsgId, CollageKey>;
+	using InstantViewItems = std::vector<HistoryMessageMediaForInstantView::Item>;
+	struct InstantViewSlice {
+		FullMsgId context;
+		not_null<const InstantViewItems*> data;
+
+		int size() const;
+	};
+	using Key = std::variant<PhotoId, FullMsgId, CollageKey, InstantViewKey>;
 
 	static void Refresh(
+		not_null<Main::Session*> session,
 		std::unique_ptr<GroupThumbs> &instance,
 		const SharedMediaWithLastSlice &slice,
 		int index,
 		int availableWidth);
 	static void Refresh(
+		not_null<Main::Session*> session,
 		std::unique_ptr<GroupThumbs> &instance,
 		const UserPhotosSlice &slice,
 		int index,
 		int availableWidth);
 	static void Refresh(
+		not_null<Main::Session*> session,
 		std::unique_ptr<GroupThumbs> &instance,
 		const CollageSlice &slice,
+		int index,
+		int availableWidth);
+	static void Refresh(
+		not_null<Main::Session*> session,
+		std::unique_ptr<GroupThumbs> &instance,
+		const InstantViewSlice &slice,
 		int index,
 		int availableWidth);
 	void clear();
@@ -58,7 +89,7 @@ public:
 	bool hidden() const;
 	void checkForAnimationStart();
 
-	void paint(Painter &p, int x, int y, int outerWidth);
+	void paint(QPainter &p, int x, int y, int outerWidth);
 	ClickHandlerPtr getState(QPoint point) const;
 
 	rpl::producer<QRect> updateRequests() const {
@@ -73,12 +104,13 @@ public:
 		return _lifetime;
 	}
 
-	using Context = base::optional_variant<
+	using Context = std::variant<
+		v::null_t,
 		PeerId,
 		MessageGroupId,
 		FullMsgId>;
 
-	GroupThumbs(Context context);
+	GroupThumbs(not_null<Main::Session*> session, Context context);
 	~GroupThumbs();
 
 private:
@@ -86,6 +118,7 @@ private:
 
 	template <typename Slice>
 	static void RefreshFromSlice(
+		not_null<Main::Session*> session,
 		std::unique_ptr<GroupThumbs> &instance,
 		const Slice &slice,
 		int index,
@@ -93,6 +126,7 @@ private:
 	template <typename Slice>
 	void fillItems(const Slice &slice, int from, int index, int till);
 	void updateContext(Context context);
+	void updateInstantViewItems(const InstantViewItems *items);
 	void markCacheStale();
 	not_null<Thumb*> validateCacheEntry(Key key);
 	std::unique_ptr<Thumb> createThumb(Key key);
@@ -100,7 +134,19 @@ private:
 		Key key,
 		const WebPageCollage &collage,
 		int index);
-	std::unique_ptr<Thumb> createThumb(Key key, Image *image);
+	std::unique_ptr<Thumb> createThumb(
+		Key key,
+		const InstantViewItems &items,
+		int index);
+	std::unique_ptr<Thumb> createThumb(
+		Key key,
+		const Data::Invoice &invoice,
+		int index);
+	std::unique_ptr<Thumb> createThumb(Key key, not_null<PhotoData*> photo);
+	std::unique_ptr<Thumb> createThumb(
+		Key key,
+		not_null<DocumentData*> document);
+	std::unique_ptr<Thumb> createThumb(Key key, std::nullptr_t);
 
 	void update();
 	void countUpdatedRect();
@@ -111,12 +157,14 @@ private:
 	void animatePreviouslyAlive(const std::vector<not_null<Thumb*>> &old);
 	void startDelayedAnimation();
 
+	const not_null<Main::Session*> _session;
 	Context _context;
 	bool _waitingForAnimationStart = true;
 	Ui::Animations::Simple _animation;
 	std::vector<not_null<Thumb*>> _items;
 	std::vector<not_null<Thumb*>> _dying;
 	base::flat_map<Key, std::unique_ptr<Thumb>> _cache;
+	const InstantViewItems *_instantViewItems = nullptr;
 	int _width = 0;
 	QRect _updatedRect;
 

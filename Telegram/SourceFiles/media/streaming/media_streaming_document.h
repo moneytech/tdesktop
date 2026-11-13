@@ -14,16 +14,27 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 class DocumentData;
 
-namespace Media {
-namespace Streaming {
+namespace Media::Streaming {
 
 class Instance;
+class Loader;
+
+struct QualityDescriptor {
+	uint32 sizeInBytes = 0;
+	uint32 height = 0;
+};
 
 class Document {
 public:
 	Document(
 		not_null<DocumentData*> document,
-		std::shared_ptr<Reader> reader);
+		std::shared_ptr<Reader> reader,
+		std::vector<QualityDescriptor> otherQualities = {});
+	Document(
+		not_null<PhotoData*> photo,
+		std::shared_ptr<Reader> reader,
+		std::vector<QualityDescriptor> otherQualities = {});
+	explicit Document(std::unique_ptr<Loader> loader);
 
 	void play(const PlaybackOptions &options);
 	void saveFrameToCover();
@@ -31,13 +42,21 @@ public:
 	[[nodiscard]] Player &player();
 	[[nodiscard]] const Player &player() const;
 	[[nodiscard]] const Information &info() const;
-	[[nodiscard]] not_null<DocumentData*> data() const;
 
 	[[nodiscard]] bool waitingShown() const;
 	[[nodiscard]] float64 waitingOpacity() const;
 	[[nodiscard]] Ui::RadialState waitingState() const;
 
+	void setOtherQualities(std::vector<QualityDescriptor> value);
+	[[nodiscard]] rpl::producer<int> switchQualityRequests() const;
+
 private:
+	Document(
+		std::shared_ptr<Reader> reader,
+		DocumentData *document,
+		PhotoData *photo,
+		std::vector<QualityDescriptor> otherQualities);
+
 	friend class Instance;
 
 	void registerInstance(not_null<Instance*> instance);
@@ -45,6 +64,9 @@ private:
 	void refreshPlayerPriority();
 
 	void waitingCallback();
+	void checkForQualitySwitch(SpeedEstimate estimate);
+	bool checkSwitchToHigherQuality();
+	bool checkSwitchToLowerQuality();
 
 	void handleUpdate(Update &&update);
 	void handleError(Error &&error);
@@ -53,20 +75,24 @@ private:
 	void waitingChange(bool waiting);
 
 	void validateGoodThumbnail();
+	void resubscribe();
 
+	DocumentData *_document = nullptr;
+	PhotoData *_photo = nullptr;
 	Player _player;
 	Information _info;
 
-	bool _waiting = false;
+	rpl::lifetime _subscription;
+
 	mutable Ui::InfiniteRadialAnimation _radial;
 	Ui::Animations::Simple _fading;
 	base::Timer _timer;
 	base::flat_set<not_null<Instance*>> _instances;
-
-	not_null<DocumentData*> _document;
+	std::vector<QualityDescriptor> _otherQualities;
+	rpl::event_stream<int> _switchQualityRequests;
+	SpeedEstimate _lastSpeedEstimate;
+	bool _waiting = false;
 
 };
 
-
-} // namespace Streaming
-} // namespace Media
+} // namespace Media::Streaming

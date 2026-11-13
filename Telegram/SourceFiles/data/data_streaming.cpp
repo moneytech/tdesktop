@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_streaming.h"
 
+#include "data/data_photo.h"
 #include "data/data_document.h"
 #include "data/data_session.h"
 #include "data/data_file_origin.h"
@@ -19,16 +20,16 @@ namespace {
 
 constexpr auto kKeepAliveTimeout = 5 * crl::time(1000);
 
-template <typename Object>
+template <typename Object, typename Data>
 bool PruneDestroyedAndSet(
 		base::flat_map<
-			not_null<DocumentData*>,
+			not_null<Data*>,
 			std::weak_ptr<Object>> &objects,
-		not_null<DocumentData*> document,
+		not_null<Data*> data,
 		const std::shared_ptr<Object> &object) {
 	auto result = false;
 	for (auto i = begin(objects); i != end(objects);) {
-		if (i->first == document) {
+		if (i->first == data) {
 			(i++)->second = object;
 			result = true;
 		} else if (i->second.lock() != nullptr) {
@@ -40,6 +41,43 @@ bool PruneDestroyedAndSet(
 	return result;
 }
 
+[[nodiscard]] auto LookupOtherQualities(
+	DocumentData *original,
+	not_null<DocumentData*> quality,
+	HistoryItem *context)
+-> std::vector<Media::Streaming::QualityDescriptor> {
+	if (!original || !context) {
+		return {};
+	}
+	auto qualities = original->resolveQualities(context);
+	if (qualities.empty()) {
+		return {};
+	}
+	auto result = std::vector<Media::Streaming::QualityDescriptor>();
+	result.reserve(qualities.size());
+	for (const auto &video : qualities) {
+		if (video != quality) {
+			if (const auto height = video->resolveVideoQuality()) {
+				result.push_back({
+					.sizeInBytes = uint32(video->size),
+					.height = uint32(height),
+				});
+			}
+		}
+	}
+	return result;
+}
+
+[[nodiscard]] auto LookupOtherQualities(
+	DocumentData *original,
+	not_null<PhotoData*> quality,
+	HistoryItem *context)
+-> std::vector<Media::Streaming::QualityDescriptor> {
+	Expects(!original);
+
+	return {};
+}
+
 } // namespace
 
 Streaming::Streaming(not_null<Session*> owner)
@@ -49,54 +87,72 @@ Streaming::Streaming(not_null<Session*> owner)
 
 Streaming::~Streaming() = default;
 
-std::shared_ptr<Streaming::Reader> Streaming::sharedReader(
-		not_null<DocumentData*> document,
+template <typename Data>
+[[nodiscard]] std::shared_ptr<Streaming::Reader> Streaming::sharedReader(
+		base::flat_map<not_null<Data*>, std::weak_ptr<Reader>> &readers,
+		not_null<Data*> data,
 		FileOrigin origin,
 		bool forceRemoteLoader) {
-	const auto i = _readers.find(document);
-	if (i != end(_readers)) {
+	const auto i = readers.find(data);
+	if (i != end(readers)) {
 		if (auto result = i->second.lock()) {
 			if (!forceRemoteLoader || result->isRemoteLoader()) {
 				return result;
 			}
 		}
 	}
-	auto loader = document->createStreamingLoader(origin, forceRemoteLoader);
+	auto loader = data->createStreamingLoader(origin, forceRemoteLoader);
 	if (!loader) {
 		return nullptr;
 	}
 	auto result = std::make_shared<Reader>(
-		&_owner->cacheBigFile(),
-		std::move(loader));
-	if (!PruneDestroyedAndSet(_readers, document, result)) {
-		_readers.emplace_or_assign(document, result);
+		std::move(loader),
+		&_owner->cacheBigFile());
+	if (!PruneDestroyedAndSet(readers, data, result)) {
+		readers.emplace_or_assign(data, result);
 	}
 	return result;
+
 }
 
-std::shared_ptr<Streaming::Document> Streaming::sharedDocument(
-		not_null<DocumentData*> document,
+template <typename Data>
+[[nodiscard]] std::shared_ptr<Streaming::Document> Streaming::sharedDocument(
+		base::flat_map<not_null<Data*>, std::weak_ptr<Document>> &documents,
+		base::flat_map<not_null<Data*>, std::weak_ptr<Reader>> &readers,
+		not_null<Data*> data,
+		DocumentData *original,
+		HistoryItem *context,
 		FileOrigin origin) {
-	const auto i = _documents.find(document);
-	if (i != end(_documents)) {
+	auto otherQualities = LookupOtherQualities(original, data, context);
+	const auto i = documents.find(data);
+	if (i != end(documents)) {
 		if (auto result = i->second.lock()) {
+			if (!otherQualities.empty()) {
+				result->setOtherQualities(std::move(otherQualities));
+			}
 			return result;
 		}
 	}
-	auto reader = sharedReader(document, origin);
+	auto reader = sharedReader(readers, data, origin);
 	if (!reader) {
 		return nullptr;
 	}
-	auto result = std::make_shared<Document>(document, std::move(reader));
-	if (!PruneDestroyedAndSet(_documents, document, result)) {
-		_documents.emplace_or_assign(document, result);
+	auto result = std::make_shared<Document>(
+		data,
+		std::move(reader),
+		std::move(otherQualities));
+	if (!PruneDestroyedAndSet(documents, data, result)) {
+		documents.emplace_or_assign(data, result);
 	}
 	return result;
 }
 
-void Streaming::keepAlive(not_null<DocumentData*> document) {
-	const auto i = _documents.find(document);
-	if (i == end(_documents)) {
+template <typename Data>
+void Streaming::keepAlive(
+		base::flat_map<not_null<Data*>, std::weak_ptr<Document>> &documents,
+		not_null<Data*> data) {
+	const auto i = documents.find(data);
+	if (i == end(documents)) {
 		return;
 	}
 	auto shared = i->second.lock();
@@ -113,6 +169,66 @@ void Streaming::keepAlive(not_null<DocumentData*> document) {
 	if (!_keptAliveTimer.isActive()) {
 		_keptAliveTimer.callOnce(kKeepAliveTimeout);
 	}
+}
+
+std::shared_ptr<Streaming::Reader> Streaming::sharedReader(
+		not_null<DocumentData*> document,
+		FileOrigin origin,
+		bool forceRemoteLoader) {
+	return sharedReader(_fileReaders, document, origin, forceRemoteLoader);
+}
+
+std::shared_ptr<Streaming::Document> Streaming::sharedDocument(
+		not_null<DocumentData*> document,
+		FileOrigin origin) {
+	return sharedDocument(
+		_fileDocuments,
+		_fileReaders,
+		document,
+		nullptr,
+		nullptr,
+		origin);
+}
+
+std::shared_ptr<Streaming::Document> Streaming::sharedDocument(
+		not_null<DocumentData*> quality,
+		not_null<DocumentData*> original,
+		HistoryItem *context,
+		FileOrigin origin) {
+	return sharedDocument(
+		_fileDocuments,
+		_fileReaders,
+		quality,
+		original,
+		context,
+		origin);
+}
+
+std::shared_ptr<Streaming::Reader> Streaming::sharedReader(
+		not_null<PhotoData*> photo,
+		FileOrigin origin,
+		bool forceRemoteLoader) {
+	return sharedReader(_photoReaders, photo, origin, forceRemoteLoader);
+}
+
+std::shared_ptr<Streaming::Document> Streaming::sharedDocument(
+		not_null<PhotoData*> photo,
+		FileOrigin origin) {
+	return sharedDocument(
+		_photoDocuments,
+		_photoReaders,
+		photo,
+		nullptr,
+		nullptr,
+		origin);
+}
+
+void Streaming::keepAlive(not_null<DocumentData*> document) {
+	keepAlive(_fileDocuments, document);
+}
+
+void Streaming::keepAlive(not_null<PhotoData*> photo) {
+	keepAlive(_photoDocuments, photo);
 }
 
 void Streaming::clearKeptAlive() {

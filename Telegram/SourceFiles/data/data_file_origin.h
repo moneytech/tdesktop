@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 namespace Data {
 
 using FileOriginMessage = FullMsgId;
+using FileOriginStory = FullStoryId;
 
 struct FileOriginUserPhoto {
 	FileOriginUserPhoto(UserId userId, PhotoId photoId)
@@ -26,6 +27,18 @@ struct FileOriginUserPhoto {
 	inline bool operator<(const FileOriginUserPhoto &other) const {
 		return std::tie(userId, photoId)
 			< std::tie(other.userId, other.photoId);
+	}
+};
+
+struct FileOriginFullUser {
+	FileOriginFullUser(UserId userId)
+	: userId(userId) {
+	}
+
+	UserId userId = 0;
+
+	inline bool operator<(const FileOriginFullUser &other) const {
+		return userId < other.userId;
 	}
 };
 
@@ -61,13 +74,21 @@ struct FileOriginSavedGifs {
 };
 
 struct FileOriginWallpaper {
-	FileOriginWallpaper(uint64 paperId, uint64 accessHash)
+	FileOriginWallpaper(
+		uint64 paperId,
+		uint64 accessHash,
+		UserId ownerId,
+		const QString &slug)
 	: paperId(paperId)
-	, accessHash(accessHash) {
+	, accessHash(accessHash)
+	, ownerId(ownerId)
+	, slug(slug) {
 	}
 
 	uint64 paperId = 0;
 	uint64 accessHash = 0;
+	UserId ownerId = 0;
+	QString slug;
 
 	inline bool operator<(const FileOriginWallpaper &other) const {
 		return paperId < other.paperId;
@@ -88,20 +109,63 @@ struct FileOriginTheme {
 	}
 };
 
+struct FileOriginRingtones {
+	inline bool operator<(const FileOriginRingtones &) const {
+		return false;
+	}
+};
+
+struct FileOriginPremiumPreviews {
+	inline bool operator<(const FileOriginPremiumPreviews &) const {
+		return false;
+	}
+};
+
+struct FileOriginWebPage {
+	QString url;
+
+	inline bool operator<(const FileOriginWebPage &other) const {
+		return url < other.url;
+	}
+};
+
+struct FileOriginCloudDraft {
+	PeerId peerId = 0;
+	MsgId topicRootId = 0;
+	PeerId monoforumPeerId = 0;
+
+	inline bool operator<(const FileOriginCloudDraft &other) const {
+		return std::tie(peerId, topicRootId, monoforumPeerId)
+			< std::tie(
+				other.peerId,
+				other.topicRootId,
+				other.monoforumPeerId);
+	}
+};
+
 struct FileOrigin {
-	using Variant = base::optional_variant<
+	using Variant = std::variant<
+		v::null_t,
 		FileOriginMessage,
 		FileOriginUserPhoto,
+		FileOriginFullUser,
 		FileOriginPeerPhoto,
 		FileOriginStickerSet,
 		FileOriginSavedGifs,
 		FileOriginWallpaper,
-		FileOriginTheme>;
+		FileOriginTheme,
+		FileOriginRingtones,
+		FileOriginPremiumPreviews,
+		FileOriginWebPage,
+		FileOriginCloudDraft,
+		FileOriginStory>;
 
 	FileOrigin() = default;
 	FileOrigin(FileOriginMessage data) : data(data) {
 	}
 	FileOrigin(FileOriginUserPhoto data) : data(data) {
+	}
+	FileOrigin(FileOriginFullUser data) : data(data) {
 	}
 	FileOrigin(FileOriginPeerPhoto data) : data(data) {
 	}
@@ -113,9 +177,19 @@ struct FileOrigin {
 	}
 	FileOrigin(FileOriginTheme data) : data(data) {
 	}
+	FileOrigin(FileOriginRingtones data) : data(data) {
+	}
+	FileOrigin(FileOriginPremiumPreviews data) : data(data) {
+	}
+	FileOrigin(FileOriginWebPage data) : data(data) {
+	}
+	FileOrigin(FileOriginCloudDraft data) : data(data) {
+	}
+	FileOrigin(FileOriginStory data) : data(data) {
+	}
 
 	explicit operator bool() const {
-		return data.has_value();
+		return !v::is_null(data);
 	}
 	inline bool operator<(const FileOrigin &other) const {
 		return data < other.data;
@@ -140,7 +214,7 @@ inline bool operator<(PhotoFileLocationId a, PhotoFileLocationId b) {
 	return a.id < b.id;
 }
 
-using FileLocationId = base::variant<
+using FileLocationId = std::variant<
 	DocumentFileLocationId,
 	PhotoFileLocationId>;
 
@@ -149,14 +223,28 @@ struct UpdatedFileReferences {
 };
 
 UpdatedFileReferences GetFileReferences(const MTPmessages_Messages &data);
+UpdatedFileReferences GetFileReferences(const MTPmessages_PeerDialogs &data);
 UpdatedFileReferences GetFileReferences(const MTPphotos_Photos &data);
+UpdatedFileReferences GetFileReferences(const MTPusers_UserFull &data);
+UpdatedFileReferences GetFileReferences(const MTPmessages_ChatFull &data);
+UpdatedFileReferences GetFileReferences(const MTPmessages_ForumTopics &data);
 UpdatedFileReferences GetFileReferences(
 	const MTPmessages_RecentStickers &data);
 UpdatedFileReferences GetFileReferences(
 	const MTPmessages_FavedStickers &data);
 UpdatedFileReferences GetFileReferences(const MTPmessages_StickerSet &data);
 UpdatedFileReferences GetFileReferences(const MTPmessages_SavedGifs &data);
+UpdatedFileReferences GetFileReferences(const MTPmessages_SavedDialogs &data);
 UpdatedFileReferences GetFileReferences(const MTPWallPaper &data);
 UpdatedFileReferences GetFileReferences(const MTPTheme &data);
+UpdatedFileReferences GetFileReferences(
+	const MTPaccount_SavedRingtones &data);
+UpdatedFileReferences GetFileReferences(const MTPhelp_PremiumPromo &data);
+UpdatedFileReferences GetFileReferences(const MTPmessages_WebPage &data);
+UpdatedFileReferences GetFileReferences(const MTPstories_Stories &data);
+UpdatedFileReferences GetFileReferences(const MTPusers_SavedMusic &data);
+
+// Admin Log Event.
+UpdatedFileReferences GetFileReferences(const MTPMessageMedia &data);
 
 } // namespace Data

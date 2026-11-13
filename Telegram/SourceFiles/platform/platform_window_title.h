@@ -7,41 +7,38 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "window/window_title.h"
 #include "window/themes/window_theme_preview.h"
-#include "base/object_ptr.h"
+#include "base/platform/base_platform_info.h"
 
 namespace Platform {
 
-object_ptr<Window::TitleWidget> CreateTitleWidget(QWidget *parent);
+inline bool NativeTitleRequiresShadow() {
+	return Platform::IsWindows();
+}
+
+inline bool WindowTitleAlignsLeft() {
+	return IsMac26_0OrGreater();
+}
 
 int PreviewTitleHeight();
-void PreviewWindowFramePaint(QImage &preview, const style::palette &palette, QRect body, int outerWidth);
+void PreviewWindowFramePaint(QImage &preview, const style::palette &palette, QColor bg, QRect body, int outerWidth);
 
 } // namespace Platform
 
 // Platform dependent implementations.
 
-#ifdef Q_OS_MAC
-#include "platform/mac/window_title_mac.h"
-#elif defined Q_OS_WIN // Q_OS_MAC
-#include "platform/win/window_title_win.h"
-#elif defined Q_OS_WINRT || defined Q_OS_LINUX // Q_OS_MAC || Q_OS_WIN
+#ifndef Q_OS_MAC
 
 namespace Platform {
-
-inline object_ptr<Window::TitleWidget> CreateTitleWidget(QWidget *parent) {
-	return { nullptr };
-}
 
 inline int PreviewTitleHeight() {
 	return Window::Theme::DefaultPreviewTitleHeight();
 }
 
-inline void PreviewWindowFramePaint(QImage &preview, const style::palette &palette, QRect body, int outerWidth) {
+inline void PreviewWindowFramePaint(QImage &preview, const style::palette &palette, QColor bg, QRect body, int outerWidth) {
 	return Window::Theme::DefaultPreviewWindowFramePaint(preview, palette, body, outerWidth);
 }
 
 } // namespace Platform
 
-#endif // Q_OS_MAC || Q_OS_WIN || Q_OS_WINRT || Q_OS_LINUX
+#endif // !Q_OS_MAC

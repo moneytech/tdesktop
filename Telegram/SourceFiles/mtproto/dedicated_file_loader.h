@@ -9,31 +9,37 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "mtproto/mtp_instance.h"
 
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace MTP {
 
-class WeakInstance : private QObject, private base::Subscriber {
+class WeakInstance final : private QObject {
 public:
-	WeakInstance(QPointer<Instance> instance);
+	explicit WeakInstance(base::weak_ptr<Main::Session> session);
 
-	template <typename T>
+	template <typename Request>
 	void send(
-		const T &request,
-		Fn<void(const typename T::ResponseType &result)> done,
-		Fn<void(const RPCError &error)> fail,
+		const Request &request,
+		Fn<void(const typename Request::ResponseType &result)> done,
+		Fn<void(const Error &error)> fail,
 		ShiftedDcId dcId = 0);
 
-	bool valid() const;
-	QPointer<Instance> instance() const;
+	[[nodiscard]] base::weak_ptr<Main::Session> session() const;
+	[[nodiscard]] bool valid() const;
+	[[nodiscard]] Instance *instance() const;
 
 	~WeakInstance();
 
 private:
 	void die();
 	bool removeRequest(mtpRequestId requestId);
-	void reportUnavailable(Fn<void(const RPCError &error)> callback);
+	void reportUnavailable(Fn<void(const Error &error)> callback);
 
-	QPointer<Instance> _instance;
-	std::map<mtpRequestId, Fn<void(const RPCError &)>> _requests;
+	base::weak_ptr<Main::Session> _session;
+	Instance *_instance = nullptr;
+	std::map<mtpRequestId, Fn<void(const Error &)>> _requests;
 	rpl::lifetime _lifetime;
 
 };
@@ -46,8 +52,9 @@ public:
 	static constexpr auto kMaxFileSize = 256 * 1024 * 1024;
 
 	struct Progress {
-		int64 already;
-		int64 size;
+		int64 already = 0;
+		int64 size = 0;
+		bool percent = false;
 
 		inline bool operator<(const Progress &other) const {
 			return (already < other.already)
@@ -60,10 +67,10 @@ public:
 
 	void start();
 	void wipeFolder();
-	void wipeOutput();
 
-	int alreadySize() const;
-	int totalSize() const;
+	int64 alreadySize() const;
+	int64 totalSize() const;
+	bool preferPercent() const;
 
 	rpl::producer<Progress> progress() const;
 	rpl::producer<QString> ready() const;
@@ -75,23 +82,24 @@ public:
 
 protected:
 	void threadSafeFailed();
+	void threadSafeProgress(Progress progress);
+	void threadSafeReady();
 
 	// Single threaded.
-	void writeChunk(bytes::const_span data, int totalSize);
+	void writeChunk(bytes::const_span data, int64 totalSize);
 
 private:
 	virtual void startLoading() = 0;
 
 	bool validateOutput();
-	void threadSafeProgress(Progress progress);
-	void threadSafeReady();
 
 	QString _filepath;
 	int _chunkSize = 0;
 
 	QFile _output;
-	int _alreadySize = 0;
-	int _totalSize = 0;
+	int64 _alreadySize = 0;
+	int64 _totalSize = 0;
+	bool _preferPercent = false;
 	mutable QMutex _sizesMutex;
 	rpl::event_stream<Progress> _progress;
 	rpl::event_stream<QString> _ready;
@@ -105,36 +113,42 @@ class DedicatedLoader : public AbstractDedicatedLoader {
 public:
 	struct Location {
 		QString username;
+
+		// When channelId is set the channel is used directly with the
+		// cached accessHash instead of resolving username.
+		uint64 channelId = 0;
+		uint64 accessHash = 0;
+
 		int32 postId = 0;
 	};
 	struct File {
 		QString name;
-		int32 size = 0;
+		int64 size = 0;
 		DcId dcId = 0;
 		MTPInputFileLocation location;
 	};
 
 	DedicatedLoader(
-		QPointer<Instance> instance,
+		base::weak_ptr<Main::Session> session,
 		const QString &folder,
 		const File &file);
 
 private:
 	struct Request {
-		int offset = 0;
+		int64 offset = 0;
 		QByteArray bytes;
 	};
 	void startLoading() override;
 	void sendRequest();
 	void gotPart(int offset, const MTPupload_File &result);
-	Fn<void(const RPCError &)> failHandler();
+	Fn<void(const Error &)> failHandler();
 
 	static constexpr auto kRequestsCount = 2;
 	static constexpr auto kNextRequestDelay = crl::time(20);
 
 	std::deque<Request> _requests;
-	int32 _size = 0;
-	int _offset = 0;
+	int64 _size = 0;
+	int64 _offset = 0;
 	DcId _dcId = 0;
 	MTPInputFileLocation _location;
 	WeakInstance _mtp;
@@ -147,8 +161,11 @@ void ResolveChannel(
 	Fn<void(const MTPInputChannel &channel)> done,
 	Fn<void()> fail);
 
+// With a non-zero messageId only the message with that exact id counts,
+// the server may answer a getMessages request with a different message.
 std::optional<MTPMessage> GetMessagesElement(
-	const MTPmessages_Messages &list);
+	const MTPmessages_Messages &list,
+	int messageId = 0);
 
 void StartDedicatedLoader(
 	not_null<MTP::WeakInstance*> mtp,
@@ -156,39 +173,44 @@ void StartDedicatedLoader(
 	const QString &folder,
 	Fn<void(std::unique_ptr<DedicatedLoader>)> ready);
 
-template <typename T>
+template <typename Request>
 void WeakInstance::send(
-		const T &request,
-		Fn<void(const typename T::ResponseType &result)> done,
-		Fn<void(const RPCError &error)> fail,
+		const Request &request,
+		Fn<void(const typename Request::ResponseType &result)> done,
+		Fn<void(const Error &error)> fail,
 		MTP::ShiftedDcId dcId) {
-	using Response = typename T::ResponseType;
+	using Result = typename Request::ResponseType;
 	if (!valid()) {
 		reportUnavailable(fail);
 		return;
 	}
 	const auto onDone = crl::guard((QObject*)this, [=](
-			const Response &result,
-			mtpRequestId requestId) {
-		if (removeRequest(requestId)) {
-			done(result);
-		}
-	});
-	const auto onFail = crl::guard((QObject*)this, [=](
-			const RPCError &error,
-			mtpRequestId requestId) {
-		if (MTP::isDefaultHandledError(error)) {
+			const Response &response) {
+		auto result = Result();
+		auto from = response.reply.constData();
+		if (!result.read(from, from + response.reply.size())) {
 			return false;
 		}
-		if (removeRequest(requestId)) {
+		if (removeRequest(response.requestId)) {
+			done(result);
+		}
+		return true;
+	});
+	const auto onFail = crl::guard((QObject*)this, [=](
+			const Error &error,
+			const Response &response) {
+		if (MTP::IsDefaultHandledError(error)) {
+			return false;
+		}
+		if (removeRequest(response.requestId)) {
 			fail(error);
 		}
 		return true;
 	});
 	const auto requestId = _instance->send(
 		request,
-		rpcDone(onDone),
-		rpcFail(onFail),
+		std::move(onDone),
+		std::move(onFail),
 		dcId);
 	_requests.emplace(requestId, fail);
 }

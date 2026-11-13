@@ -4,15 +4,10 @@
 # For license and copyright information please follow this link:
 # https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
-option(TDESKTOP_USE_FONTCONFIG_FALLBACK "Use custom fonts.conf (Linux only)." OFF)
-option(TDESKTOP_FORCE_GTK_FILE_DIALOG "Force using GTK file dialog (Linux only)." OFF)
-option(TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME "Disable automatic 'tg://' URL scheme handler registration." ${DESKTOP_APP_USE_PACKAGED})
-option(TDESKTOP_DISABLE_NETWORK_PROXY "Disable all code for working through Socks5 or MTProxy." OFF)
-option(TDESKTOP_USE_PACKAGED_TGVOIP "Find libtgvoip using CMake instead of bundled one." ${DESKTOP_APP_USE_PACKAGED})
 option(TDESKTOP_API_TEST "Use test API credentials." OFF)
+option(TDESKTOP_BUILD_UPDATE_TESTS "Build the focused update verification test." OFF)
 set(TDESKTOP_API_ID "0" CACHE STRING "Provide 'api_id' for the Telegram API access.")
 set(TDESKTOP_API_HASH "" CACHE STRING "Provide 'api_hash' for the Telegram API access.")
-set(TDESKTOP_LAUNCHER_BASENAME "" CACHE STRING "Desktop file base name (Linux only).")
 
 if (TDESKTOP_API_TEST)
     set(TDESKTOP_API_ID 17349)
@@ -42,53 +37,88 @@ if (TDESKTOP_API_ID STREQUAL "0" OR TDESKTOP_API_HASH STREQUAL "")
     " ")
 endif()
 
-if (NOT DESKTOP_APP_USE_PACKAGED)
-    set(TDESKTOP_FORCE_GTK_FILE_DIALOG ON)
-endif()
-
-if (NOT TDESKTOP_FORCE_GTK_FILE_DIALOG)
-    set(TDESKTOP_DISABLE_GTK_INTEGRATION ON)
-endif()
-
-if (DESKTOP_APP_DISABLE_SPELLCHECK)
-    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_SPELLCHECK)
-else()
-    target_link_libraries(Telegram PRIVATE desktop-app::lib_spellcheck)
-endif()
-
 if (DESKTOP_APP_DISABLE_AUTOUPDATE)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE)
+endif()
+
+if (DESKTOP_APP_DISABLE_CRASH_REPORTS)
+    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_CRASH_REPORTS)
+endif()
+
+if (DESKTOP_APP_USE_PACKAGED)
+    target_compile_definitions(Telegram PRIVATE TDESKTOP_USE_PACKAGED)
 endif()
 
 if (DESKTOP_APP_SPECIAL_TARGET)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_ALLOW_CLOSED_ALPHA)
 endif()
 
-if (TDESKTOP_USE_FONTCONFIG_FALLBACK)
-    target_compile_definitions(Telegram PRIVATE TDESKTOP_USE_FONTCONFIG_FALLBACK)
+option(TDESKTOP_RELEASE_TEST_HARNESS "Compile the -testagent test harness into Release builds, for local measurements only." OFF)
+if (TDESKTOP_RELEASE_TEST_HARNESS)
+    if (DESKTOP_APP_ENABLE_LTO)
+        message(FATAL_ERROR "TDESKTOP_RELEASE_TEST_HARNESS can't be combined with DESKTOP_APP_ENABLE_LTO, the official release builds' setting: the test harness must never ship.")
+    endif()
+    target_compile_definitions(Telegram PRIVATE $<$<CONFIG:Release>:TDESKTOP_RELEASE_TEST_HARNESS>)
 endif()
 
-if (TDESKTOP_FORCE_GTK_FILE_DIALOG)
-    target_compile_definitions(Telegram PRIVATE TDESKTOP_FORCE_GTK_FILE_DIALOG)
+set(TDESKTOP_L10N_CAPTURE "" CACHE PATH "Path to an l10n-tdesktop checkout, compiles its localization capture into the -testagent harness.")
+
+option(DESKTOP_APP_DISABLE_SWIFT6 "Disable local on-device translation (build without Swift 6 on macOS)." OFF)
+if (DESKTOP_APP_DISABLE_SWIFT6)
+    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_SWIFT6)
 endif()
 
-if (TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME)
-    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME)
+set(TDESKTOP_UPDATE_CHANNEL "stable" CACHE STRING "Compile-time update channel (stable, beta, canary-public, canary-private).")
+set(TDESKTOP_CANARY_COUNTER "0" CACHE STRING "Per-channel canary build counter, required positive for canary channels.")
+set(TDESKTOP_CANARY_COMMIT "" CACHE STRING "Short commit hash shown in the canary version string.")
+set(TDESKTOP_CANARY_PUBLIC_CHANNEL "" CACHE STRING "Public canary channel username (canary-public builds).")
+set(TDESKTOP_CANARY_PRIVATE_CHANNEL_ID "0" CACHE STRING "Private canary channel numeric id (canary-private builds).")
+set(TDESKTOP_CANARY_METADATA_MSG_ID "0" CACHE STRING "Fixed metadata message id in the canary channel.")
+
+# CI passes these straight from repository variables, an unset variable
+# arrives as an empty string and must mean "not configured", not an
+# empty macro body.
+foreach(numeric_option
+    TDESKTOP_CANARY_COUNTER
+    TDESKTOP_CANARY_PRIVATE_CHANNEL_ID
+    TDESKTOP_CANARY_METADATA_MSG_ID)
+    if (${numeric_option} STREQUAL "")
+        set(${numeric_option} 0)
+    elseif (NOT ${numeric_option} MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "${numeric_option} must be a non-negative integer, got '${${numeric_option}}'.")
+    endif()
+endforeach()
+
+if (TDESKTOP_UPDATE_CHANNEL STREQUAL "stable")
+    set(tdesktop_update_channel_value 0)
+elseif (TDESKTOP_UPDATE_CHANNEL STREQUAL "beta")
+    set(tdesktop_update_channel_value 1)
+elseif (TDESKTOP_UPDATE_CHANNEL STREQUAL "canary-public")
+    set(tdesktop_update_channel_value 2)
+elseif (TDESKTOP_UPDATE_CHANNEL STREQUAL "canary-private")
+    set(tdesktop_update_channel_value 3)
+else()
+    message(FATAL_ERROR "Bad TDESKTOP_UPDATE_CHANNEL '${TDESKTOP_UPDATE_CHANNEL}'")
 endif()
 
-if (TDESKTOP_DISABLE_NETWORK_PROXY)
-    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_NETWORK_PROXY)
+if (tdesktop_update_channel_value GREATER 1)
+    if (TDESKTOP_CANARY_COUNTER LESS_EQUAL 0)
+        message(FATAL_ERROR "Canary channels require a positive TDESKTOP_CANARY_COUNTER.")
+    endif()
+elseif (NOT TDESKTOP_CANARY_COUNTER EQUAL 0)
+    message(FATAL_ERROR "TDESKTOP_CANARY_COUNTER requires a canary TDESKTOP_UPDATE_CHANNEL.")
 endif()
 
-if (TDESKTOP_DISABLE_GTK_INTEGRATION)
-    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_GTK_INTEGRATION)
+target_compile_definitions(Telegram
+PRIVATE
+    TDESKTOP_UPDATE_CHANNEL=${tdesktop_update_channel_value}
+    TDESKTOP_CANARY_COUNTER=${TDESKTOP_CANARY_COUNTER}
+    TDESKTOP_CANARY_PRIVATE_CHANNEL_ID=${TDESKTOP_CANARY_PRIVATE_CHANNEL_ID}
+    TDESKTOP_CANARY_METADATA_MSG_ID=${TDESKTOP_CANARY_METADATA_MSG_ID}
+)
+if (NOT TDESKTOP_CANARY_COMMIT STREQUAL "")
+    target_compile_definitions(Telegram PRIVATE TDESKTOP_CANARY_COMMIT=${TDESKTOP_CANARY_COMMIT})
 endif()
-
-if (DESKTOP_APP_DISABLE_DBUS_INTEGRATION)
-    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_DBUS_INTEGRATION)
+if (NOT TDESKTOP_CANARY_PUBLIC_CHANNEL STREQUAL "")
+    target_compile_definitions(Telegram PRIVATE TDESKTOP_CANARY_PUBLIC_CHANNEL=${TDESKTOP_CANARY_PUBLIC_CHANNEL})
 endif()
-
-if (NOT TDESKTOP_LAUNCHER_BASENAME)
-    set(TDESKTOP_LAUNCHER_BASENAME "telegramdesktop")
-endif()
-target_compile_definitions(Telegram PRIVATE TDESKTOP_LAUNCHER_BASENAME=${TDESKTOP_LAUNCHER_BASENAME})

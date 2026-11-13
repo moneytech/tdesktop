@@ -12,25 +12,22 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace Dialogs {
 
-void ShowSearchFromBox(
+object_ptr<Ui::BoxContent> SearchFromBox(
 	not_null<PeerData*> peer,
-	Fn<void(not_null<UserData*>)> callback,
+	Fn<void(not_null<PeerData*>)> callback,
 	Fn<void()> closedCallback);
 
 class SearchFromController : public AddSpecialBoxController {
 public:
 	SearchFromController(
 		not_null<PeerData*> peer,
-		Fn<void(not_null<UserData*>)> callback);
+		Fn<void(not_null<PeerData*>)> callback);
 
 	void prepare() override;
 	void rowClicked(not_null<PeerListRow*> row) override;
 
-protected:
-	std::unique_ptr<PeerListRow> createRow(not_null<UserData*> user) const;
-
 private:
-	Fn<void(not_null<UserData*>)> _callback;
+	Fn<void(not_null<PeerData*>)> _callback;
 
 };
 

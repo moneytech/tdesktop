@@ -8,7 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "ui/rp_widget.h"
-#include "boxes/abstract_box.h"
+#include "ui/layers/box_content.h"
 #include "history/admin_log/history_admin_log_item.h"
 #include "history/view/history_view_element.h"
 #include "history/history.h"
@@ -17,9 +17,14 @@ namespace Main {
 class Session;
 } // namespace Main
 
+namespace Window {
+class SessionController;
+} // namespace Window
+
 namespace Ui {
 class ScrollArea;
 class InputField;
+class ChatStyle;
 } // namespace Ui
 
 namespace Support {
@@ -31,7 +36,7 @@ struct Contact {
 	QString lastName;
 };
 
-class Autocomplete : public Ui::RpWidget {
+class Autocomplete final : public Ui::RpWidget {
 public:
 	Autocomplete(QWidget *parent, not_null<Main::Session*> session);
 
@@ -65,6 +70,7 @@ class ConfirmContactBox
 public:
 	ConfirmContactBox(
 		QWidget*,
+		not_null<Window::SessionController*> controller,
 		not_null<History*> history,
 		const Contact &data,
 		Fn<void(Qt::KeyboardModifiers)> submit);
@@ -78,6 +84,7 @@ protected:
 	void keyPressEvent(QKeyEvent *e) override;
 
 private:
+	std::unique_ptr<Ui::ChatStyle> _chatStyle;
 	AdminLog::OwnedItem _comment;
 	AdminLog::OwnedItem _contact;
 	Fn<void(Qt::KeyboardModifiers)> _submit;

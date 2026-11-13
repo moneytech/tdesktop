@@ -11,19 +11,21 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/info_controller.h"
 #include "ui/widgets/scroll_area.h"
 #include "ui/ui_utility.h"
-#include "styles/style_info.h"
+#include "data/data_peer.h"
+#include "data/data_channel.h"
+#include "lang/lang_keys.h"
 
 namespace Info {
 namespace Members {
 
 Memento::Memento(not_null<Controller*> controller)
 : Memento(
-	controller->peerId(),
+	controller->peer(),
 	controller->migratedPeerId()) {
 }
 
-Memento::Memento(PeerId peerId, PeerId migratedPeerId)
-: ContentMemento(peerId, migratedPeerId) {
+Memento::Memento(not_null<PeerData*> peer, PeerId migratedPeerId)
+: ContentMemento(peer, nullptr, nullptr, migratedPeerId) {
 }
 
 Section Memento::section() const {
@@ -79,8 +81,17 @@ void Widget::setInternalState(
 	restoreState(memento);
 }
 
-std::unique_ptr<ContentMemento> Widget::doCreateMemento() {
-	auto result = std::make_unique<Memento>(controller());
+rpl::producer<QString> Widget::title() {
+	if (const auto channel = controller()->key().peer()->asChannel()) {
+		return channel->isMegagroup()
+			? tr::lng_profile_participants_section()
+			: tr::lng_profile_subscribers_section();
+	}
+	return tr::lng_profile_participants_section();
+}
+
+std::shared_ptr<ContentMemento> Widget::doCreateMemento() {
+	auto result = std::make_shared<Memento>(controller());
 	saveState(result.get());
 	return result;
 }
@@ -92,7 +103,6 @@ void Widget::saveState(not_null<Memento*> memento) {
 
 void Widget::restoreState(not_null<Memento*> memento) {
 	_inner->restoreState(memento->state());
-	auto scrollTop = memento->scrollTop();
 	scrollTopRestore(memento->scrollTop());
 }
 

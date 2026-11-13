@@ -7,87 +7,209 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include <rpl/event_stream.h>
 #include <rpl/filter.h>
 #include <rpl/variable.h>
-#include "main/main_settings.h"
 #include "base/timer.h"
 
 class ApiWrap;
 
+namespace Api {
+class Updates;
+class SendProgressManager;
+} // namespace Api
+
 namespace MTP {
 class Instance;
+struct ConfigFields;
 } // namespace MTP
 
 namespace Support {
 class Helper;
 class Templates;
+class FastButtonsBots;
 } // namespace Support
 
 namespace Data {
 class Session;
+class Changes;
+class GiftAuctions;
+class RecentInlineBots;
+class RecentPeers;
+class RecentMoneyRecipients;
+class RecentSharedMediaGifts;
+class ScheduledMessages;
+class WelcomeMessages;
+class EphemeralMessages;
+class SponsoredMessages;
+class TopPeers;
+class Factchecks;
+class LocationPickers;
+class Credits;
+class PromoSuggestions;
+class Passkeys;
 } // namespace Data
+
+namespace Settings {
+class FaqSuggestions;
+class RecentSearches;
+} // namespace Settings
+
+namespace HistoryView::Reactions {
+class CachedIconFactory;
+} // namespace HistoryView::Reactions
 
 namespace Storage {
 class DownloadManagerMtproto;
 class Uploader;
 class Facade;
+class Account;
+class Domain;
 } // namespace Storage
 
 namespace Window {
-namespace Notifications {
-class System;
-} // namespace Notifications
+class SessionController;
+struct TermsLock;
 } // namespace Window
-
-namespace Calls {
-class Instance;
-} // namespace Calls
 
 namespace Stickers {
 class EmojiPack;
 class DicePacks;
+class GiftBoxPack;
 } // namespace Stickers;
 
-namespace Core {
-class Changelogs;
-} // namespace Core
+namespace InlineBots {
+class AttachWebView;
+} // namespace InlineBots
+
+namespace Ui {
+struct ColorIndicesCompressed;
+} // namespace Ui
+
+namespace Wallet {
+class Session;
+} // namespace Wallet
 
 namespace Main {
 
 class Account;
+class AppConfig;
+class Domain;
+class SessionSettings;
+class SendAsPeers;
 
-class Session final
-	: public base::has_weak_ptr
-	, private base::Subscriber {
+struct FreezeInfo {
+	TimeId since = 0;
+	TimeId until = 0;
+	QString appealUrl;
+
+	explicit operator bool() const {
+		return since != 0;
+	}
+	friend inline bool operator==(
+		const FreezeInfo &,
+		const FreezeInfo &) = default;
+};
+
+class Session final : public base::has_weak_ptr {
 public:
 	Session(
-		not_null<Main::Account*> account,
+		not_null<Account*> account,
 		const MTPUser &user,
-		Settings &&other);
+		std::unique_ptr<SessionSettings> settings);
 	~Session();
 
 	Session(const Session &other) = delete;
 	Session &operator=(const Session &other) = delete;
 
-	[[nodiscard]] static bool Exists();
+	[[nodiscard]] Account &account() const;
+	[[nodiscard]] Storage::Account &local() const;
+	[[nodiscard]] Domain &domain() const;
+	[[nodiscard]] Storage::Domain &domainLocal() const;
 
-	[[nodiscard]] Main::Account &account() const;
+	[[nodiscard]] AppConfig &appConfig() const;
+	[[nodiscard]] bool messagePrimaryEditedDate() const {
+		return _messagePrimaryEditedDate;
+	}
 
+	[[nodiscard]] bool premium() const;
+	[[nodiscard]] bool premiumPossible() const;
+	[[nodiscard]] rpl::producer<bool> premiumPossibleValue() const;
+	[[nodiscard]] bool premiumBadgesShown() const;
+	[[nodiscard]] bool premiumCanBuy() const;
+
+	[[nodiscard]] bool isTestMode() const;
+	[[nodiscard]] uint64 uniqueId() const; // userId() with TestDC shift.
 	[[nodiscard]] UserId userId() const;
 	[[nodiscard]] PeerId userPeerId() const;
 	[[nodiscard]] not_null<UserData*> user() const {
 		return _user;
 	}
-	bool validateSelf(const MTPUser &user);
+	bool validateSelf(UserId id);
 
-	[[nodiscard]] Storage::DownloadManagerMtproto &downloader() {
+	[[nodiscard]] Data::Changes &changes() const {
+		return *_changes;
+	}
+	[[nodiscard]] Data::RecentPeers &recentPeers() const {
+		return *_recentPeers;
+	}
+	[[nodiscard]] Data::RecentMoneyRecipients &recentMoneyRecipients() const {
+		return *_recentMoneyRecipients;
+	}
+	[[nodiscard]] Data::RecentSharedMediaGifts &recentSharedGifts() const {
+		return *_recentSharedGifts;
+	}
+	[[nodiscard]] Data::GiftAuctions &giftAuctions() const {
+		return *_giftAuctions;
+	}
+	[[nodiscard]] Data::SponsoredMessages &sponsoredMessages() const {
+		return *_sponsoredMessages;
+	}
+	[[nodiscard]] Data::ScheduledMessages &scheduledMessages() const {
+		return *_scheduledMessages;
+	}
+	[[nodiscard]] Data::WelcomeMessages &welcomeMessages() const {
+		return *_welcomeMessages;
+	}
+	[[nodiscard]] Data::EphemeralMessages &ephemeralMessages() const {
+		return *_ephemeralMessages;
+	}
+	[[nodiscard]] Data::TopPeers &topPeers() const {
+		return *_topPeers;
+	}
+	[[nodiscard]] Data::TopPeers &topBotApps() const {
+		return *_topBotApps;
+	}
+	[[nodiscard]] Data::TopPeers &topGuestChatBots() const {
+		return *_topGuestChatBots;
+	}
+	[[nodiscard]] Data::RecentInlineBots &recentInlineBots() const {
+		return *_recentInlineBots;
+	}
+	[[nodiscard]] Data::Factchecks &factchecks() const {
+		return *_factchecks;
+	}
+	[[nodiscard]] Data::LocationPickers &locationPickers() const {
+		return *_locationPickers;
+	}
+	[[nodiscard]] Data::Credits &credits() const {
+		return *_credits;
+	}
+	[[nodiscard]] Wallet::Session &wallet() const {
+		return *_wallet;
+	}
+	[[nodiscard]] Api::Updates &updates() const {
+		return *_updates;
+	}
+	[[nodiscard]] Api::SendProgressManager &sendProgressManager() const {
+		return *_sendProgressManager;
+	}
+	[[nodiscard]] Storage::DownloadManagerMtproto &downloader() const {
 		return *_downloader;
 	}
-	[[nodiscard]] Storage::Uploader &uploader() {
+	[[nodiscard]] Storage::Uploader &uploader() const {
 		return *_uploader;
 	}
-	[[nodiscard]] Storage::Facade &storage() {
+	[[nodiscard]] Storage::Facade &storage() const {
 		return *_storage;
 	}
 	[[nodiscard]] Stickers::EmojiPack &emojiStickersPack() const {
@@ -96,82 +218,173 @@ public:
 	[[nodiscard]] Stickers::DicePacks &diceStickersPacks() const {
 		return *_diceStickersPacks;
 	}
-
-	[[nodiscard]] base::Observable<void> &downloaderTaskFinished();
-
-	[[nodiscard]] Window::Notifications::System &notifications() {
-		return *_notifications;
+	[[nodiscard]] Stickers::GiftBoxPack &giftBoxStickersPacks() const {
+		return *_giftBoxStickersPacks;
 	}
-
-	[[nodiscard]] Data::Session &data() {
+	[[nodiscard]] Data::Session &data() const {
 		return *_data;
 	}
-	[[nodiscard]] Settings &settings() {
-		return _settings;
+	[[nodiscard]] SessionSettings &settings() const {
+		return *_settings;
 	}
+	[[nodiscard]] SendAsPeers &sendAsPeers() const {
+		return *_sendAsPeers;
+	}
+	[[nodiscard]] InlineBots::AttachWebView &attachWebView() const {
+		return *_attachWebView;
+	}
+	[[nodiscard]] Data::PromoSuggestions &promoSuggestions() const {
+		return *_promoSuggestions;
+	}
+	[[nodiscard]] Data::Passkeys &passkeys() const {
+		return *_passkeys;
+	}
+	[[nodiscard]] Settings::FaqSuggestions &faqSuggestions() const {
+		return *_faqSuggestions;
+	}
+	[[nodiscard]] Settings::RecentSearches &recentSettingsSearches() const {
+		return *_recentSettingsSearches;
+	}
+	[[nodiscard]] auto cachedReactionIconFactory() const
+	-> HistoryView::Reactions::CachedIconFactory & {
+		return *_cachedReactionIconFactory;
+	}
+
+	void saveSettings();
 	void saveSettingsDelayed(crl::time delay = kDefaultSaveDelay);
 	void saveSettingsNowIfNeeded();
 
-	[[nodiscard]] not_null<MTP::Instance*> mtp();
+	void addWindow(not_null<Window::SessionController*> controller);
+	[[nodiscard]] auto windows() const
+		-> const base::flat_set<not_null<Window::SessionController*>> &;
+	[[nodiscard]] rpl::producer<> windowAdded() const;
+	[[nodiscard]] Window::SessionController *tryResolveWindow(
+		PeerData *forPeer = nullptr) const;
+
+	// Shortcuts.
+	void notifyDownloaderTaskFinished();
+	[[nodiscard]] rpl::producer<> downloaderTaskFinished() const;
+	[[nodiscard]] MTP::DcId mainDcId() const;
+	[[nodiscard]] MTP::Instance &mtp() const;
+	[[nodiscard]] const MTP::ConfigFields &serverConfig() const;
 	[[nodiscard]] ApiWrap &api() {
 		return *_api;
 	}
 
-	[[nodiscard]] Calls::Instance &calls() {
-		return *_calls;
-	}
-
-	void checkAutoLock();
-	void checkAutoLockIn(crl::time time);
-	void localPasscodeChanged();
+	// Terms lock.
+	void lockByTerms(const Window::TermsLock &data);
+	void unlockTerms();
 	void termsDeleteNow();
+	[[nodiscard]] std::optional<Window::TermsLock> termsLocked() const;
+	rpl::producer<bool> termsLockChanges() const;
+	rpl::producer<bool> termsLockValue() const;
+
+	[[nodiscard]] QString createInternalLink(const QString &query) const;
+	[[nodiscard]] QString createInternalLinkFull(const QString &query) const;
+	[[nodiscard]] TextWithEntities createInternalLink(
+		const TextWithEntities &query) const;
+	[[nodiscard]] TextWithEntities createInternalLinkFull(
+		TextWithEntities query) const;
+
+	void setTmpPassword(const QByteArray &password, TimeId validUntil);
+	void dropTmpPassword(const QByteArray &password);
+	[[nodiscard]] QByteArray validTmpPassword() const;
+
+	// Can be called only right before ~Session.
+	void finishLogout();
+
+	// Uploads cancel with confirmation.
+	[[nodiscard]] bool uploadsInProgress() const;
+	void uploadsStopWithConfirmation(Fn<void()> done);
+	void uploadsStop();
 
 	[[nodiscard]] rpl::lifetime &lifetime() {
 		return _lifetime;
 	}
 
-	base::Observable<DocumentData*> documentUpdated;
-	base::Observable<std::pair<not_null<HistoryItem*>, MsgId>> messageIdChanging;
+	[[nodiscard]] bool supportMode() const;
+	[[nodiscard]] Support::Helper &supportHelper() const;
+	[[nodiscard]] Support::Templates &supportTemplates() const;
+	[[nodiscard]] Support::FastButtonsBots &fastButtonsBots() const;
 
-	bool supportMode() const;
-	Support::Helper &supportHelper() const;
-	Support::Templates &supportTemplates() const;
+	[[nodiscard]] FreezeInfo frozen() const;
+	[[nodiscard]] rpl::producer<FreezeInfo> frozenValue() const;
+
+	[[nodiscard]] auto colorIndicesValue()
+		-> rpl::producer<Ui::ColorIndicesCompressed>;
 
 private:
 	static constexpr auto kDefaultSaveDelay = crl::time(1000);
 
-	const not_null<Main::Account*> _account;
+	void appConfigRefreshed();
 
-	Settings _settings;
-	base::Timer _saveSettingsTimer;
+	const UserId _userId;
+	const not_null<Account*> _account;
 
-	crl::time _shouldLockAt = 0;
-	base::Timer _autoLockTimer;
-
+	const std::unique_ptr<SessionSettings> _settings;
+	const std::unique_ptr<Data::Changes> _changes;
 	const std::unique_ptr<ApiWrap> _api;
-	const std::unique_ptr<Calls::Instance> _calls;
+	const std::unique_ptr<Api::Updates> _updates;
+	const std::unique_ptr<Api::SendProgressManager> _sendProgressManager;
 	const std::unique_ptr<Storage::DownloadManagerMtproto> _downloader;
 	const std::unique_ptr<Storage::Uploader> _uploader;
 	const std::unique_ptr<Storage::Facade> _storage;
-	const std::unique_ptr<Window::Notifications::System> _notifications;
 
-	// _data depends on _downloader / _uploader / _notifications.
+	// _data depends on _downloader / _uploader.
 	const std::unique_ptr<Data::Session> _data;
 	const not_null<UserData*> _user;
 
 	// _emojiStickersPack depends on _data.
 	const std::unique_ptr<Stickers::EmojiPack> _emojiStickersPack;
 	const std::unique_ptr<Stickers::DicePacks> _diceStickersPacks;
+	const std::unique_ptr<Stickers::GiftBoxPack> _giftBoxStickersPacks;
+	const std::unique_ptr<SendAsPeers> _sendAsPeers;
+	const std::unique_ptr<InlineBots::AttachWebView> _attachWebView;
+	const std::unique_ptr<Data::RecentPeers> _recentPeers;
+	const std::unique_ptr<Data::RecentMoneyRecipients> _recentMoneyRecipients;
+	const std::unique_ptr<Data::RecentSharedMediaGifts> _recentSharedGifts;
+	const std::unique_ptr<Data::GiftAuctions> _giftAuctions;
+	const std::unique_ptr<Data::ScheduledMessages> _scheduledMessages;
+	const std::unique_ptr<Data::WelcomeMessages> _welcomeMessages;
+	const std::unique_ptr<Data::EphemeralMessages> _ephemeralMessages;
+	const std::unique_ptr<Data::SponsoredMessages> _sponsoredMessages;
+	const std::unique_ptr<Data::TopPeers> _topPeers;
+	const std::unique_ptr<Data::TopPeers> _topBotApps;
+	const std::unique_ptr<Data::TopPeers> _topGuestChatBots;
+	const std::unique_ptr<Data::RecentInlineBots> _recentInlineBots;
+	const std::unique_ptr<Data::Factchecks> _factchecks;
+	const std::unique_ptr<Data::LocationPickers> _locationPickers;
+	const std::unique_ptr<Data::Credits> _credits;
+	const std::unique_ptr<Wallet::Session> _wallet;
+	const std::unique_ptr<Data::PromoSuggestions> _promoSuggestions;
+	const std::unique_ptr<Data::Passkeys> _passkeys;
+	const std::unique_ptr<Settings::FaqSuggestions> _faqSuggestions;
+	const std::unique_ptr<Settings::RecentSearches> _recentSettingsSearches;
 
-	// _changelogs depends on _data, subscribes on chats loading event.
-	const std::unique_ptr<Core::Changelogs> _changelogs;
+	using ReactionIconFactory = HistoryView::Reactions::CachedIconFactory;
+	const std::unique_ptr<ReactionIconFactory> _cachedReactionIconFactory;
 
 	const std::unique_ptr<Support::Helper> _supportHelper;
+	const std::unique_ptr<Support::FastButtonsBots> _fastButtonsBots;
+
+	std::shared_ptr<QImage> _selfUserpicView;
+	rpl::variable<bool> _premiumPossible = false;
+	bool _messagePrimaryEditedDate = false;
+
+	rpl::event_stream<bool> _termsLockChanges;
+	std::unique_ptr<Window::TermsLock> _termsLock;
+
+	base::flat_set<not_null<Window::SessionController*>> _windows;
+	rpl::event_stream<> _windowAdded;
+	base::Timer _saveSettingsTimer;
+
+	rpl::variable<FreezeInfo> _frozen;
+
+	QByteArray _tmpPassword;
+	TimeId _tmpPasswordValidUntil = 0;
 
 	rpl::lifetime _lifetime;
 
 };
 
 } // namespace Main
-
-Main::Session &Auth();
